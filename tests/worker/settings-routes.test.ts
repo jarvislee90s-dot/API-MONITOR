@@ -18,8 +18,9 @@ describe("provider settings migration", () => {
     expect(sql).toContain("create unique index if not exists provider_accounts_user_id_idx");
     expect(sql).toContain("provider_preferences_active_account_same_user_fk");
     expect(sql).toContain("provider_account_credentials_account_same_user_fk");
+    expect(sql).toContain("duplicate_provider_account_labels");
     expect(sql).toContain("create index if not exists provider_preferences_user_order_idx");
-    expect(sql).toContain("create index if not exists provider_accounts_user_provider_label_idx");
+    expect(sql).toContain("create unique index if not exists provider_accounts_user_provider_label_idx");
     expect(sql).toContain("alter table public.provider_preferences enable row level security");
     expect(sql).toContain("alter table public.provider_account_credentials enable row level security");
     expect(sql).toContain("create policy provider_preferences_select_own");
@@ -27,6 +28,7 @@ describe("provider settings migration", () => {
     expect(sql).toContain("create policy provider_preferences_update_own");
     expect(sql).toContain("create policy provider_preferences_delete_own");
     expect(sql).toContain("revoke all on public.provider_account_credentials from anon, authenticated");
+    expect(sql).toContain("grant select, insert, update, delete on public.provider_preferences to service_role");
     expect(sql).toContain(
       "grant select, insert, update, delete on public.provider_account_credentials to service_role",
     );
@@ -199,6 +201,43 @@ describe("settings routes", () => {
     });
   });
 
+  it("upserts provider preferences in batches", async () => {
+    const fetchCalls: { url: URL; body: unknown }[] = [];
+    const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = new URL(input.toString());
+      const bodyText = init?.body ? String(init.body) : "";
+      fetchCalls.push({ url, body: bodyText ? JSON.parse(bodyText) : null });
+      if (url.pathname.endsWith("/provider_preferences")) {
+        return Response.json([{}]);
+      }
+      return new Response("not found", { status: 404 });
+    };
+
+    const response = await handleSettingsRequest(
+      new Request("https://api-monitor.local/api/settings/providers", {
+        method: "PUT",
+        headers: { "content-type": "application/json", "x-api-monitor-admin-token": "correct-token" },
+        body: JSON.stringify({
+          providers: [
+            { providerKey: "openrouter", enabled: true, displayOrder: 1, activeProviderAccountId: "account-1" },
+            { providerKey: "opencode-go", enabled: false, displayOrder: 2, activeProviderAccountId: null },
+          ],
+        }),
+      }),
+      env,
+      fetchImpl,
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.ok).toBe(true);
+    expect(body.data).toHaveLength(2);
+    expect(fetchCalls.map((call) => call.body)).toMatchObject([
+      { provider_key: "openrouter", enabled: true, display_order: 1 },
+      { provider_key: "opencode-go", enabled: false, display_order: 2 },
+    ]);
+  });
+
   it("creates a provider account with encrypted credentials", async () => {
     const fetchCalls: { url: URL; body: unknown }[] = [];
     const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -239,26 +278,61 @@ describe("settings routes", () => {
 
     const accountCall = fetchCalls.find((c) => c.url.pathname.endsWith("/provider_accounts"));
     expect(accountCall).toBeDefined();
-    expect(accountCall?.body).toMatchObject({
+    const accountBody = accountCall?.body as Record<string, unknown>;
+    expect(accountBody).toMatchObject({
       user_id: "user-123",
       provider_key: "opencode-go",
+      display_name: "测试账号",
       account_label: "测试账号",
       source_url: "https://opencode.ai/workspace/wrk_999/go",
+      auth_mode: "configured",
+      credential_hint: {
+        workspaceId: "wrk_999",
+      },
     });
+    const credentialHint = accountBody.credential_hint as Record<string, unknown>;
+    expect(JSON.stringify(accountBody)).not.toContain("auth=secret");
+    expect(String(credentialHint.authCookie)).toContain("...");
 
     const credCall = fetchCalls.find((c) => c.url.pathname.endsWith("/provider_account_credentials"));
     expect(credCall).toBeDefined();
-    expect(credCall?.body).toMatchObject({
+    const credentialBody = credCall?.body as Record<string, unknown>;
+    expect(credentialBody).toMatchObject({
       user_id: "user-123",
       provider_account_id: "account-new",
     });
-    expect(credCall?.body.encrypted_payload).toBeDefined();
-    expect(credCall?.body.nonce).toBeDefined();
+    expect(credentialBody.encrypted_payload).toBeDefined();
+    expect(credentialBody.nonce).toBeDefined();
+  });
+
+  it("rejects credential saves when encryption key is missing", async () => {
+    const response = await handleSettingsRequest(
+      new Request("https://api-monitor.local/api/settings/accounts", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-monitor-admin-token": "correct-token" },
+        body: JSON.stringify({
+          providerKey: "openrouter",
+          accountLabel: "主账号",
+          sourceUrl: "https://openrouter.ai/activity",
+          credentials: { apiKey: "sk-test" },
+        }),
+      }),
+      env,
+      async () => Response.json([{ id: "account-new" }]),
+    );
+
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: false,
+      error: {
+        code: "account_creation_failed",
+      },
+    });
   });
 
   it("tests a provider account connection", async () => {
     const fetchImpl = async (input: RequestInfo | URL): Promise<Response> => {
-      const url = new URL(input.toString());
+      const url = new URL(typeof input === "string" ? input : input instanceof Request ? input.url : input.toString());
       if (url.pathname.endsWith("/provider_accounts")) {
         return Response.json([{
           id: "account-1",

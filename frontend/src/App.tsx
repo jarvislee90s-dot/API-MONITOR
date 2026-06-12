@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createApiClient, type DashboardSnapshot, type PlatformSnapshot } from "./api/client";
 import { DashboardShell, type DashboardSyncState } from "./components";
 import { useActiveRefresh } from "./hooks/useActiveRefresh";
+import { SettingsPage } from "./settings/settings-page";
 
 const platformBases: Array<Omit<PlatformSnapshot, "lastRefreshedAt" | "quotaWindows" | "trend" | "modelSpends">> = [
   {
@@ -89,6 +90,7 @@ export function App() {
   const [syncState, setSyncState] = useState<DashboardSyncState>("loading");
   const [syncMessage, setSyncMessage] = useState<string | null>("正在拉取云端数据。");
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [route, setRoute] = useState(() => window.location.hash || "#/");
   const requestLockRef = useRef<Promise<void> | null>(null);
 
   const runSync = useCallback(
@@ -138,6 +140,23 @@ export function App() {
   useEffect(() => {
     void runSync("refresh");
   }, [runSync]);
+
+  useEffect(() => {
+    const onHashChange = () => setRoute(window.location.hash || "#/");
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
+
+  if (route === "#/settings") {
+    return (
+      <SettingsPage
+        api={api}
+        onBack={() => {
+          window.location.hash = "#/";
+        }}
+      />
+    );
+  }
 
   return (
     <DashboardShell

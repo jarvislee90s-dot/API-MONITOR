@@ -1,5 +1,10 @@
-import { listProviders } from "../providers/registry";
-import { encryptCredentialPayload, decryptCredentialPayload, type CredentialPayload } from "../security/credentials";
+import { isProviderId, listProviders } from "../providers/registry";
+import {
+  decryptCredentialPayload,
+  encryptCredentialPayload,
+  maskCredentialPayload,
+  type CredentialPayload,
+} from "../security/credentials";
 
 export type ProviderCatalogItem = {
   providerKey: string;
@@ -54,7 +59,7 @@ type ProviderAccountRow = {
   credential_hint?: Record<string, unknown> | null;
 };
 
-export function createSupabaseHeaders(serviceRoleKey: string): HeadersInit {
+export function createSupabaseHeaders(serviceRoleKey: string): Record<string, string> {
   return {
     apikey: serviceRoleKey,
     Authorization: `Bearer ${serviceRoleKey}`,
@@ -181,9 +186,10 @@ export async function upsertProviderPreferences(
   }
 
   const headers = createSupabaseHeaders(env.SUPABASE_SERVICE_ROLE_KEY);
-  headers["Prefer"] = "resolution=merge-duplicates";
+  headers.Prefer = "resolution=merge-duplicates";
 
   const url = new URL("/rest/v1/provider_preferences", env.SUPABASE_URL);
+  url.searchParams.set("on_conflict", "user_id,provider_key");
   const body = {
     user_id: env.SUPABASE_USER_ID,
     provider_key: preferences.providerKey,
@@ -222,14 +228,16 @@ export async function upsertProviderAccount(
     throw new Error("Supabase configuration missing");
   }
 
-  // 校验 provider_key 白名单
-  const allowedProviders = listProviders().map((p) => p.id);
-  if (!allowedProviders.includes(account.providerKey)) {
+  // 校验 provider_key 白名单，避免任意外部域名复用云端凭据。
+  if (!isProviderId(account.providerKey)) {
     throw new Error(`Invalid provider key: ${account.providerKey}`);
+  }
+  if (account.credentials && !env.CREDENTIAL_ENCRYPTION_KEY) {
+    throw new Error("Credential encryption key is required to store credentials");
   }
 
   const headers = createSupabaseHeaders(env.SUPABASE_SERVICE_ROLE_KEY);
-  headers["Prefer"] = "resolution=merge-duplicates";
+  headers.Prefer = "resolution=merge-duplicates,return=representation";
 
   // 1. 写入 provider_accounts
   const accountUrl = new URL("/rest/v1/provider_accounts", env.SUPABASE_URL);
@@ -238,10 +246,13 @@ export async function upsertProviderAccount(
   const accountBody = {
     user_id: env.SUPABASE_USER_ID,
     provider_key: account.providerKey,
+    display_name: account.accountLabel,
     account_label: account.accountLabel,
     source_url: account.sourceUrl,
+    auth_mode: account.credentials ? "configured" : "manual",
     status: account.status ?? "ready",
-    credential_hint: {},
+    status_message: account.statusMessage ?? null,
+    credential_hint: account.credentials ? maskCredentialPayload(account.credentials) : {},
   };
 
   const accountResponse = await fetchImpl(accountUrl, {
@@ -260,11 +271,19 @@ export async function upsertProviderAccount(
   // 解析返回的 account id
   const accountRows = (await accountResponse.json().catch(() => [])) as Array<{ id?: string }>;
   const accountId = accountRows[0]?.id ?? "";
+  if (!accountId) {
+    throw new Error("Supabase did not return provider account id");
+  }
 
   // 2. 如果有 credentials，加密并写入 provider_account_credentials
-  if (account.credentials && env.CREDENTIAL_ENCRYPTION_KEY) {
-    const encrypted = await encryptCredentialPayload(account.credentials, env.CREDENTIAL_ENCRYPTION_KEY);
+  if (account.credentials) {
+    const encryptionKey = env.CREDENTIAL_ENCRYPTION_KEY;
+    if (!encryptionKey) {
+      throw new Error("Credential encryption key is required to store credentials");
+    }
+    const encrypted = await encryptCredentialPayload(account.credentials, encryptionKey);
     const credUrl = new URL("/rest/v1/provider_account_credentials", env.SUPABASE_URL);
+    credUrl.searchParams.set("on_conflict", "provider_account_id");
 
     const credBody = {
       user_id: env.SUPABASE_USER_ID,
@@ -278,6 +297,7 @@ export async function upsertProviderAccount(
       method: "POST",
       headers: {
         ...headers,
+        Prefer: "resolution=merge-duplicates,return=minimal",
         "content-type": "application/json",
       },
       body: JSON.stringify(credBody),
@@ -323,16 +343,18 @@ export async function getActiveProviderAccountConfig(
   accountUrl.searchParams.set("select", "*");
   accountUrl.searchParams.set("id", `eq.${activeAccountId}`);
   accountUrl.searchParams.set("user_id", `eq.${env.SUPABASE_USER_ID}`);
+  accountUrl.searchParams.set("provider_key", `eq.${providerKey}`);
 
   const accountResponse = await fetchImpl(accountUrl, { headers });
   if (!accountResponse.ok) return null;
 
   const accountRows = (await accountResponse.json().catch(() => [])) as Array<{
+    provider_key?: string;
     config?: Record<string, unknown>;
     source_url?: string;
   }>;
   const account = accountRows[0];
-  if (!account) return null;
+  if (!account || account.provider_key !== providerKey) return null;
 
   // 3. 读取 provider_account_credentials
   const credUrl = new URL("/rest/v1/provider_account_credentials", env.SUPABASE_URL);
@@ -372,5 +394,69 @@ export async function getActiveProviderAccountConfig(
   };
 }
 
-// Extended for Task 4
+export async function getProviderAccountConfigById(
+  env: SettingsEnv & { CREDENTIAL_ENCRYPTION_KEY?: string },
+  accountId: string,
+  fetchImpl: typeof fetch,
+): Promise<{ providerKey: string; config: Record<string, unknown> } | null> {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY || !env.SUPABASE_USER_ID) {
+    return null;
+  }
+
+  const headers = createSupabaseHeaders(env.SUPABASE_SERVICE_ROLE_KEY);
+  const accountUrl = new URL("/rest/v1/provider_accounts", env.SUPABASE_URL);
+  accountUrl.searchParams.set("select", "provider_key,config,source_url");
+  accountUrl.searchParams.set("id", `eq.${accountId}`);
+  accountUrl.searchParams.set("user_id", `eq.${env.SUPABASE_USER_ID}`);
+
+  const accountResponse = await fetchImpl(accountUrl, { headers });
+  if (!accountResponse.ok) return null;
+
+  const accountRows = (await accountResponse.json().catch(() => [])) as Array<{
+    provider_key?: string;
+    config?: Record<string, unknown>;
+    source_url?: string;
+  }>;
+  const account = accountRows[0];
+  if (!account?.provider_key) return null;
+
+  const credUrl = new URL("/rest/v1/provider_account_credentials", env.SUPABASE_URL);
+  credUrl.searchParams.set("select", "encrypted_payload,nonce,key_version");
+  credUrl.searchParams.set("provider_account_id", `eq.${accountId}`);
+  credUrl.searchParams.set("user_id", `eq.${env.SUPABASE_USER_ID}`);
+
+  const credResponse = await fetchImpl(credUrl, { headers });
+  let decryptedConfig: Record<string, unknown> = {};
+  if (credResponse.ok) {
+    const credRows = (await credResponse.json().catch(() => [])) as Array<{
+      encrypted_payload?: string;
+      nonce?: string;
+      key_version?: string;
+    }>;
+    const cred = credRows[0];
+    if (cred?.encrypted_payload && cred.nonce && env.CREDENTIAL_ENCRYPTION_KEY) {
+      try {
+        decryptedConfig = await decryptCredentialPayload(
+          {
+            encryptedPayload: cred.encrypted_payload,
+            nonce: cred.nonce,
+            keyVersion: cred.key_version === "v1" ? "v1" : "v1",
+          },
+          env.CREDENTIAL_ENCRYPTION_KEY,
+        );
+      } catch {
+        decryptedConfig = {};
+      }
+    }
+  }
+
+  return {
+    providerKey: account.provider_key,
+    config: {
+      ...account.config,
+      ...decryptedConfig,
+      sourceUrl: account.source_url,
+    },
+  };
+}
 

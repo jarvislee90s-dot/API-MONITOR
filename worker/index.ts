@@ -4,9 +4,10 @@ import { createLiveLoginSession } from "./browser/live-login";
 import { listProviders, getProvider, isProviderId } from "./providers/registry";
 import { RefreshSessionDurableObject } from "./durable-object/refresh-session";
 import { handleSettingsRequest } from "./settings/routes";
-import { getActiveProviderAccountConfig } from "./settings/repository";
+import { getActiveProviderAccountConfig, listProviderSettings } from "./settings/repository";
 import type {
   ProviderFetchInput,
+  ProviderDefinition,
   ProviderSnapshot,
   RefreshDecision,
   WorkerEnv,
@@ -23,6 +24,12 @@ type RefreshRequest = {
 type LiveLoginRequest = {
   provider?: string;
   loginUrl?: string;
+};
+
+type DashboardPreference = {
+  providerKey: string;
+  enabled: boolean;
+  displayOrder: number;
 };
 
 function createSessionKey(providerId: string, accountId?: string): string {
@@ -45,6 +52,14 @@ function buildProviderConfig(env: WorkerEnv, providerId: string): Record<string,
     };
   }
 
+  if (providerId === "aliyun-bailian") {
+    return {
+      pageUrl: env.ALIYUN_BAILIAN_PAGE_URL,
+      apiUrl: env.ALIYUN_BAILIAN_API_URL,
+      authCookie: env.ALIYUN_BAILIAN_AUTH_COOKIE,
+    };
+  }
+
   return {
     pageUrl: env.XFYUN_MAAS_PAGE_URL,
     apiUrl: env.XFYUN_MAAS_API_URL,
@@ -52,32 +67,61 @@ function buildProviderConfig(env: WorkerEnv, providerId: string): Record<string,
   };
 }
 
-async function buildProviderConfigs(env: WorkerEnv, fetchImpl: typeof fetch): Promise<Array<{ providerId: string; config: Record<string, unknown> }>> {
-  const configs: Array<{ providerId: string; config: Record<string, unknown> }> = [];
-  
+async function buildProviderConfigs(
+  env: WorkerEnv,
+  fetchImpl: typeof fetch,
+): Promise<Array<{ providerId: string; config: Record<string, unknown> }>> {
   if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY || !env.SUPABASE_USER_ID) {
-    // 回退到 env 配置
-    for (const provider of listProviders()) {
-      configs.push({ providerId: provider.id, config: buildProviderConfig(env, provider.id) });
+    return listProviders().map((provider) => ({
+      providerId: provider.id,
+      config: buildProviderConfig(env, provider.id),
+    }));
+  }
+
+  try {
+    const settings = await listProviderSettings(env, fetchImpl);
+    if (settings.preferences.length === 0) {
+      return listProviders().map((provider) => ({
+        providerId: provider.id,
+        config: buildProviderConfig(env, provider.id),
+      }));
+    }
+
+    const enabledPreferences = settings.preferences
+      .filter((preference) => preference.enabled && isProviderId(preference.providerKey))
+      .sort((left, right) => left.displayOrder - right.displayOrder);
+
+    const configs: Array<{ providerId: string; config: Record<string, unknown> }> = [];
+    for (const preference of enabledPreferences) {
+      const dbConfig = await getActiveProviderAccountConfig(env, preference.providerKey, fetchImpl);
+      configs.push({
+        providerId: preference.providerKey,
+        config: dbConfig ?? buildProviderConfig(env, preference.providerKey),
+      });
     }
     return configs;
+  } catch {
+    return listProviders().map((provider) => ({
+      providerId: provider.id,
+      config: buildProviderConfig(env, provider.id),
+    }));
+  }
+}
+
+async function buildProviderRuntimeConfig(
+  env: WorkerEnv,
+  providerId: string,
+  fetchImpl: typeof fetch,
+): Promise<Record<string, unknown>> {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY || !env.SUPABASE_USER_ID) {
+    return buildProviderConfig(env, providerId);
   }
 
-  // 尝试从 Supabase 读取配置
-  for (const provider of listProviders()) {
-    try {
-      const dbConfig = await getActiveProviderAccountConfig(env, provider.id, fetchImpl);
-      if (dbConfig) {
-        configs.push({ providerId: provider.id, config: dbConfig });
-      } else {
-        configs.push({ providerId: provider.id, config: buildProviderConfig(env, provider.id) });
-      }
-    } catch {
-      configs.push({ providerId: provider.id, config: buildProviderConfig(env, provider.id) });
-    }
+  try {
+    return (await getActiveProviderAccountConfig(env, providerId, fetchImpl)) ?? buildProviderConfig(env, providerId);
+  } catch {
+    return buildProviderConfig(env, providerId);
   }
-
-  return configs;
 }
 
 function createErrorSnapshot(providerId: string, providerName: string, sourceUrl: string, now: Date, error: string): ProviderSnapshot {
@@ -132,13 +176,28 @@ async function collectUsageSnapshots(env: WorkerEnv, providerId?: string): Promi
   
   const providers = providerId
     ? listProviders().filter((provider) => provider.id === providerId)
-    : listProviders();
+    : configs
+        .map((config) => getProvider(config.providerId))
+        .filter((provider): provider is ProviderDefinition => Boolean(provider));
   const snapshots: ProviderSnapshot[] = [];
   for (const provider of providers) {
     const config = configMap.get(provider.id);
     snapshots.push(await fetchProviderSnapshot(env, provider.id, config));
   }
   return snapshots;
+}
+
+async function readDashboardPreferences(env: WorkerEnv): Promise<DashboardPreference[] | undefined> {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY || !env.SUPABASE_USER_ID) {
+    return undefined;
+  }
+
+  try {
+    const settings = await listProviderSettings(env, fetch);
+    return settings.preferences.length > 0 ? settings.preferences : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 async function fetchLatestReadySnapshots(env: WorkerEnv): Promise<Map<string, ProviderSnapshot>> {
@@ -326,7 +385,7 @@ async function handleProviderSnapshot(request: Request, providerId: string, env:
   const fetchInput: ProviderFetchInput = {
     now,
     fetchImpl: fetch,
-    config: buildProviderConfig(env, providerId),
+    config: await buildProviderRuntimeConfig(env, providerId, fetch),
   };
   if (providerId === "opencode-go") {
     fetchInput.requestTimeoutMs = 15_000;
@@ -342,7 +401,9 @@ async function handleProviderSnapshot(request: Request, providerId: string, env:
 
 async function handleUsage(env: WorkerEnv): Promise<Response> {
   const snapshots = await applyLatestReadyFallback(env, await collectUsageSnapshots(env));
-  const dashboard = buildUsageDashboard(snapshots);
+  const dashboard = buildUsageDashboard(snapshots, {
+    providerPreferences: await readDashboardPreferences(env),
+  });
   return successResponse(dashboard);
 }
 
@@ -371,6 +432,7 @@ async function handleDashboardRefresh(request: Request, env: WorkerEnv, body: Re
   }
 
   const dashboard = buildUsageDashboard(snapshots, {
+    providerPreferences: await readDashboardPreferences(env),
     refresh: {
       scope: "all",
       sessionKey,
@@ -427,7 +489,7 @@ async function handleRefresh(request: Request, env: WorkerEnv): Promise<Response
   const fetchInput: ProviderFetchInput = {
     now: new Date(),
     fetchImpl: fetch,
-    config: buildProviderConfig(env, body.providerId),
+    config: await buildProviderRuntimeConfig(env, body.providerId, fetch),
   };
   if (body.providerId === "opencode-go") {
     fetchInput.requestTimeoutMs = 15_000;

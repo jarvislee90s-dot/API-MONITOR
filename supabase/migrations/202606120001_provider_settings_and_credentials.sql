@@ -28,13 +28,28 @@ create table if not exists public.provider_account_credentials (
   unique (provider_account_id)
 );
 
+with duplicate_provider_account_labels as (
+  select
+    id,
+    row_number() over (
+      partition by user_id, provider_key, account_label
+      order by created_at, id
+    ) as duplicate_index
+  from public.provider_accounts
+)
+update public.provider_accounts as provider_account
+set account_label = provider_account.account_label || ' ' || left(provider_account.id::text, 8)
+from duplicate_provider_account_labels
+where provider_account.id = duplicate_provider_account_labels.id
+  and duplicate_provider_account_labels.duplicate_index > 1;
+
 create unique index if not exists provider_accounts_user_id_idx
   on public.provider_accounts (user_id, id);
 
 create index if not exists provider_preferences_user_order_idx
   on public.provider_preferences (user_id, display_order, provider_key);
 
-create index if not exists provider_accounts_user_provider_label_idx
+create unique index if not exists provider_accounts_user_provider_label_idx
   on public.provider_accounts (user_id, provider_key, account_label);
 
 alter table public.provider_preferences
@@ -84,4 +99,5 @@ create policy provider_preferences_delete_own
   using ((select auth.uid()) = user_id);
 
 revoke all on public.provider_account_credentials from anon, authenticated;
+grant select, insert, update, delete on public.provider_preferences to service_role;
 grant select, insert, update, delete on public.provider_account_credentials to service_role;

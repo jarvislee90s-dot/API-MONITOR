@@ -78,6 +78,43 @@ export interface LiveLoginSession {
   message: string;
 }
 
+export interface ProviderCatalogItem {
+  providerKey: string;
+  providerName: string;
+  sourceUrl: string;
+  description: string;
+}
+
+export interface ProviderPreference {
+  providerKey: string;
+  enabled: boolean;
+  displayOrder: number;
+  activeProviderAccountId: string | null;
+}
+
+export interface SafeProviderAccount {
+  id: string;
+  providerKey: string;
+  accountLabel: string;
+  sourceUrl: string;
+  status: string;
+  statusMessage: string | null;
+  credentialHint: Record<string, unknown>;
+}
+
+export interface ProviderSettingsPayload {
+  catalog: ProviderCatalogItem[];
+  preferences: ProviderPreference[];
+  accounts: SafeProviderAccount[];
+}
+
+export interface ProviderAccountInput {
+  providerKey: string;
+  accountLabel: string;
+  sourceUrl: string;
+  credentials?: Record<string, string>;
+}
+
 type ApiEnvelope<T> =
   | {
       ok: true;
@@ -242,12 +279,14 @@ function mapStatus(status: ServerProviderStatus): PlatformStatus {
 function resolveAccent(providerId: string): string {
   if (providerId === "xfyun-maas") return "#2563eb";
   if (providerId === "opencode-go") return "#0f766e";
+  if (providerId === "aliyun-bailian") return "#7c3aed";
   return "#b45309";
 }
 
 function resolveTagline(providerId: string): string {
   if (providerId === "xfyun-maas") return "原网页入口 / 登录状态";
   if (providerId === "opencode-go") return "workspaceId + auth cookie";
+  if (providerId === "aliyun-bailian") return "Coding Plan / 百炼控制台";
   return "Activity 聚合 / 花费拆分";
 }
 
@@ -255,6 +294,7 @@ function resolvePrimaryMetricLabel(providerId: string, windows: ServerProviderWi
   if (providerId === "xfyun-maas") return "当前套餐";
   if (providerId === "opencode-go") return "活跃窗口";
   if (providerId === "openrouter") return "本周期花费";
+  if (providerId === "aliyun-bailian") return "当前套餐";
   return windows[0]?.label ?? "当前状态";
 }
 
@@ -441,6 +481,87 @@ export function createApiClient(options: ApiClientOptions = {}) {
           credentials: "include",
           headers,
           body: JSON.stringify(input),
+        },
+      );
+
+      return unwrapEnvelope(payload);
+    },
+
+    async getProviderSettings(adminToken: string): Promise<ProviderSettingsPayload> {
+      const payload = await requestJson<ProviderSettingsPayload | ApiEnvelope<ProviderSettingsPayload>>(
+        fetcher,
+        buildUrl(options.baseUrl, "/api/settings/providers"),
+        {
+          method: "GET",
+          credentials: "include",
+          headers: {
+            ...headers,
+            "x-api-monitor-admin-token": adminToken,
+          },
+        },
+      );
+
+      return unwrapEnvelope(payload);
+    },
+
+    async saveProviderPreferences(
+      adminToken: string,
+      preferences: ProviderPreference[],
+    ): Promise<ProviderPreference[]> {
+      const payload = await requestJson<ProviderPreference[] | ApiEnvelope<ProviderPreference[]>>(
+        fetcher,
+        buildUrl(options.baseUrl, "/api/settings/providers"),
+        {
+          method: "PUT",
+          credentials: "include",
+          headers: {
+            ...headers,
+            "x-api-monitor-admin-token": adminToken,
+          },
+          body: JSON.stringify({ providers: preferences }),
+        },
+      );
+
+      return unwrapEnvelope(payload);
+    },
+
+    async saveProviderAccount(
+      adminToken: string,
+      account: ProviderAccountInput,
+    ): Promise<{ id: string }> {
+      const payload = await requestJson<{ id: string } | ApiEnvelope<{ id: string }>>(
+        fetcher,
+        buildUrl(options.baseUrl, "/api/settings/accounts"),
+        {
+          method: "POST",
+          credentials: "include",
+          headers: {
+            ...headers,
+            "x-api-monitor-admin-token": adminToken,
+          },
+          body: JSON.stringify(account),
+        },
+      );
+
+      return unwrapEnvelope(payload);
+    },
+
+    async testProviderAccount(
+      adminToken: string,
+      accountId: string,
+    ): Promise<{ ok: boolean; status: string; summary: string }> {
+      const payload = await requestJson<
+        { ok: boolean; status: string; summary: string } | ApiEnvelope<{ ok: boolean; status: string; summary: string }>
+      >(
+        fetcher,
+        buildUrl(options.baseUrl, `/api/settings/accounts/${encodeURIComponent(accountId)}/test`),
+        {
+          method: "POST",
+          credentials: "include",
+          headers: {
+            ...headers,
+            "x-api-monitor-admin-token": adminToken,
+          },
         },
       );
 

@@ -4,18 +4,22 @@ import { getProvider, isProviderId, listProviders } from "../../worker/providers
 import { fetchOpenRouterSnapshot } from "../../worker/providers/openrouter";
 import { fetchOpenCodeGoSnapshot } from "../../worker/providers/opencode-go";
 import { fetchXfyunMaaSSnapshot } from "../../worker/providers/xfyun-maas";
+import { fetchAliyunBailianSnapshot } from "../../worker/providers/aliyun-bailian";
 
 describe("provider registry", () => {
-  it("exposes the three cloud adapters", () => {
+  it("exposes the cloud adapters", () => {
     expect(listProviders().map((provider) => provider.id)).toEqual([
       "openrouter",
       "opencode-go",
       "xfyun-maas",
+      "aliyun-bailian",
     ]);
     expect(getProvider("openrouter")?.name).toBe("OpenRouter");
     expect(getProvider("opencode-go")?.name).toBe("OpenCode Go");
     expect(getProvider("xfyun-maas")?.name).toBe("讯飞 MaaS");
+    expect(getProvider("aliyun-bailian")?.name).toBe("阿里云百炼");
     expect(isProviderId("openrouter")).toBe(true);
+    expect(isProviderId("aliyun-bailian")).toBe(true);
     expect(isProviderId("unknown")).toBe(false);
   });
 });
@@ -346,5 +350,109 @@ describe("xfyun maas adapter", () => {
       rpwLimit: 9000,
     });
     expect(JSON.stringify(result)).not.toContain("should-not-be-retained");
+  });
+});
+
+describe("aliyun-bailian adapter", () => {
+  it("returns login_required when the auth cookie is missing", async () => {
+    const result = await fetchAliyunBailianSnapshot({
+      now: new Date("2026-06-12T00:00:00.000Z"),
+      config: {
+        apiUrl: "https://bailian.console.aliyun.com/api/coding-plan/usage",
+      },
+    });
+
+    expect(result.snapshot.status).toBe("login_required");
+  });
+
+  it("returns partial with dashboard entry when no API URL is configured", async () => {
+    const result = await fetchAliyunBailianSnapshot({
+      now: new Date("2026-06-12T00:00:00.000Z"),
+      config: {
+        pageUrl: "https://bailian.console.aliyun.com/cn-beijing?tab=plan#/efm/subscription/coding-plan",
+        authCookie: "login=abc",
+      },
+    });
+
+    expect(result.snapshot.providerId).toBe("aliyun-bailian");
+    expect(result.snapshot.status).toBe("partial");
+    expect(result.snapshot.sourceUrl).toContain("bailian.console.aliyun.com");
+  });
+
+  it("parses configured JSON usage API into quota windows", async () => {
+    const fetchImpl = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          data: {
+            planName: "Coding Plan",
+            windows: [
+              { key: "monthly", label: "Monthly", used: 32, limit: 100, resetAt: "2026-07-01T00:00:00+08:00" },
+            ],
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+
+    const result = await fetchAliyunBailianSnapshot({
+      now: new Date("2026-06-12T00:00:00.000Z"),
+      fetchImpl: fetchImpl as typeof fetch,
+      config: {
+        pageUrl: "https://bailian.console.aliyun.com/cn-beijing?tab=plan#/efm/subscription/coding-plan",
+        apiUrl: "https://bailian.console.aliyun.com/api/coding-plan/usage",
+        authCookie: "login=abc",
+      },
+    });
+
+    expect(result.snapshot.status).toBe("ready");
+    expect(result.snapshot.windows).toEqual([
+      {
+        key: "monthly",
+        label: "Monthly",
+        used: 32,
+        limit: 100,
+        remaining: 68,
+        resetAt: "2026-07-01T00:00:00+08:00",
+      },
+    ]);
+  });
+
+  it("rejects non-Aliyun API URLs before sending cookies", async () => {
+    const fetchImpl = vi.fn(async () => {
+      return new Response("should not fetch");
+    });
+
+    const result = await fetchAliyunBailianSnapshot({
+      now: new Date("2026-06-12T00:00:00.000Z"),
+      fetchImpl: fetchImpl as typeof fetch,
+      config: {
+        apiUrl: "https://example.com/api/coding-plan/usage",
+        authCookie: "login=abc",
+      },
+    });
+
+    expect(result.snapshot.status).toBe("error");
+    expect(result.snapshot.summary).toContain("不安全");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("reports login_required when the API returns a login page", async () => {
+    const fetchImpl = vi.fn(async () => {
+      return new Response("<html>登录</html>", {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    });
+
+    const result = await fetchAliyunBailianSnapshot({
+      now: new Date("2026-06-12T00:00:00.000Z"),
+      fetchImpl: fetchImpl as typeof fetch,
+      config: {
+        apiUrl: "https://bailian.console.aliyun.com/api/coding-plan/usage",
+        authCookie: "login=abc",
+      },
+    });
+
+    expect(result.snapshot.status).toBe("login_required");
   });
 });

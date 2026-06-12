@@ -31,10 +31,12 @@ export async function decryptCredentialPayload(
   rawKey: string,
 ): Promise<CredentialPayload> {
   const key = await importAesGcmKey(rawKey);
+  const nonce = base64ToBytes(encrypted.nonce);
+  const payloadBytes = base64ToBytes(encrypted.encryptedPayload);
   const decrypted = await crypto.subtle.decrypt(
-    { name: "AES-GCM", iv: base64ToBytes(encrypted.nonce) },
+    { name: "AES-GCM", iv: nonce.buffer as ArrayBuffer },
     key,
-    base64ToBytes(encrypted.encryptedPayload),
+    payloadBytes.buffer as ArrayBuffer,
   );
   const payload = JSON.parse(new TextDecoder().decode(decrypted));
 

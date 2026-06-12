@@ -1,5 +1,10 @@
 import { errorResponse, successResponse, readJsonBody } from "../http";
-import { listProviderSettings, upsertProviderPreferences, upsertProviderAccount, getActiveProviderAccountConfig } from "./repository";
+import {
+  getProviderAccountConfigById,
+  listProviderSettings,
+  upsertProviderAccount,
+  upsertProviderPreferences,
+} from "./repository";
 import { getProvider } from "../providers/registry";
 
 type SettingsEnv = {
@@ -43,9 +48,20 @@ export async function handleSettingsRequest(
         enabled: boolean;
         displayOrder: number;
         activeProviderAccountId: string | null;
+        providers?: Array<{
+          providerKey: string;
+          enabled: boolean;
+          displayOrder: number;
+          activeProviderAccountId: string | null;
+        }>;
       }>(request);
-      const result = await upsertProviderPreferences(env, body, fetchImpl);
-      return successResponse(result);
+      const isBatch = Array.isArray(body.providers);
+      const preferences = isBatch ? body.providers! : [body];
+      const result = [];
+      for (const preference of preferences) {
+        result.push(await upsertProviderPreferences(env, preference, fetchImpl));
+      }
+      return successResponse(isBatch ? result : result[0]);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to upsert preferences";
       return errorResponse(500, "upsert_failed", message);
@@ -80,37 +96,12 @@ export async function handleSettingsRequest(
         return errorResponse(400, "invalid_request", "Account ID is required");
       }
 
-      // 先从 provider_accounts 读取 account 获取 provider_key
-      const headers = {
-        apikey: env.SUPABASE_SERVICE_ROLE_KEY ?? "",
-        Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY ?? ""}`,
-        Accept: "application/json",
-      };
-
-      const accountUrl = new URL("/rest/v1/provider_accounts", env.SUPABASE_URL ?? "");
-      accountUrl.searchParams.set("select", "*");
-      accountUrl.searchParams.set("id", `eq.${accountId}`);
-      accountUrl.searchParams.set("user_id", `eq.${env.SUPABASE_USER_ID ?? ""}`);
-
-      const accountResponse = await fetchImpl(accountUrl, { headers });
-      if (!accountResponse.ok) {
+      const accountConfig = await getProviderAccountConfigById(env, accountId, fetchImpl);
+      if (!accountConfig) {
         return errorResponse(404, "account_not_found", "Account not found");
       }
 
-      const accountRows = (await accountResponse.json().catch(() => [])) as Array<{ provider_key?: string }>;
-      const providerKey = accountRows[0]?.provider_key;
-      if (!providerKey) {
-        return errorResponse(404, "account_not_found", "Account not found or missing provider key");
-      }
-
-      // 读取 account 配置
-      const config = await getActiveProviderAccountConfig(env, providerKey, fetchImpl);
-      if (!config) {
-        return errorResponse(404, "account_not_found", "Account not found or no active configuration");
-      }
-
-      // 获取 provider 并测试连接
-      const provider = getProvider(providerKey);
+      const provider = getProvider(accountConfig.providerKey);
       if (!provider) {
         return errorResponse(404, "provider_not_found", "Provider not found");
       }
@@ -118,7 +109,7 @@ export async function handleSettingsRequest(
       const fetchInput = {
         now: new Date(),
         fetchImpl,
-        config,
+        config: accountConfig.config,
       };
 
       const result = await provider.fetchSnapshot(fetchInput);

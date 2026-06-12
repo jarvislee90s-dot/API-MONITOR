@@ -1,4 +1,4 @@
-export type ProviderId = "openrouter" | "opencode-go" | "xfyun-maas";
+export type ProviderId = "openrouter" | "opencode-go" | "xfyun-maas" | "aliyun-bailian";
 
 export type ProviderStatus = "ready" | "partial" | "login_required" | "disabled" | "error";
 

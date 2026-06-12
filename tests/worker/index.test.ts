@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { handleApiRequest } from "../../worker/index";
+import { buildUsageDashboard } from "../../worker/dashboard";
 import { RefreshSessionDurableObject } from "../../worker/durable-object/refresh-session";
-import type { WorkerEnv } from "../../worker/types";
+import { encryptCredentialPayload } from "../../worker/security/credentials";
+import type { ProviderSnapshot, WorkerEnv } from "../../worker/types";
 
 class MemoryStorage {
   private readonly data = new Map<string, unknown>();
@@ -27,6 +29,7 @@ function createEnv(fetchImpl: typeof fetch): WorkerEnv {
     OPENROUTER_API_KEY: "sk-test",
     OPENCODE_GO_WORKSPACE_ID: "wrk_123",
     OPENCODE_GO_AUTH_COOKIE: "auth-cookie=abc",
+    ALIYUN_BAILIAN_AUTH_COOKIE: "login=abc",
     XFYUN_MAAS_API_URL: "https://maas.xfyun.cn/api/subscription",
     XFYUN_MAAS_AUTH_COOKIE: "session=abc",
     REFRESH_SESSION: {
@@ -110,7 +113,41 @@ function createUsageFetchStub() {
   });
 }
 
+function createSnapshot(providerId: ProviderSnapshot["providerId"], providerName: string): ProviderSnapshot {
+  return {
+    providerId,
+    providerName,
+    sourceUrl: `https://example.test/${providerId}`,
+    status: "ready",
+    capturedAt: "2026-06-12T00:00:00.000Z",
+    summary: `${providerName} ready`,
+    windows: [],
+    metrics: {},
+    meta: {},
+  };
+}
+
 describe("worker api", () => {
+  it("orders dashboard cards by provider preferences and hides disabled providers", () => {
+    const dashboard = buildUsageDashboard(
+      [
+        createSnapshot("openrouter", "OpenRouter"),
+        createSnapshot("opencode-go", "OpenCode Go"),
+        createSnapshot("xfyun-maas", "讯飞 MaaS"),
+      ],
+      {
+        providerPreferences: [
+          { providerKey: "opencode-go", enabled: true, displayOrder: 1 },
+          { providerKey: "openrouter", enabled: false, displayOrder: 2 },
+          { providerKey: "xfyun-maas", enabled: true, displayOrder: 3 },
+        ],
+      },
+    );
+
+    expect(dashboard.cards.map((card) => card.providerId)).toEqual(["opencode-go", "xfyun-maas"]);
+    expect(dashboard.totals.providers).toBe(2);
+  });
+
   it("lists the provider registry", async () => {
     const env = createEnv(fetch);
     const response = await handleApiRequest(new Request("https://api.monitor.local/api/providers"), env);
@@ -122,6 +159,7 @@ describe("worker api", () => {
       "openrouter",
       "opencode-go",
       "xfyun-maas",
+      "aliyun-bailian",
     ]);
   });
 
@@ -136,12 +174,12 @@ describe("worker api", () => {
       expect(response.status).toBe(200);
       expect(payload.ok).toBe(true);
       expect(payload.data.kind).toBe("usage_dashboard");
-      expect(payload.data.cards).toHaveLength(3);
+      expect(payload.data.cards).toHaveLength(4);
       expect(payload.data.modelSpends).toEqual([]);
       expect(payload.data.totals).toMatchObject({
-        providers: 3,
+        providers: 4,
         ready: 3,
-        partial: 0,
+        partial: 1,
         loginRequired: 0,
         error: 0,
       });
@@ -152,6 +190,11 @@ describe("worker api", () => {
       expect(payload.data.cards[0].trend).toHaveLength(4);
       expect(payload.data.cards[1].trend).toHaveLength(3);
       expect(payload.data.cards[2].trend).toHaveLength(1);
+      expect(payload.data.cards[3]).toMatchObject({
+        providerId: "aliyun-bailian",
+        providerName: "阿里云百炼",
+        status: "partial",
+      });
     } finally {
       vi.unstubAllGlobals();
     }
@@ -328,7 +371,7 @@ describe("worker api", () => {
         sessionKey: "dashboard",
         refreshed: true,
       });
-      expect(payload.data.cards).toHaveLength(3);
+      expect(payload.data.cards).toHaveLength(4);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -490,6 +533,11 @@ describe("worker api", () => {
   });
 
   it("uses Supabase active account config during refresh when available", async () => {
+    const encryptionKey = "0123456789abcdef0123456789abcdef";
+    const encrypted = await encryptCredentialPayload(
+      { workspaceId: "wrk_db", authCookie: "auth-cookie=db" },
+      encryptionKey,
+    );
     const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
 
@@ -548,9 +596,9 @@ describe("worker api", () => {
         return new Response(
           JSON.stringify([{
             provider_account_id: "account-db-1",
-            encrypted_payload: "mock-encrypted",
-            nonce: "mock-nonce",
-            key_version: "v1",
+            encrypted_payload: encrypted.encryptedPayload,
+            nonce: encrypted.nonce,
+            key_version: encrypted.keyVersion,
           }]),
           { status: 200, headers: { "content-type": "application/json" } },
         );
@@ -582,7 +630,7 @@ describe("worker api", () => {
         SUPABASE_URL: "https://supabase.test",
         SUPABASE_SERVICE_ROLE_KEY: "service-role-test",
         SUPABASE_USER_ID: "00000000-0000-0000-0000-000000000001",
-        CREDENTIAL_ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef",
+        CREDENTIAL_ENCRYPTION_KEY: encryptionKey,
         OPENCODE_GO_WORKSPACE_ID: "wrk_123",
         OPENCODE_GO_AUTH_COOKIE: "auth-cookie=abc",
       };
@@ -609,6 +657,98 @@ describe("worker api", () => {
       const opencodeUrl = String(opencodeCalls[0][0]);
       expect(opencodeUrl).toContain("wrk_db");
       expect(opencodeUrl).not.toContain("wrk_123");
+      const accountReadCall = fetchImpl.mock.calls.find((call) => {
+        const url = String(call[0]);
+        return url.startsWith("https://supabase.test/rest/v1/provider_accounts") && url.includes("id=eq.account-db-1");
+      });
+      expect(String(accountReadCall?.[0])).toContain("provider_key=eq.opencode-go");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("uses Supabase active account config for direct provider snapshots", async () => {
+    const encryptionKey = "0123456789abcdef0123456789abcdef";
+    const encrypted = await encryptCredentialPayload(
+      {
+        apiUrl: "https://bailian.console.aliyun.com/api/coding-plan/usage",
+        authCookie: "login=db",
+      },
+      encryptionKey,
+    );
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+
+      if (url.startsWith("https://supabase.test/rest/v1/provider_preferences")) {
+        return new Response(
+          JSON.stringify([{
+            provider_key: "aliyun-bailian",
+            enabled: true,
+            display_order: 1,
+            active_provider_account_id: "account-bailian-1",
+          }]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+
+      if (url.startsWith("https://supabase.test/rest/v1/provider_accounts")) {
+        return new Response(
+          JSON.stringify([{
+            id: "account-bailian-1",
+            provider_key: "aliyun-bailian",
+            source_url: "https://bailian.console.aliyun.com/cn-beijing?tab=plan#/efm/subscription/coding-plan",
+            config: {
+              pageUrl: "https://bailian.console.aliyun.com/cn-beijing?tab=plan#/efm/subscription/coding-plan",
+            },
+          }]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+
+      if (url.startsWith("https://supabase.test/rest/v1/provider_account_credentials")) {
+        return new Response(
+          JSON.stringify([{
+            encrypted_payload: encrypted.encryptedPayload,
+            nonce: encrypted.nonce,
+            key_version: encrypted.keyVersion,
+          }]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+
+      if (url.startsWith("https://bailian.console.aliyun.com/api/coding-plan/usage")) {
+        return new Response(
+          JSON.stringify({
+            data: {
+              windows: [{ key: "monthly", label: "Monthly", used: 10, limit: 100 }],
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    vi.stubGlobal("fetch", fetchImpl as unknown as typeof fetch);
+    try {
+      const env = {
+        ...createEnv(fetchImpl as typeof fetch),
+        SUPABASE_URL: "https://supabase.test",
+        SUPABASE_SERVICE_ROLE_KEY: "service-role-test",
+        SUPABASE_USER_ID: "00000000-0000-0000-0000-000000000001",
+        CREDENTIAL_ENCRYPTION_KEY: encryptionKey,
+      };
+
+      const response = await handleApiRequest(
+        new Request("https://api.monitor.local/api/providers/aliyun-bailian/snapshot"),
+        env,
+      );
+      const payload = (await response.json()) as any;
+
+      expect(response.status).toBe(200);
+      expect(payload.data.snapshot.status).toBe("ready");
+      expect(payload.data.snapshot.providerId).toBe("aliyun-bailian");
     } finally {
       vi.unstubAllGlobals();
     }

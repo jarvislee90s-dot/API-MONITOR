@@ -1,5 +1,11 @@
 import type { ProviderSnapshot, UsageDashboard, UsageProviderCard } from "./types";
 
+type ProviderDashboardPreference = {
+  providerKey: string;
+  enabled: boolean;
+  displayOrder: number;
+};
+
 function getStatusRank(status: UsageDashboard["status"]): number {
   if (status === "error") return 4;
   if (status === "login_required") return 3;
@@ -36,21 +42,30 @@ export function buildUsageDashboard(
   options: {
     generatedAt?: string;
     refresh?: UsageDashboard["refresh"];
+    providerPreferences?: ProviderDashboardPreference[];
   } = {},
 ): UsageDashboard {
-  const cards = snapshots.map(buildCard);
-  const status = snapshots.reduce<UsageDashboard["status"]>(
-    (current, snapshot) => mergeStatus(current, snapshot.status),
+  const preferenceMap = new Map(options.providerPreferences?.map((item) => [item.providerKey, item]));
+  const cards = snapshots
+    .map(buildCard)
+    .filter((card) => preferenceMap.get(card.providerId)?.enabled ?? true)
+    .sort((left, right) => {
+      const leftOrder = preferenceMap.get(left.providerId)?.displayOrder ?? 100;
+      const rightOrder = preferenceMap.get(right.providerId)?.displayOrder ?? 100;
+      return leftOrder - rightOrder;
+    });
+  const status = cards.reduce<UsageDashboard["status"]>(
+    (current, card) => mergeStatus(current, card.status),
     "ready",
   );
 
-  const totals = snapshots.reduce(
-    (acc, snapshot) => {
+  const totals = cards.reduce(
+    (acc, card) => {
       acc.providers += 1;
-      if (snapshot.status === "ready") acc.ready += 1;
-      if (snapshot.status === "partial") acc.partial += 1;
-      if (snapshot.status === "login_required") acc.loginRequired += 1;
-      if (snapshot.status === "error") acc.error += 1;
+      if (card.status === "ready") acc.ready += 1;
+      if (card.status === "partial") acc.partial += 1;
+      if (card.status === "login_required") acc.loginRequired += 1;
+      if (card.status === "error") acc.error += 1;
       return acc;
     },
     {

@@ -153,6 +153,10 @@ button {
   border-color: transparent;
 }
 
+.btn--ghost {
+  background: rgba(255, 255, 255, 0.82);
+}
+
 .btn:focus-visible,
 .link-chip:focus-visible {
   outline: 3px solid rgba(37, 99, 235, 0.22);
@@ -560,6 +564,215 @@ button.link-chip {
   align-items: stretch;
 }
 
+.settings-shell {
+  background: var(--bg);
+}
+
+.settings-header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+}
+
+.settings-header h1 {
+  margin: 4px 0 0;
+  font-size: 30px;
+  line-height: 1.1;
+  letter-spacing: 0;
+}
+
+.token-panel,
+.settings-panel {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: var(--shadow);
+}
+
+.token-panel {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px;
+}
+
+.token-panel label,
+.credential-form label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.token-panel label {
+  grid-template-columns: auto auto minmax(180px, 360px);
+  align-items: center;
+}
+
+.token-panel input,
+.credential-form input {
+  width: 100%;
+  min-height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px 10px;
+  color: var(--text);
+  background: var(--surface);
+}
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 360px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.settings-panel {
+  padding: 14px;
+  display: grid;
+  gap: 14px;
+}
+
+.settings-panel__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-panel__head h2 {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.25;
+}
+
+.settings-panel__head p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.provider-order-list,
+.account-list,
+.credential-form {
+  display: grid;
+  gap: 10px;
+}
+
+.provider-order-item,
+.account-item {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.provider-order-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px;
+}
+
+.provider-order-item.is-selected {
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--line));
+  background: #f4f8ff;
+}
+
+.provider-order-item__select {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  padding: 8px;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.provider-order-item__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toggle,
+.radio-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.toggle {
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.provider-order-item__moves {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.icon-btn {
+  display: inline-flex;
+  width: 32px;
+  height: 32px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.icon-btn:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.account-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 12px;
+}
+
+.radio-row span {
+  display: grid;
+  gap: 5px;
+}
+
+.radio-row small,
+.settings-empty {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.account-item__actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.credential-form {
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+
+.credential-form .btn {
+  width: fit-content;
+}
+
 @media (max-width: 1100px) {
   .summary-bar {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -596,6 +809,21 @@ button.link-chip {
 
   .summary-bar {
     grid-template-columns: 1fr;
+  }
+
+  .settings-header,
+  .settings-grid,
+  .token-panel,
+  .token-panel label,
+  .provider-order-item {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-header,
+  .token-panel,
+  .account-item,
+  .settings-panel__head {
+    align-items: stretch;
   }
 }
 

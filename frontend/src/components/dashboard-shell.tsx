@@ -1,4 +1,4 @@
-import { Activity, AlertTriangle, CheckCircle2, RefreshCw, ShieldCheck } from "lucide-react";
+import { Activity, AlertTriangle, CheckCircle2, RefreshCw, ShieldCheck, SlidersHorizontal } from "lucide-react";
 import type { DashboardSnapshot } from "../api/client";
 import { PlatformCard } from "./platform-card";
 
@@ -70,6 +70,10 @@ export function DashboardShell({
             </div>
 
             <div className="actions">
+              <a className="btn btn--ghost" href="#/settings">
+                <SlidersHorizontal size={16} aria-hidden="true" />
+                配置
+              </a>
               <button
                 type="button"
                 className="btn btn--primary"

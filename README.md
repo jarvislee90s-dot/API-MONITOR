@@ -1,6 +1,6 @@
 # ApiMonitor
 
-API 与 Coding Plan 用量聚合看板。它把 OpenRouter、OpenCode Go、讯飞 MaaS Coding Plan 的用量状态聚合到一个响应式网页里，并用 Supabase 保存刷新快照。
+API 与 Coding Plan 用量聚合看板。它把 OpenRouter、OpenCode Go、讯飞 MaaS Coding Plan、阿里云百炼 Coding Plan 的用量状态聚合到一个响应式网页里，并用 Supabase 保存刷新快照和云端配置。
 
 线上示例：
 
@@ -10,11 +10,13 @@ API 与 Coding Plan 用量聚合看板。它把 OpenRouter、OpenCode Go、讯�
 
 ## 功能亮点
 
-- 统一展示 OpenRouter、OpenCode Go、讯飞 MaaS 三个平台状态。
+- 统一展示 OpenRouter、OpenCode Go、讯飞 MaaS、阿里云百炼四个平台状态。
 - 支持 5 小时、每周、套餐总量等不同 quota window。
+- 独立配置页支持供应商启停、顺序调整、active account 选择和账号凭据保存。
 - 前端活跃时触发刷新，避免 cron 高频轮询。
 - Cloudflare Durable Object 做刷新节流。
 - Supabase Postgres 保存用量快照、窗口数据和刷新事件。
+- Supabase 保存配置，Worker 使用 AES-GCM 加密第三方凭据。
 - Worker secrets 只保存在云端，不暴露到前端。
 - OpenCode Go 支持“最近成功快照”回退，降低云端抓取不稳定时的页面空窗。
 
@@ -28,6 +30,8 @@ API 与 Coding Plan 用量聚合看板。它把 OpenRouter、OpenCode Go、讯�
 | OpenRouter | 已接入 |
 | OpenCode Go | 已接入，含最近成功快照回退 |
 | 讯飞 MaaS | 已接入 `coding-plan/list` 用量接口 |
+| 阿里云百炼 | 已接入看板入口；配置稳定 JSON API 后解析 quota windows |
+| 配置页 | 已接入 `#/settings` |
 
 ## 架构
 
@@ -40,10 +44,12 @@ flowchart LR
   Worker --> OpenRouter["OpenRouter API"]
   Worker --> OpenCode["OpenCode Go Dashboard"]
   Worker --> Xfyun["讯飞 MaaS Coding Plan"]
+  Worker --> Bailian["阿里云百炼 Coding Plan"]
 
   Supabase --> Snapshots["usage_snapshots"]
   Supabase --> Windows["quota_windows"]
   Supabase --> Events["refresh_events"]
+  Supabase --> Settings["provider_preferences / encrypted credentials"]
 ```
 
 ## 目录结构
@@ -115,11 +121,14 @@ npm run build
 npx wrangler@4 secret put SUPABASE_URL
 npx wrangler@4 secret put SUPABASE_SERVICE_ROLE_KEY
 npx wrangler@4 secret put SUPABASE_USER_ID
+npx wrangler@4 secret put CREDENTIAL_ENCRYPTION_KEY
+npx wrangler@4 secret put ADMIN_SETUP_TOKEN
 npx wrangler@4 secret put OPENROUTER_API_KEY
 npx wrangler@4 secret put OPENCODE_GO_WORKSPACE_ID
 npx wrangler@4 secret put OPENCODE_GO_AUTH_COOKIE
 npx wrangler@4 secret put XFYUN_MAAS_API_URL
 npx wrangler@4 secret put XFYUN_MAAS_AUTH_COOKIE
+npx wrangler@4 secret put ALIYUN_BAILIAN_AUTH_COOKIE
 ```
 
 部署：
@@ -146,16 +155,23 @@ run_worker_first = ["/api/*"]
 | `SUPABASE_URL` | Supabase 项目地址 |
 | `SUPABASE_SERVICE_ROLE_KEY` | Worker 写入 Supabase 使用 |
 | `SUPABASE_USER_ID` | 当前看板归属用户 |
+| `CREDENTIAL_ENCRYPTION_KEY` | 32 字节 AES-GCM 加密 key，用于云端账号凭据 |
+| `ADMIN_SETUP_TOKEN` | 配置页调用 settings API 的管理 token |
 | `OPENROUTER_API_KEY` | OpenRouter key endpoint |
 | `OPENCODE_GO_WORKSPACE_ID` | OpenCode Go workspace id |
 | `OPENCODE_GO_AUTH_COOKIE` | OpenCode Go 登录 cookie |
 | `XFYUN_MAAS_API_URL` | 讯飞 `coding-plan/list` 用量接口 |
 | `XFYUN_MAAS_AUTH_COOKIE` | 讯飞登录 cookie |
+| `ALIYUN_BAILIAN_PAGE_URL` | 阿里云百炼 Coding Plan 看板入口 |
+| `ALIYUN_BAILIAN_API_URL` | 可选，稳定 JSON 用量接口；为空时显示 partial 入口 |
+| `ALIYUN_BAILIAN_AUTH_COOKIE` | 阿里云百炼登录 cookie |
 | `CLOUDFLARE_API_TOKEN` | 本地 Wrangler 部署使用 |
 
 ## 安全说明
 
 - `.env`、cookie、service role key 不进入 Git。
+- 配置页只把第三方凭据发给 Worker，Worker 加密后写入 Supabase；前端只读取脱敏 `credential_hint`。
+- `ADMIN_SETUP_TOKEN` 只存当前浏览器 `sessionStorage`，不要写进公开页面或截图。
 - `output/`、`.wrangler/`、`node_modules/`、`frontend/dist/` 已被忽略。
 - README 截图只展示用量，不包含密钥。
 - 如果浏览器 DevTools 或日志中曾显示过第三方平台返回的应用凭据，建议在对应平台重置凭据。
