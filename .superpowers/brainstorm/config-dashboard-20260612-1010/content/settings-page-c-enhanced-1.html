@@ -1,0 +1,67 @@
+<h2>独立配置页：C 安全增强版 / B 式体验</h2>
+<p class="subtitle">目标：前端可管理多账号、启停供应商和拖拽排序；敏感凭据只在云端加密保存，Worker 抓取时解密使用。</p>
+
+<div class="mockup">
+  <div class="mockup-header">ApiMonitor / 配置</div>
+  <div class="mockup-body">
+    <div style="display:grid;grid-template-columns:190px 1fr;gap:16px">
+      <div class="mock-sidebar">
+        <div class="label">供应商</div>
+        <div class="placeholder">☑ OpenRouter</div>
+        <div class="placeholder">☑ OpenCode Go</div>
+        <div class="placeholder">☑ 讯飞 MaaS</div>
+        <div class="placeholder">☐ 阿里云百炼</div>
+        <button class="mock-button" style="margin-top:10px">+ 添加供应商</button>
+      </div>
+
+      <div class="mock-content">
+        <div class="section">
+          <h3>看板展示</h3>
+          <div class="placeholder">拖拽排序：OpenRouter → OpenCode Go → 讯飞 MaaS → 阿里云百炼</div>
+          <div class="placeholder">选中供应商才展示在首页；保存后首页按这里的顺序渲染</div>
+        </div>
+
+        <div class="section">
+          <h3>当前供应商：OpenCode Go</h3>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+            <div class="placeholder">账号 A：主账号　状态 ready　当前启用</div>
+            <div class="placeholder">账号 B：备用账号　状态 login_required</div>
+          </div>
+          <button class="mock-button">+ 新增账号</button>
+          <button class="mock-button">测试连接</button>
+          <button class="mock-button">设为启用</button>
+        </div>
+
+        <div class="section">
+          <h3>凭据配置</h3>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+            <input class="mock-input" placeholder="账号别名，例如 主账号">
+            <input class="mock-input" placeholder="workspaceId">
+            <input class="mock-input" placeholder="Cookie / API Key（保存后脱敏）">
+            <input class="mock-input" placeholder="endpoint / baseUrl（可选）">
+          </div>
+          <div class="placeholder">安全提示：前端只显示脱敏值；明文仅 Worker 抓取时读取；不保存网页登录密码。</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="pros-cons">
+  <div class="pros">
+    <h4>这个结构的好处</h4>
+    <ul>
+      <li>首页保持干净，只负责展示和刷新。</li>
+      <li>配置页承载供应商、多账号、顺序、测试连接。</li>
+      <li>后续新增阿里云百炼只是多一个 provider 配置面板。</li>
+    </ul>
+  </div>
+  <div class="cons">
+    <h4>需要注意</h4>
+    <ul>
+      <li>需要新增配置 API 和数据库表。</li>
+      <li>凭据必须加密、脱敏、禁止前端读取明文。</li>
+      <li>Cookie 过期仍需要手动更新。</li>
+    </ul>
+  </div>
+</div>

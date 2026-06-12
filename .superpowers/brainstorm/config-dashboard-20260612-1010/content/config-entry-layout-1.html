@@ -1,0 +1,64 @@
+<h2>配置入口放在哪里更顺手？</h2>
+<p class="subtitle">这一步只比较交互结构：供应商开关、顺序拖动、多账号配置都会放进这里。</p>
+
+<div class="cards">
+  <div class="card" data-choice="drawer" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mock-nav">ApiMonitor <button class="mock-button">立即刷新</button> <button class="mock-button">配置</button></div>
+      <div style="display:grid;grid-template-columns:1fr 240px;gap:14px;margin-top:12px">
+        <div class="mock-content">
+          <div class="placeholder">OpenRouter 卡片</div>
+          <div class="placeholder">OpenCode Go 卡片</div>
+        </div>
+        <div class="mock-sidebar">
+          <strong>配置抽屉</strong>
+          <div class="placeholder">供应商开关</div>
+          <div class="placeholder">拖动排序</div>
+          <div class="placeholder">账号列表</div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A. 右侧抽屉</h3>
+      <p>不离开看板，适合快速调整展示顺序和启用状态；多账号配置较复杂时会偏挤。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="modal" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mock-nav">ApiMonitor <button class="mock-button">立即刷新</button> <button class="mock-button">配置</button></div>
+      <div class="mock-content" style="margin-top:12px">
+        <div class="placeholder">看板背景</div>
+        <div class="mockup" style="margin:10px auto;max-width:420px">
+          <div class="mockup-header">配置弹窗</div>
+          <div class="mockup-body">
+            <div class="placeholder">供应商 Tabs</div>
+            <div class="placeholder">账号配置表单</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B. 居中弹窗</h3>
+      <p>实现最快、边界清楚；但拖拽排序和多账号管理在小屏上会比较局促。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="settings-page" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mock-nav">ApiMonitor | 看板 | 配置</div>
+      <div style="display:grid;grid-template-columns:180px 1fr;gap:14px;margin-top:12px">
+        <div class="mock-sidebar">供应商列表<br>OpenRouter<br>OpenCode Go<br>讯飞 MaaS<br>阿里云百炼</div>
+        <div class="mock-content">
+          <div class="placeholder">展示开关 + 拖拽排序</div>
+          <div class="placeholder">当前供应商账号表</div>
+          <div class="placeholder">凭据状态与测试连接</div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C. 独立配置页</h3>
+      <p>最适合多账号和新增平台，移动端也更稳；需要多一个页面状态和导航。</p>
+    </div>
+  </div>
+</div>

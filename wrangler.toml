@@ -1,0 +1,21 @@
+name = "apimonitor"
+main = "./worker/index.ts"
+compatibility_date = "2026-06-11"
+
+[vars]
+OPENROUTER_BASE_URL = "https://openrouter.ai"
+OPENCODE_GO_BASE_URL = "https://opencode.ai"
+XFYUN_MAAS_PAGE_URL = "https://maas.xfyun.cn/packageSubscription"
+
+[[durable_objects.bindings]]
+name = "REFRESH_SESSION"
+class_name = "RefreshSessionDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RefreshSessionDurableObject"]
+
+[assets]
+directory = "./frontend/dist"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*"]

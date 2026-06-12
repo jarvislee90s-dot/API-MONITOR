@@ -1,0 +1,705 @@
+import { describe, expect, it, vi } from "vitest";
+
+import { handleApiRequest } from "../../worker/index";
+import { RefreshSessionDurableObject } from "../../worker/durable-object/refresh-session";
+import type { WorkerEnv } from "../../worker/types";
+
+class MemoryStorage {
+  private readonly data = new Map<string, unknown>();
+
+  async get<T>(key: string): Promise<T | undefined> {
+    return this.data.get(key) as T | undefined;
+  }
+
+  async put(key: string, value: unknown): Promise<void> {
+    this.data.set(key, value);
+  }
+
+  async delete(key: string): Promise<void> {
+    this.data.delete(key);
+  }
+}
+
+function createEnv(fetchImpl: typeof fetch): WorkerEnv {
+  const objects = new Map<string, RefreshSessionDurableObject>();
+
+  return {
+    OPENROUTER_API_KEY: "sk-test",
+    OPENCODE_GO_WORKSPACE_ID: "wrk_123",
+    OPENCODE_GO_AUTH_COOKIE: "auth-cookie=abc",
+    XFYUN_MAAS_API_URL: "https://maas.xfyun.cn/api/subscription",
+    XFYUN_MAAS_AUTH_COOKIE: "session=abc",
+    REFRESH_SESSION: {
+      idFromName(name: string): string {
+        return name;
+      },
+      get(id: string) {
+        let instance = objects.get(id);
+        if (!instance) {
+          instance = new RefreshSessionDurableObject(
+            { storage: new MemoryStorage() },
+            {},
+          );
+          objects.set(id, instance);
+        }
+        return {
+          fetch(request: Request) {
+            return instance!.fetch(request);
+          },
+        };
+      },
+    },
+  } as WorkerEnv;
+}
+
+function createUsageFetchStub() {
+  return vi.fn(async (input: RequestInfo | URL) => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof Request
+          ? input.url
+          : input.toString();
+    if (url.includes("/api/v1/auth/key")) {
+      return new Response(
+        JSON.stringify({
+          data: {
+            usage: 12,
+            usage_daily: 4,
+            usage_weekly: 7,
+            usage_monthly: 9,
+            limit: 100,
+            limit_remaining: 88,
+            is_free_tier: false,
+            rate_limit_requests: 10,
+            rate_limit_interval: 60,
+            label: "Personal",
+          },
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      );
+    }
+
+    if (url.includes("opencode.ai/workspace")) {
+      return new Response(
+        [
+          "<html><script>",
+          "rollingUsage:$R[10]={usagePercent:7,resetInSec:18000}",
+          "weeklyUsage:$R[11]={resetInSec:540000,usagePercent:2}",
+          "monthlyUsage:$R[12]={usagePercent:16,resetInSec:2480000}",
+          "</script></html>",
+        ].join(""),
+        {
+          status: 200,
+          headers: { "content-type": "text/html; charset=utf-8" },
+        },
+      );
+    }
+
+    if (url.includes("maas.xfyun.cn/api/subscription")) {
+      return new Response(JSON.stringify({ used: 20, limit: 100, remaining: 80 }), {
+        status: 200,
+        headers: { "content-type": "application/json; charset=utf-8" },
+      });
+    }
+
+    throw new Error(`unexpected fetch ${url}`);
+  });
+}
+
+describe("worker api", () => {
+  it("lists the provider registry", async () => {
+    const env = createEnv(fetch);
+    const response = await handleApiRequest(new Request("https://api.monitor.local/api/providers"), env);
+    const payload = (await response.json()) as any;
+
+    expect(response.status).toBe(200);
+    expect(payload.ok).toBe(true);
+    expect(payload.data.map((provider: { id: string }) => provider.id)).toEqual([
+      "openrouter",
+      "opencode-go",
+      "xfyun-maas",
+    ]);
+  });
+
+  it("returns a unified usage dashboard from /api/usage", async () => {
+    const fetchImpl = createUsageFetchStub();
+    vi.stubGlobal("fetch", fetchImpl as unknown as typeof fetch);
+    try {
+      const env = createEnv(fetchImpl as typeof fetch);
+      const response = await handleApiRequest(new Request("https://api.monitor.local/api/usage"), env);
+      const payload = (await response.json()) as any;
+
+      expect(response.status).toBe(200);
+      expect(payload.ok).toBe(true);
+      expect(payload.data.kind).toBe("usage_dashboard");
+      expect(payload.data.cards).toHaveLength(3);
+      expect(payload.data.modelSpends).toEqual([]);
+      expect(payload.data.totals).toMatchObject({
+        providers: 3,
+        ready: 3,
+        partial: 0,
+        loginRequired: 0,
+        error: 0,
+      });
+      expect(payload.data.cards[0]).toMatchObject({
+        providerId: "openrouter",
+        providerName: "OpenRouter",
+      });
+      expect(payload.data.cards[0].trend).toHaveLength(4);
+      expect(payload.data.cards[1].trend).toHaveLength(3);
+      expect(payload.data.cards[2].trend).toHaveLength(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("falls back to the latest ready Supabase snapshot when live usage is partial", async () => {
+    const readyOpenCodeSnapshot = {
+      providerId: "opencode-go",
+      providerName: "OpenCode Go",
+      sourceUrl: "https://opencode.ai/workspace/wrk_123/go",
+      status: "ready",
+      capturedAt: "2026-06-11T00:00:00.000Z",
+      summary: "OpenCode Go usage windows parsed",
+      windows: [
+        {
+          key: "weekly",
+          label: "Weekly",
+          used: 26,
+          limit: 100,
+          remaining: 74,
+          percentUsed: 26,
+          percentRemaining: 74,
+        },
+      ],
+      metrics: {},
+      meta: {},
+    };
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof Request
+            ? input.url
+            : input.toString();
+
+      if (url.includes("/api/v1/auth/key")) {
+        return new Response(JSON.stringify({ data: { usage: 0, limit: 1, limit_remaining: 1 } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+
+      if (url.includes("opencode.ai/workspace")) {
+        return new Response("<html>No usage markers in this cloud response</html>", {
+          status: 200,
+          headers: { "content-type": "text/html; charset=utf-8" },
+        });
+      }
+
+      if (url.includes("maas.xfyun.cn/api/subscription")) {
+        return new Response(JSON.stringify({ used: 20, limit: 100, remaining: 80 }), {
+          status: 200,
+          headers: { "content-type": "application/json; charset=utf-8" },
+        });
+      }
+
+      if (url.startsWith("https://supabase.test/rest/v1/usage_snapshots")) {
+        return new Response(
+          JSON.stringify([
+            {
+              provider_key: "opencode-go",
+              payload: readyOpenCodeSnapshot,
+            },
+          ]),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      }
+
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    vi.stubGlobal("fetch", fetchImpl as unknown as typeof fetch);
+    try {
+      const env = {
+        ...createEnv(fetchImpl as typeof fetch),
+        SUPABASE_URL: "https://supabase.test",
+        SUPABASE_SERVICE_ROLE_KEY: "service-role-test",
+        SUPABASE_USER_ID: "00000000-0000-0000-0000-000000000001",
+      };
+      const response = await handleApiRequest(new Request("https://api.monitor.local/api/usage"), env);
+      const payload = (await response.json()) as any;
+      const openCodeCard = payload.data.cards.find(
+        (card: { providerId: string }) => card.providerId === "opencode-go",
+      );
+
+      expect(response.status).toBe(200);
+      expect(openCodeCard).toMatchObject({
+        providerId: "opencode-go",
+        status: "ready",
+      });
+      expect(openCodeCard.summary).toContain("OpenCode Go usage windows parsed");
+      expect(openCodeCard.windows).toHaveLength(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("refreshes a provider through the durable object gate", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof Request
+            ? input.url
+            : input.toString();
+      if (url.includes("/api/v1/auth/key")) {
+        return new Response(
+          JSON.stringify({
+            data: {
+              usage: 12,
+              usage_daily: 4,
+              limit: 100,
+              limit_remaining: 88,
+            },
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    vi.stubGlobal("fetch", fetchImpl as unknown as typeof fetch);
+    try {
+      const env = createEnv(fetchImpl as typeof fetch);
+      const response = await handleApiRequest(
+        new Request("https://api.monitor.local/api/refresh", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            providerId: "openrouter",
+            sessionKey: "openrouter:test-account",
+          }),
+        }),
+        env,
+      );
+
+      const payload = (await response.json()) as any;
+      expect(response.status).toBe(200);
+      expect(payload.ok).toBe(true);
+      expect(payload.data.refreshed).toBe(true);
+      expect(payload.data.snapshot.snapshot.status).toBe("ready");
+      expect(payload.data.snapshot.snapshot.providerId).toBe("openrouter");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("refreshes all providers and returns the unified dashboard when providerId is omitted", async () => {
+    const fetchImpl = createUsageFetchStub();
+    vi.stubGlobal("fetch", fetchImpl as unknown as typeof fetch);
+    try {
+      const env = createEnv(fetchImpl as typeof fetch);
+      const response = await handleApiRequest(
+        new Request("https://api.monitor.local/api/refresh", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ sessionKey: "dashboard" }),
+        }),
+        env,
+      );
+      const payload = (await response.json()) as any;
+
+      expect(response.status).toBe(200);
+      expect(payload.ok).toBe(true);
+      expect(payload.data.kind).toBe("usage_dashboard");
+      expect(payload.data.refresh).toMatchObject({
+        scope: "all",
+        sessionKey: "dashboard",
+        refreshed: true,
+      });
+      expect(payload.data.cards).toHaveLength(3);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("persists snapshots, quota windows, and refresh events to Supabase when configured", async () => {
+    const restWrites: Array<{ path: string; search: string; headers: Headers; body: unknown }> = [];
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = input instanceof Request ? input : null;
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof Request
+            ? input.url
+            : input.toString();
+
+      if (url.includes("/api/v1/auth/key")) {
+        return new Response(
+          JSON.stringify({
+            data: {
+              usage: 12,
+              usage_daily: 4,
+              limit: 100,
+              limit_remaining: 88,
+            },
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      }
+
+      if (url.startsWith("https://supabase.test/rest/v1/")) {
+        const parsedUrl = new URL(url);
+        const bodyText = request ? await request.clone().text() : String(init?.body ?? "");
+        restWrites.push({
+          path: parsedUrl.pathname,
+          search: parsedUrl.search,
+          headers: request ? request.headers : new Headers(init?.headers),
+          body: bodyText ? JSON.parse(bodyText) : null,
+        });
+        return new Response("", { status: 201 });
+      }
+
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    vi.stubGlobal("fetch", fetchImpl as unknown as typeof fetch);
+    try {
+      const env = {
+        ...createEnv(fetchImpl as typeof fetch),
+        SUPABASE_URL: "https://supabase.test",
+        SUPABASE_SERVICE_ROLE_KEY: "service-role-test",
+        SUPABASE_USER_ID: "00000000-0000-0000-0000-000000000001",
+      };
+      const response = await handleApiRequest(
+        new Request("https://api.monitor.local/api/refresh", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            providerId: "openrouter",
+            sessionKey: "openrouter:persist-test",
+          }),
+        }),
+        env,
+      );
+      const payload = (await response.json()) as any;
+
+      expect(response.status).toBe(200);
+      expect(payload.ok).toBe(true);
+      expect(payload.data.refreshed).toBe(true);
+      expect(restWrites.map((write) => write.path)).toEqual(
+        expect.arrayContaining([
+          "/rest/v1/provider_accounts",
+          "/rest/v1/usage_snapshots",
+          "/rest/v1/quota_windows",
+          "/rest/v1/refresh_events",
+        ]),
+      );
+      expect(restWrites.find((write) => write.path === "/rest/v1/quota_windows")?.body).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            user_id: "00000000-0000-0000-0000-000000000001",
+            provider_key: "openrouter",
+            window_key: "current",
+          }),
+        ]),
+      );
+      const providerAccountWrite = restWrites.find(
+        (write) => write.path === "/rest/v1/provider_accounts",
+      );
+      expect(providerAccountWrite?.search).toContain(
+        "on_conflict=user_id%2Cprovider_key%2Csource_url",
+      );
+      expect(providerAccountWrite?.headers.get("prefer")).toContain(
+        "resolution=merge-duplicates",
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("creates a live login session placeholder", async () => {
+    const env = createEnv(fetch);
+    const response = await handleApiRequest(
+      new Request("https://api.monitor.local/api/session/live-login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          provider: "xfyun-maas",
+          loginUrl: "https://maas.xfyun.cn/packageSubscription",
+        }),
+      }),
+      env,
+    );
+    const payload = (await response.json()) as any;
+
+    expect(response.status).toBe(200);
+    expect(payload.ok).toBe(true);
+    expect(payload.data).toMatchObject({
+      provider: "xfyun-maas",
+      loginUrl: "https://maas.xfyun.cn/packageSubscription",
+      liveViewUrl: "https://maas.xfyun.cn/packageSubscription",
+      status: "manual_open",
+    });
+    expect(payload.data.expiresAt).toEqual(expect.any(String));
+  });
+
+  it("rejects invalid live login requests", async () => {
+    const env = createEnv(fetch);
+    const response = await handleApiRequest(
+      new Request("https://api.monitor.local/api/session/live-login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          provider: "xfyun-maas",
+        }),
+      }),
+      env,
+    );
+    const payload = (await response.json()) as any;
+
+    expect(response.status).toBe(400);
+    expect(payload.ok).toBe(false);
+    expect(payload.error.code).toBe("invalid_request");
+  });
+
+  it("returns provider_not_found for unknown providers", async () => {
+    const env = createEnv(fetch);
+    const response = await handleApiRequest(
+      new Request("https://api.monitor.local/api/providers/unknown/snapshot"),
+      env,
+    );
+    const payload = (await response.json()) as any;
+
+    expect(response.status).toBe(404);
+    expect(payload.error.code).toBe("provider_not_found");
+  });
+
+  it("uses Supabase active account config during refresh when available", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+
+      if (url.includes("/api/v1/auth/key")) {
+        return new Response(JSON.stringify({ data: { usage: 12, limit: 100, limit_remaining: 88 } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+
+      if (url.includes("opencode.ai/workspace")) {
+        return new Response(
+          [
+            "<html><script>",
+            "rollingUsage:$R[10]={usagePercent:7,resetInSec:18000}",
+            "</script></html>",
+          ].join(""),
+          { status: 200, headers: { "content-type": "text/html; charset=utf-8" } },
+        );
+      }
+
+      if (url.includes("maas.xfyun.cn/api/subscription")) {
+        return new Response(JSON.stringify({ used: 20, limit: 100, remaining: 80 }), {
+          status: 200,
+          headers: { "content-type": "application/json; charset=utf-8" },
+        });
+      }
+
+      if (url.startsWith("https://supabase.test/rest/v1/provider_preferences")) {
+        return new Response(
+          JSON.stringify([{
+            provider_key: "opencode-go",
+            enabled: true,
+            display_order: 1,
+            active_provider_account_id: "account-db-1",
+          }]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+
+      if (url.startsWith("https://supabase.test/rest/v1/provider_accounts")) {
+        return new Response(
+          JSON.stringify([{
+            id: "account-db-1",
+            provider_key: "opencode-go",
+            account_label: "DB账号",
+            source_url: "https://opencode.ai/workspace/wrk_db/go",
+            status: "ready",
+            config: { baseUrl: "https://opencode.ai", workspaceId: "wrk_db" },
+          }]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+
+      if (url.startsWith("https://supabase.test/rest/v1/provider_account_credentials")) {
+        return new Response(
+          JSON.stringify([{
+            provider_account_id: "account-db-1",
+            encrypted_payload: "mock-encrypted",
+            nonce: "mock-nonce",
+            key_version: "v1",
+          }]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+
+      if (url.startsWith("https://supabase.test/rest/v1/refresh_events")) {
+        return new Response("", { status: 201 });
+      }
+
+      if (url.startsWith("https://supabase.test/rest/v1/usage_snapshots")) {
+        return new Response("", { status: 201 });
+      }
+
+      if (url.startsWith("https://supabase.test/rest/v1/provider_accounts")) {
+        return new Response("", { status: 201 });
+      }
+
+      if (url.startsWith("https://supabase.test/rest/v1/quota_windows")) {
+        return new Response("", { status: 201 });
+      }
+
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    vi.stubGlobal("fetch", fetchImpl as unknown as typeof fetch);
+    try {
+      const env = {
+        ...createEnv(fetchImpl as typeof fetch),
+        SUPABASE_URL: "https://supabase.test",
+        SUPABASE_SERVICE_ROLE_KEY: "service-role-test",
+        SUPABASE_USER_ID: "00000000-0000-0000-0000-000000000001",
+        CREDENTIAL_ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef",
+        OPENCODE_GO_WORKSPACE_ID: "wrk_123",
+        OPENCODE_GO_AUTH_COOKIE: "auth-cookie=abc",
+      };
+
+      const response = await handleApiRequest(
+        new Request("https://api.monitor.local/api/refresh", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ providerId: "opencode-go", sessionKey: "opencode-go:db-test" }),
+        }),
+        env,
+      );
+      const payload = (await response.json()) as any;
+
+      expect(response.status).toBe(200);
+      expect(payload.ok).toBe(true);
+      expect(payload.data.refreshed).toBe(true);
+      // The workspace URL should come from DB account config (wrk_db) instead of env (wrk_123)
+      const opencodeCalls = fetchImpl.mock.calls.filter((call) => {
+        const url = String(call[0]);
+        return url.includes("opencode.ai/workspace");
+      });
+      expect(opencodeCalls.length).toBeGreaterThan(0);
+      const opencodeUrl = String(opencodeCalls[0][0]);
+      expect(opencodeUrl).toContain("wrk_db");
+      expect(opencodeUrl).not.toContain("wrk_123");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("falls back to env config when Supabase active account is missing", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+
+      if (url.includes("/api/v1/auth/key")) {
+        return new Response(JSON.stringify({ data: { usage: 12, limit: 100, limit_remaining: 88 } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+
+      if (url.includes("opencode.ai/workspace")) {
+        return new Response(
+          [
+            "<html><script>",
+            "rollingUsage:$R[10]={usagePercent:7,resetInSec:18000}",
+            "</script></html>",
+          ].join(""),
+          { status: 200, headers: { "content-type": "text/html; charset=utf-8" } },
+        );
+      }
+
+      if (url.includes("maas.xfyun.cn/api/subscription")) {
+        return new Response(JSON.stringify({ used: 20, limit: 100, remaining: 80 }), {
+          status: 200,
+          headers: { "content-type": "application/json; charset=utf-8" },
+        });
+      }
+
+      if (url.startsWith("https://supabase.test/rest/v1/provider_preferences")) {
+        return new Response(JSON.stringify([]), { status: 200, headers: { "content-type": "application/json" } });
+      }
+
+      if (url.startsWith("https://supabase.test/rest/v1/refresh_events")) {
+        return new Response("", { status: 201 });
+      }
+
+      if (url.startsWith("https://supabase.test/rest/v1/usage_snapshots")) {
+        return new Response("", { status: 201 });
+      }
+
+      if (url.startsWith("https://supabase.test/rest/v1/provider_accounts")) {
+        return new Response("", { status: 201 });
+      }
+
+      if (url.startsWith("https://supabase.test/rest/v1/quota_windows")) {
+        return new Response("", { status: 201 });
+      }
+
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    vi.stubGlobal("fetch", fetchImpl as unknown as typeof fetch);
+    try {
+      const env = {
+        ...createEnv(fetchImpl as typeof fetch),
+        SUPABASE_URL: "https://supabase.test",
+        SUPABASE_SERVICE_ROLE_KEY: "service-role-test",
+        SUPABASE_USER_ID: "00000000-0000-0000-0000-000000000001",
+        CREDENTIAL_ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef",
+        OPENCODE_GO_WORKSPACE_ID: "wrk_123",
+        OPENCODE_GO_AUTH_COOKIE: "auth-cookie=abc",
+      };
+
+      const response = await handleApiRequest(
+        new Request("https://api.monitor.local/api/refresh", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ providerId: "opencode-go", sessionKey: "opencode-go:env-test" }),
+        }),
+        env,
+      );
+      const payload = (await response.json()) as any;
+
+      expect(response.status).toBe(200);
+      expect(payload.ok).toBe(true);
+      expect(payload.data.refreshed).toBe(true);
+      const opencodeCalls = fetchImpl.mock.calls.filter((call) => {
+        const url = String(call[0]);
+        return url.includes("opencode.ai/workspace");
+      });
+      expect(opencodeCalls.length).toBeGreaterThan(0);
+      const opencodeUrl = String(opencodeCalls[0][0]);
+      expect(opencodeUrl).toContain("wrk_123");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
