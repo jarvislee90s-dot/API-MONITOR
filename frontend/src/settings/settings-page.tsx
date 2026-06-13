@@ -12,6 +12,7 @@ import type {
 import { ProviderGallery } from "./provider-gallery";
 import { ProviderAccountPanel } from "./provider-account-panel";
 import { PUBLIC_PROVIDER_CATALOG } from "./provider-catalog";
+import { getAccountStatusLabel, getStatusTone } from "./account-status-labels";
 
 type SettingsApi = Pick<
   ReturnType<typeof createApiClient>,
@@ -309,7 +310,10 @@ export function SettingsPage({ api, dashboard, onBack }: SettingsPageProps) {
                   <article key={account.id} className="homepage-account-item is-enabled">
                     <span>
                       <strong>{account.accountLabel}</strong>
-                      <small>{account.lastTestSummary ?? "未测试"}</small>
+                      <small>{account.lastTestSummary ?? getAccountStatusLabel(account)}</small>
+                      <span className={`status-badge status-badge--${getStatusTone(account)}`}>
+                        {getAccountStatusLabel(account)}
+                      </span>
                     </span>
                     <div className="homepage-account-item__actions">
                       <button
@@ -350,7 +354,10 @@ export function SettingsPage({ api, dashboard, onBack }: SettingsPageProps) {
                   <article key={account.id} className="homepage-account-item">
                     <span>
                       <strong>{account.accountLabel}</strong>
-                      <small>{account.lastTestSummary ?? "未测试"}</small>
+                      <small>{account.lastTestSummary ?? getAccountStatusLabel(account)}</small>
+                      <span className={`status-badge status-badge--${getStatusTone(account)}`}>
+                        {getAccountStatusLabel(account)}
+                      </span>
                     </span>
                     <button
                       type="button"
@@ -364,6 +371,20 @@ export function SettingsPage({ api, dashboard, onBack }: SettingsPageProps) {
                     </button>
                   </article>
                 ))}
+              <button
+                type="button"
+                className="btn btn--ghost add-account-btn"
+                onClick={() => {
+                  const form = document.querySelector(".credential-form");
+                  if (form) {
+                    form.scrollIntoView({ behavior: "smooth", block: "center" });
+                    (form.querySelector("input") as HTMLInputElement | null)?.focus();
+                  }
+                }}
+                disabled={!adminToken}
+              >
+                + 新增账号
+              </button>
             </div>
           </section>
           <ProviderAccountPanel

@@ -368,4 +368,74 @@ describe("SettingsPage", () => {
     expect(await screen.findByText("账号已保存。")).toBeTruthy();
     expect(screen.getByText("apiKey: sk-or...new")).toBeTruthy();
   });
+
+  it("renders account status badges in the homepage account list", async () => {
+    const readyAccount = {
+      id: "acc-ready",
+      providerKey: "openrouter",
+      accountLabel: "主账号",
+      sourceUrl: "https://openrouter.ai/activity",
+      status: "ready",
+      statusMessage: null,
+      credentialHint: {},
+      homepageEnabled: true,
+      homepageOrder: 1,
+      lastTestSummary: null,
+    };
+    const loginRequiredAccount = {
+      id: "acc-login",
+      providerKey: "openrouter",
+      accountLabel: "备用账号",
+      sourceUrl: "https://openrouter.ai/activity",
+      status: "login_required",
+      statusMessage: null,
+      credentialHint: {},
+      homepageEnabled: true,
+      homepageOrder: 2,
+      lastTestSummary: null,
+    };
+
+    const api = {
+      getProviderSettings: vi.fn().mockResolvedValue({
+        catalog: [{ providerKey: "openrouter", providerName: "OpenRouter", sourceUrl: "https://openrouter.ai/activity", description: "test" }],
+        preferences: [{ providerKey: "openrouter", enabled: true, displayOrder: 1, activeProviderAccountId: null }],
+        accounts: [readyAccount, loginRequiredAccount],
+      }),
+      saveProviderPreferences: vi.fn(),
+      saveProviderAccount: vi.fn(),
+      testProviderAccount: vi.fn(),
+      updateProviderAccountDisplay: vi.fn(),
+    };
+
+    sessionStorage.setItem("api-monitor-admin-token", "test-token");
+    render(<SettingsPage api={api as never} onBack={() => undefined} />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("已连接").length).toBeGreaterThanOrEqual(1);
+    });
+    await waitFor(() => {
+      expect(screen.getAllByText("需要登录").length).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  it("shows '+ 新增账号' button when admin token is set", async () => {
+    const api = {
+      getProviderSettings: vi.fn().mockResolvedValue({
+        catalog: [{ providerKey: "openrouter", providerName: "OpenRouter", sourceUrl: "https://openrouter.ai/activity", description: "test" }],
+        preferences: [],
+        accounts: [],
+      }),
+      saveProviderPreferences: vi.fn(),
+      saveProviderAccount: vi.fn(),
+      testProviderAccount: vi.fn(),
+      updateProviderAccountDisplay: vi.fn(),
+    };
+
+    sessionStorage.setItem("api-monitor-admin-token", "test-token");
+    render(<SettingsPage api={api as never} onBack={() => undefined} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("+ 新增账号")).toBeTruthy();
+    });
+  });
 });
