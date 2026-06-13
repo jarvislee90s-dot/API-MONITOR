@@ -354,15 +354,21 @@ describe("xfyun maas adapter", () => {
 });
 
 describe("aliyun-bailian adapter", () => {
-  it("returns login_required when the auth cookie is missing", async () => {
+  it("returns a manual dashboard entry by default without cloud fetching", async () => {
+    const fetchImpl = vi.fn(async () => new Response("should not fetch"));
     const result = await fetchAliyunBailianSnapshot({
       now: new Date("2026-06-12T00:00:00.000Z"),
+      fetchImpl: fetchImpl as typeof fetch,
       config: {
         apiUrl: "https://bailian.console.aliyun.com/api/coding-plan/usage",
       },
     });
 
-    expect(result.snapshot.status).toBe("login_required");
+    expect(result.snapshot.status).toBe("partial");
+    expect(result.snapshot.summary).toContain("原网页");
+    expect(result.snapshot.sourceUrl).toContain("bailian.console.aliyun.com");
+    expect(result.snapshot.meta.openMode).toBe("external");
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it("returns partial with dashboard entry when no API URL is configured", async () => {
@@ -401,6 +407,7 @@ describe("aliyun-bailian adapter", () => {
         pageUrl: "https://bailian.console.aliyun.com/cn-beijing?tab=plan#/efm/subscription/coding-plan",
         apiUrl: "https://bailian.console.aliyun.com/api/coding-plan/usage",
         authCookie: "login=abc",
+        cloudFetchEnabled: true,
       },
     });
 
@@ -417,6 +424,96 @@ describe("aliyun-bailian adapter", () => {
     ]);
   });
 
+  it("parses Aliyun Bailian console coding plan quota response", async () => {
+    const fetchImpl = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          code: "200",
+          data: {
+            DataV2: {
+              data: {
+                data: {
+                  codingPlanInstanceInfos: [
+                    {
+                      codingPlanQuotaInfo: {
+                        perBillMonthUsedQuota: 18525,
+                        per5HourUsedQuota: 0,
+                        perBillMonthTotalQuota: 90000,
+                        per5HourTotalQuota: 6000,
+                        perWeekTotalQuota: 45000,
+                        perBillMonthQuotaNextRefreshTime: 1781366400000,
+                        per5HourQuotaNextRefreshTime: 1781279135000,
+                        perWeekUsedQuota: 1394,
+                        perWeekQuotaNextRefreshTime: 1781452800000,
+                      },
+                      instanceEndTime: 1781366400000,
+                      instanceName: "Coding Plan Pro",
+                      remainingDays: 1,
+                      instanceStartTime: 1773395017000,
+                      status: "VALID",
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+
+    const result = await fetchAliyunBailianSnapshot({
+      now: new Date("2026-06-12T00:00:00.000Z"),
+      fetchImpl: fetchImpl as typeof fetch,
+      config: {
+        pageUrl: "https://bailian.console.aliyun.com/cn-beijing?tab=plan#/efm/subscription/coding-plan",
+        apiUrl: "https://bailian-cs.console.aliyun.com/data/api.json?action=BroadScopeAspnGateway&product=sfm_bailian&api=zeldaEasy.broadscope-bailian.codingPlan.queryCodingPlanInstanceInfoV2",
+        authCookie: "login=abc",
+        cloudFetchEnabled: true,
+      },
+    });
+
+    expect(result.snapshot.status).toBe("ready");
+    expect(result.snapshot.windows).toEqual([
+      {
+        key: "5h",
+        label: "5h",
+        used: 0,
+        limit: 6000,
+        remaining: 6000,
+        resetAt: "2026-06-12T23:45:35+08:00",
+      },
+      {
+        key: "weekly",
+        label: "Weekly",
+        used: 1394,
+        limit: 45000,
+        remaining: 43606,
+        resetAt: "2026-06-15T00:00:00+08:00",
+      },
+      {
+        key: "monthly",
+        label: "Monthly",
+        used: 18525,
+        limit: 90000,
+        remaining: 71475,
+        resetAt: "2026-06-14T00:00:00+08:00",
+      },
+    ]);
+    expect(result.snapshot.metrics.planName).toBe("Coding Plan Pro");
+    expect(result.snapshot.metrics.planStatus).toBe("VALID");
+
+    const request = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    const body = request[1].body?.toString() ?? "";
+    const params = JSON.parse(new URLSearchParams(body).get("params") ?? "{}");
+    expect(params.Data.cornerstoneParam).toMatchObject({
+      protocol: "V2",
+      console: "ONE_CONSOLE",
+      productCode: "p_efm",
+      consoleSite: "BAILIAN_ALIYUN",
+    });
+  });
+
   it("rejects non-Aliyun API URLs before sending cookies", async () => {
     const fetchImpl = vi.fn(async () => {
       return new Response("should not fetch");
@@ -428,17 +525,49 @@ describe("aliyun-bailian adapter", () => {
       config: {
         apiUrl: "https://example.com/api/coding-plan/usage",
         authCookie: "login=abc",
+        cloudFetchEnabled: true,
       },
     });
 
     expect(result.snapshot.status).toBe("error");
-    expect(result.snapshot.summary).toContain("不安全");
+    expect(result.snapshot.summary).toContain("API URL");
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  it("reports login_required when the API returns a login page", async () => {
+
+  it("reports login_required when Aliyun gateway returns NotLogined", async () => {
     const fetchImpl = vi.fn(async () => {
-      return new Response("<html>登录</html>", {
+      return new Response(
+        JSON.stringify({
+          code: "200",
+          data: {
+            success: false,
+            errorCode: "BailianGateway.Login.NotLogined",
+            errorMsg: "BailianGateway.Login.NotLogined",
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+
+    const result = await fetchAliyunBailianSnapshot({
+      now: new Date("2026-06-12T00:00:00.000Z"),
+      fetchImpl: fetchImpl as typeof fetch,
+      config: {
+        apiUrl: "https://bailian-cs.console.aliyun.com/data/api.json?action=BroadScopeAspnGateway&product=sfm_bailian&api=zeldaEasy.broadscope-bailian.codingPlan.queryCodingPlanInstanceInfoV2",
+        authCookie: "login=abc",
+        cloudFetchEnabled: true,
+      },
+    });
+
+    expect(result.snapshot.status).toBe("partial");
+    expect(result.snapshot.summary).toContain("原网页");
+    expect(result.snapshot.meta.cloudFetchStatus).toBe("login_required");
+  });
+
+  it("falls back to the manual entry when the API returns a login page", async () => {
+    const fetchImpl = vi.fn(async () => {
+      return new Response("<html>login</html>", {
         status: 200,
         headers: { "content-type": "text/html; charset=utf-8" },
       });
@@ -450,9 +579,12 @@ describe("aliyun-bailian adapter", () => {
       config: {
         apiUrl: "https://bailian.console.aliyun.com/api/coding-plan/usage",
         authCookie: "login=abc",
+        cloudFetchEnabled: true,
       },
     });
 
-    expect(result.snapshot.status).toBe("login_required");
+    expect(result.snapshot.status).toBe("partial");
+    expect(result.snapshot.summary).toContain("原网页");
+    expect(result.snapshot.meta.cloudFetchStatus).toBe("login_required");
   });
 });

@@ -673,6 +673,7 @@ describe("worker api", () => {
       {
         apiUrl: "https://bailian.console.aliyun.com/api/coding-plan/usage",
         authCookie: "login=db",
+        cloudFetchEnabled: true,
       },
       encryptionKey,
     );
@@ -838,6 +839,86 @@ describe("worker api", () => {
       expect(opencodeCalls.length).toBeGreaterThan(0);
       const opencodeUrl = String(opencodeCalls[0][0]);
       expect(opencodeUrl).toContain("wrk_123");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("merges env secrets when a Supabase active account config is incomplete", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+
+      if (url.startsWith("https://supabase.test/rest/v1/provider_preferences")) {
+        return new Response(
+          JSON.stringify([{
+            provider_key: "aliyun-bailian",
+            enabled: true,
+            display_order: 1,
+            active_provider_account_id: "account-bailian-env-fallback",
+          }]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+
+      if (url.startsWith("https://supabase.test/rest/v1/provider_accounts")) {
+        return new Response(
+          JSON.stringify([{
+            id: "account-bailian-env-fallback",
+            provider_key: "aliyun-bailian",
+            source_url: "https://bailian.console.aliyun.com/cn-beijing?tab=plan#/efm/subscription/coding-plan",
+            config: {
+              pageUrl: "https://bailian.console.aliyun.com/cn-beijing?tab=plan#/efm/subscription/coding-plan",
+            },
+          }]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+
+      if (url.startsWith("https://supabase.test/rest/v1/provider_account_credentials")) {
+        return new Response(JSON.stringify([]), { status: 200, headers: { "content-type": "application/json" } });
+      }
+
+      if (url.startsWith("https://bailian-cs.console.aliyun.com/data/api.json")) {
+        return new Response(
+          JSON.stringify({
+            data: {
+              windows: [{ key: "monthly", label: "Monthly", used: 10, limit: 100 }],
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    vi.stubGlobal("fetch", fetchImpl as unknown as typeof fetch);
+    try {
+      const env = {
+        ...createEnv(fetchImpl as typeof fetch),
+        SUPABASE_URL: "https://supabase.test",
+        SUPABASE_SERVICE_ROLE_KEY: "service-role-test",
+        SUPABASE_USER_ID: "00000000-0000-0000-0000-000000000001",
+        ALIYUN_BAILIAN_API_URL: "https://bailian-cs.console.aliyun.com/data/api.json?action=BroadScopeAspnGateway&product=sfm_bailian&api=zeldaEasy.broadscope-bailian.codingPlan.queryCodingPlanInstanceInfoV2",
+        ALIYUN_BAILIAN_AUTH_COOKIE: "login=env",
+        ALIYUN_BAILIAN_SEC_TOKEN: "sec-test",
+        ALIYUN_BAILIAN_CLOUD_FETCH: "1",
+      };
+
+      const response = await handleApiRequest(
+        new Request("https://api.monitor.local/api/providers/aliyun-bailian/snapshot"),
+        env,
+      );
+      const payload = (await response.json()) as any;
+
+      expect(response.status).toBe(200);
+      expect(payload.data.snapshot.status).toBe("ready");
+      expect(payload.data.snapshot.windows).toHaveLength(1);
+      const bailianCall = fetchImpl.mock.calls.find((call) => String(call[0]).startsWith("https://bailian-cs.console.aliyun.com"));
+      expect(bailianCall).toBeDefined();
+      const request = bailianCall as unknown as [RequestInfo | URL, RequestInit];
+      const body = request[1].body?.toString() ?? "";
+      expect(new URLSearchParams(body).get("sec_token")).toBe("sec-test");
     } finally {
       vi.unstubAllGlobals();
     }

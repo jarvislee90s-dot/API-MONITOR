@@ -57,6 +57,8 @@ function buildProviderConfig(env: WorkerEnv, providerId: string): Record<string,
       pageUrl: env.ALIYUN_BAILIAN_PAGE_URL,
       apiUrl: env.ALIYUN_BAILIAN_API_URL,
       authCookie: env.ALIYUN_BAILIAN_AUTH_COOKIE,
+      secToken: env.ALIYUN_BAILIAN_SEC_TOKEN,
+      cloudFetchEnabled: env.ALIYUN_BAILIAN_CLOUD_FETCH,
     };
   }
 
@@ -64,6 +66,24 @@ function buildProviderConfig(env: WorkerEnv, providerId: string): Record<string,
     pageUrl: env.XFYUN_MAAS_PAGE_URL,
     apiUrl: env.XFYUN_MAAS_API_URL,
     authCookie: env.XFYUN_MAAS_AUTH_COOKIE,
+  };
+}
+
+function mergeProviderConfig(
+  env: WorkerEnv,
+  providerId: string,
+  providerConfig: Record<string, unknown> | null,
+): Record<string, unknown> {
+  const fallbackConfig = buildProviderConfig(env, providerId);
+  if (!providerConfig) return fallbackConfig;
+
+  const nonEmptyProviderConfig = Object.fromEntries(
+    Object.entries(providerConfig).filter(([, value]) => value !== undefined && value !== null && value !== ""),
+  );
+
+  return {
+    ...fallbackConfig,
+    ...nonEmptyProviderConfig,
   };
 }
 
@@ -96,7 +116,7 @@ async function buildProviderConfigs(
       const dbConfig = await getActiveProviderAccountConfig(env, preference.providerKey, fetchImpl);
       configs.push({
         providerId: preference.providerKey,
-        config: dbConfig ?? buildProviderConfig(env, preference.providerKey),
+        config: mergeProviderConfig(env, preference.providerKey, dbConfig),
       });
     }
     return configs;
@@ -118,7 +138,7 @@ async function buildProviderRuntimeConfig(
   }
 
   try {
-    return (await getActiveProviderAccountConfig(env, providerId, fetchImpl)) ?? buildProviderConfig(env, providerId);
+    return mergeProviderConfig(env, providerId, await getActiveProviderAccountConfig(env, providerId, fetchImpl));
   } catch {
     return buildProviderConfig(env, providerId);
   }

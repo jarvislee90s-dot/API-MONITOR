@@ -53,6 +53,7 @@ npx wrangler@4 secret put OPENCODE_GO_AUTH_COOKIE
 npx wrangler@4 secret put XFYUN_MAAS_API_URL
 npx wrangler@4 secret put XFYUN_MAAS_AUTH_COOKIE
 npx wrangler@4 secret put ALIYUN_BAILIAN_AUTH_COOKIE
+npx wrangler@4 secret put ALIYUN_BAILIAN_SEC_TOKEN
 ```
 
 普通默认变量保留在 `wrangler.toml` 的 `[vars]` 中：
@@ -61,7 +62,8 @@ npx wrangler@4 secret put ALIYUN_BAILIAN_AUTH_COOKIE
 - `OPENCODE_GO_BASE_URL`
 - `XFYUN_MAAS_PAGE_URL`
 - `ALIYUN_BAILIAN_PAGE_URL`
-- `ALIYUN_BAILIAN_API_URL` 可为空。为空时只展示百炼入口和 partial 状态；补充稳定 JSON API 后解析 quota windows。
+- `ALIYUN_BAILIAN_API_URL` 可为空。默认只展示百炼原网页入口和 partial 状态。
+- `ALIYUN_BAILIAN_CLOUD_FETCH` 默认留空。只有设为 `1` 时，Worker 才会尝试实验性百炼云端抓取；抓取遇到登录页、非 JSON 或空数据时会自动回退为原网页入口卡片。
 
 `CREDENTIAL_ENCRYPTION_KEY` 必须是 32 个 UTF-8 字节。配置页保存的第三方凭据会由 Worker 加密后写入 Supabase，前端只读取脱敏提示。
 
@@ -111,6 +113,8 @@ https://apimonitor.jarvislee90s.workers.dev/#/settings
 - 为单个供应商新增账号凭据。
 - 选择 active account。
 - 测试账号连接。
+
+阿里云百炼当前推荐作为“原网页入口型 provider”使用。点击卡片里的“打开看板”会进入阿里云百炼原页面；如果浏览器登录态仍有效，会直接看到 Coding Plan 页面，否则按阿里云页面要求重新扫码或登录。
 
 ## 6. 不要提交
 

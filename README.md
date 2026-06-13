@@ -30,7 +30,7 @@ API 与 Coding Plan 用量聚合看板。它把 OpenRouter、OpenCode Go、讯�
 | OpenRouter | 已接入 |
 | OpenCode Go | 已接入，含最近成功快照回退 |
 | 讯飞 MaaS | 已接入 `coding-plan/list` 用量接口 |
-| 阿里云百炼 | 已接入看板入口；配置稳定 JSON API 后解析 quota windows |
+| 阿里云百炼 | 已接入原网页入口；云端抓取保留为实验选项 |
 | 配置页 | 已接入 `#/settings` |
 
 ## 架构
@@ -129,6 +129,7 @@ npx wrangler@4 secret put OPENCODE_GO_AUTH_COOKIE
 npx wrangler@4 secret put XFYUN_MAAS_API_URL
 npx wrangler@4 secret put XFYUN_MAAS_AUTH_COOKIE
 npx wrangler@4 secret put ALIYUN_BAILIAN_AUTH_COOKIE
+npx wrangler@4 secret put ALIYUN_BAILIAN_SEC_TOKEN
 ```
 
 部署：
@@ -163,8 +164,10 @@ run_worker_first = ["/api/*"]
 | `XFYUN_MAAS_API_URL` | 讯飞 `coding-plan/list` 用量接口 |
 | `XFYUN_MAAS_AUTH_COOKIE` | 讯飞登录 cookie |
 | `ALIYUN_BAILIAN_PAGE_URL` | 阿里云百炼 Coding Plan 看板入口 |
-| `ALIYUN_BAILIAN_API_URL` | 可选，稳定 JSON 用量接口；为空时显示 partial 入口 |
-| `ALIYUN_BAILIAN_AUTH_COOKIE` | 阿里云百炼登录 cookie |
+| `ALIYUN_BAILIAN_API_URL` | 可选，实验性云端抓取接口；默认不启用 |
+| `ALIYUN_BAILIAN_AUTH_COOKIE` | 阿里云百炼登录 cookie，默认入口模式不主动使用 |
+| `ALIYUN_BAILIAN_SEC_TOKEN` | 可选，实验性云端抓取需要的阿里云 token |
+| `ALIYUN_BAILIAN_CLOUD_FETCH` | 可选，设为 `1` 才启用百炼云端抓取实验 |
 | `CLOUDFLARE_API_TOKEN` | 本地 Wrangler 部署使用 |
 
 ## 安全说明
@@ -172,6 +175,7 @@ run_worker_first = ["/api/*"]
 - `.env`、cookie、service role key 不进入 Git。
 - 配置页只把第三方凭据发给 Worker，Worker 加密后写入 Supabase；前端只读取脱敏 `credential_hint`。
 - `ADMIN_SETUP_TOKEN` 只存当前浏览器 `sessionStorage`，不要写进公开页面或截图。
+- 阿里云百炼默认作为原网页入口型 provider：ApiMonitor 只提供统一入口和状态说明，登录态由用户当前浏览器保存；实验性云端抓取需显式开启 `ALIYUN_BAILIAN_CLOUD_FETCH=1`。
 - `output/`、`.wrangler/`、`node_modules/`、`frontend/dist/` 已被忽略。
 - README 截图只展示用量，不包含密钥。
 - 如果浏览器 DevTools 或日志中曾显示过第三方平台返回的应用凭据，建议在对应平台重置凭据。

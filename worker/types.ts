@@ -152,6 +152,8 @@ export interface WorkerEnv extends RefreshSessionEnv {
   ALIYUN_BAILIAN_PAGE_URL?: string;
   ALIYUN_BAILIAN_API_URL?: string;
   ALIYUN_BAILIAN_AUTH_COOKIE?: string;
+  ALIYUN_BAILIAN_SEC_TOKEN?: string;
+  ALIYUN_BAILIAN_CLOUD_FETCH?: string;
   XFYUN_MAAS_API_URL?: string;
   XFYUN_MAAS_PAGE_URL?: string;
   XFYUN_MAAS_AUTH_COOKIE?: string;
