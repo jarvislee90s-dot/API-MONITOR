@@ -4,6 +4,7 @@ type ProviderDashboardPreference = {
   providerKey: string;
   enabled: boolean;
   displayOrder: number;
+  activeProviderAccountId: string | null;
 };
 
 function getStatusRank(status: UsageDashboard["status"]): number {
@@ -22,10 +23,14 @@ function buildSummary(cards: UsageProviderCard[]): string {
   return cards.map((card) => `${card.providerName}: ${card.status}`).join(" | ");
 }
 
-function buildCard(snapshot: ProviderSnapshot): UsageProviderCard {
+function buildCard(
+  snapshot: ProviderSnapshot,
+  preference?: { activeProviderAccountId: string | null },
+): UsageProviderCard {
+  const defaultAccountId = `${snapshot.providerId}:default`;
   const accountId = typeof snapshot.meta.accountId === "string"
     ? snapshot.meta.accountId
-    : `${snapshot.providerId}:default`;
+    : defaultAccountId;
   const accountLabel = typeof snapshot.meta.accountLabel === "string"
     ? snapshot.meta.accountLabel
     : "默认账号";
@@ -45,7 +50,7 @@ function buildCard(snapshot: ProviderSnapshot): UsageProviderCard {
     windows,
     metrics,
     meta,
-    selectedAccountId: accountId,
+    selectedAccountId: preference?.activeProviderAccountId ?? accountId,
     accounts: [
       {
         accountId,
@@ -91,7 +96,7 @@ export function buildUsageDashboard(
 ): UsageDashboard {
   const preferenceMap = new Map(options.providerPreferences?.map((item) => [item.providerKey, item]));
   const cards = snapshots
-    .map(buildCard)
+    .map((snapshot) => buildCard(snapshot, preferenceMap.get(snapshot.providerId)))
     .filter((card) => preferenceMap.get(card.providerId)?.enabled ?? true)
     .reduce<UsageProviderCard[]>((acc, card) => mergeCards([...acc, card]), [])
     .sort((left, right) => {

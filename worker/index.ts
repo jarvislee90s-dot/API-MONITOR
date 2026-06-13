@@ -30,6 +30,7 @@ type DashboardPreference = {
   providerKey: string;
   enabled: boolean;
   displayOrder: number;
+  activeProviderAccountId: string | null;
 };
 
 function createSessionKey(providerId: string, accountId?: string): string {

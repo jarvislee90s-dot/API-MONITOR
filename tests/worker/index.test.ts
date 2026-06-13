@@ -153,9 +153,9 @@ describe("worker api", () => {
       ],
       {
         providerPreferences: [
-          { providerKey: "opencode-go", enabled: true, displayOrder: 1 },
-          { providerKey: "openrouter", enabled: false, displayOrder: 2 },
-          { providerKey: "xfyun-maas", enabled: true, displayOrder: 3 },
+          { providerKey: "opencode-go", enabled: true, displayOrder: 1, activeProviderAccountId: null },
+          { providerKey: "openrouter", enabled: false, displayOrder: 2, activeProviderAccountId: null },
+          { providerKey: "xfyun-maas", enabled: true, displayOrder: 3, activeProviderAccountId: null },
         ],
       },
     );
