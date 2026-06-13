@@ -1,0 +1,77 @@
+- main [ref=e3]:
+  - generic [ref=e4]:
+    - generic [ref=e5]:
+      - button "返回" [ref=e6] [cursor=pointer]:
+        - img [ref=e7]
+        - text: 返回
+      - generic [ref=e9]:
+        - paragraph [ref=e10]: Settings
+        - heading "第三版：多层展开配置模型" [level=1] [ref=e11]
+      - button "保存配置" [disabled] [ref=e12]:
+        - img [ref=e13]
+        - text: 保存配置
+    - generic [ref=e17]:
+      - generic [ref=e18]:
+        - img [ref=e19]
+        - generic [ref=e22]: Admin Token
+        - textbox "Admin Token" [ref=e23]
+      - button "保存 Token" [ref=e24] [cursor=pointer]
+    - generic [ref=e25]:
+      - region "供应商卡片池" [ref=e26]:
+        - generic [ref=e28]:
+          - 'heading "Level 1: 供应商" [level=2] [ref=e29]'
+          - paragraph [ref=e30]: 选择供应商后，在下方展开账号和配置。停用不会删除已有配置。
+        - generic [ref=e31]:
+          - button "编辑 OpenRouter" [ref=e32] [cursor=pointer]:
+            - img [ref=e33]
+            - strong [ref=e36]: OpenRouter
+            - generic [ref=e37]: 已配置
+            - generic [ref=e38]: 供应商启用
+          - button "编辑 OpenCode Go" [ref=e39] [cursor=pointer]:
+            - img [ref=e40]
+            - strong [ref=e43]: OpenCode Go
+            - generic [ref=e44]: 已配置
+            - generic [ref=e45]: 供应商启用
+          - button "编辑 讯飞 MaaS" [ref=e46] [cursor=pointer]:
+            - img [ref=e47]
+            - strong [ref=e50]: 讯飞 MaaS
+            - generic [ref=e51]: 已配置
+            - generic [ref=e52]: 供应商启用
+          - button "编辑 阿里云百炼" [ref=e53] [cursor=pointer]:
+            - img [ref=e54]
+            - strong [ref=e58]: 阿里云百炼
+            - generic [ref=e59]: 入口型
+            - generic [ref=e60]: 供应商启用
+      - region "首页显示账号" [ref=e61]:
+        - generic [ref=e63]:
+          - 'heading "Level 2: 当前供应商的账号" [level=2] [ref=e64]'
+          - paragraph [ref=e65]: OpenRouter：选择要在首页大卡片内显示的账号，停用不会删除配置。
+        - article [ref=e67]:
+          - generic [ref=e68]:
+            - strong [ref=e69]: 默认账号
+            - generic [ref=e70]: OpenRouter usage snapshot loaded
+          - generic [ref=e71]:
+            - button "上移首页显示：默认账号" [disabled] [ref=e72]:
+              - img [ref=e73]
+            - button "下移首页显示：默认账号" [disabled] [ref=e75]:
+              - img [ref=e76]
+            - button "停用首页显示：默认账号" [disabled] [ref=e78]:
+              - img [ref=e79]
+              - text: 停用
+      - generic [ref=e84]:
+        - generic [ref=e85]:
+          - generic [ref=e86]:
+            - 'heading "Level 3: 账号配置" [level=2] [ref=e87]'
+            - paragraph [ref=e88]: Activity 聚合 / 花费拆分
+          - link "打开看板" [ref=e89] [cursor=pointer]:
+            - /url: https://openrouter.ai/activity
+        - generic [ref=e90]: 需要 Admin Token 后才能读取账号和保存配置。
+        - article [ref=e92]:
+          - generic [ref=e93]:
+            - radio "默认账号 未保存凭据" [disabled] [ref=e94]
+            - generic [ref=e95]:
+              - strong [ref=e96]: 默认账号
+              - generic [ref=e97]: 未保存凭据
+          - button "测试" [disabled] [ref=e99]:
+            - img [ref=e100]
+            - text: 测试

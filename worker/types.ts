@@ -36,6 +36,21 @@ export type UsageProviderCard = {
   windows: ProviderWindow[];
   metrics: Record<string, number | string | boolean | null>;
   meta: Record<string, unknown>;
+  selectedAccountId: string;
+  accounts: UsageProviderAccountCard[];
+};
+
+export type UsageProviderAccountCard = {
+  accountId: string;
+  accountLabel: string;
+  sourceUrl: string;
+  status: ProviderStatus;
+  summary: string;
+  capturedAt: string;
+  trend: ProviderWindow[];
+  windows: ProviderWindow[];
+  metrics: Record<string, number | string | boolean | null>;
+  meta: Record<string, unknown>;
 };
 
 export type UsageModelSpend = {

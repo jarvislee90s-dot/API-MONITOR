@@ -112,4 +112,35 @@ describe("api client mapping", () => {
       }),
     );
   });
+
+  it("updates provider account homepage display", async () => {
+    const fetcher = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          ok: true,
+          data: { id: "account-1", homepageEnabled: true, homepageOrder: 3 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    const api = createApiClient({ baseUrl: "https://api-monitor.test", fetcher: fetcher as typeof fetch });
+
+    await expect(
+      api.updateProviderAccountDisplay("admin-token", "account-1", {
+        homepageEnabled: true,
+        homepageOrder: 3,
+      }),
+    ).resolves.toEqual({ id: "account-1", homepageEnabled: true, homepageOrder: 3 });
+
+    expect(fetcher).toHaveBeenCalledWith(
+      "https://api-monitor.test/api/settings/accounts/account-1/display",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({ homepageEnabled: true, homepageOrder: 3 }),
+        headers: expect.objectContaining({
+          "x-api-monitor-admin-token": "admin-token",
+        }),
+      }),
+    );
+  });
 });

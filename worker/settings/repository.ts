@@ -28,6 +28,9 @@ export type SafeProviderAccount = {
   status: string;
   statusMessage: string | null;
   credentialHint: Record<string, unknown>;
+  homepageEnabled: boolean;
+  homepageOrder: number;
+  lastTestSummary: string | null;
 };
 
 export type ProviderSettingsPayload = {
@@ -57,6 +60,9 @@ type ProviderAccountRow = {
   status?: string;
   status_message?: string | null;
   credential_hint?: Record<string, unknown> | null;
+  homepage_enabled?: boolean;
+  homepage_order?: number;
+  last_test_summary?: string | null;
 };
 
 export function createSupabaseHeaders(serviceRoleKey: string): Record<string, string> {
@@ -114,6 +120,9 @@ function mapProviderAccount(row: ProviderAccountRow): SafeProviderAccount | null
     status: row.status ?? "disabled",
     statusMessage: row.status_message ?? null,
     credentialHint: row.credential_hint ?? {},
+    homepageEnabled: row.homepage_enabled ?? false,
+    homepageOrder: row.homepage_order ?? 100,
+    lastTestSummary: row.last_test_summary ?? null,
   };
 }
 
@@ -138,7 +147,7 @@ export async function listProviderSettings(
   const accountsUrl = new URL("/rest/v1/provider_accounts", env.SUPABASE_URL);
   accountsUrl.searchParams.set(
     "select",
-    "id,provider_key,account_label,source_url,status,status_message,credential_hint",
+    "id,provider_key,account_label,source_url,status,status_message,credential_hint,homepage_enabled,homepage_order,last_test_summary",
   );
   accountsUrl.searchParams.set("user_id", `eq.${env.SUPABASE_USER_ID}`);
   accountsUrl.searchParams.set("is_archived", "eq.false");
@@ -175,6 +184,54 @@ export type ProviderAccountInput = {
   statusMessage?: string | null;
   credentials?: CredentialPayload;
 };
+
+export async function updateProviderAccountDisplay(
+  env: SettingsEnv,
+  accountId: string,
+  display: { homepageEnabled: boolean; homepageOrder: number },
+  fetchImpl: typeof fetch,
+): Promise<{ id: string; homepageEnabled: boolean; homepageOrder: number }> {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY || !env.SUPABASE_USER_ID) {
+    throw new Error("Supabase configuration missing");
+  }
+
+  const url = new URL("/rest/v1/provider_accounts", env.SUPABASE_URL);
+  url.searchParams.set("id", `eq.${accountId}`);
+  url.searchParams.set("user_id", `eq.${env.SUPABASE_USER_ID}`);
+
+  const response = await fetchImpl(url, {
+    method: "PATCH",
+    headers: {
+      ...createSupabaseHeaders(env.SUPABASE_SERVICE_ROLE_KEY),
+      Prefer: "return=representation",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      homepage_enabled: display.homepageEnabled,
+      homepage_order: display.homepageOrder,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to update account display: ${response.status}`);
+  }
+
+  const rows = (await response.json().catch(() => [])) as Array<{
+    id?: string;
+    homepage_enabled?: boolean;
+    homepage_order?: number;
+  }>;
+  const row = rows[0];
+  if (!row?.id) {
+    throw new Error("Provider account not found");
+  }
+
+  return {
+    id: row.id,
+    homepageEnabled: row.homepage_enabled ?? display.homepageEnabled,
+    homepageOrder: row.homepage_order ?? display.homepageOrder,
+  };
+}
 
 export async function upsertProviderPreferences(
   env: SettingsEnv & { CREDENTIAL_ENCRYPTION_KEY?: string },

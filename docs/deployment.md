@@ -106,13 +106,12 @@ Invoke-RestMethod -Method Get -Uri "https://apimonitor.jarvislee90s.workers.dev/
 https://apimonitor.jarvislee90s.workers.dev/#/settings
 ```
 
-打开后输入 `ADMIN_SETUP_TOKEN`。配置页支持：
+配置页采用单页多层展开：
 
-- 启用或隐藏供应商。
-- 调整首页卡片顺序。
-- 为单个供应商新增账号凭据。
-- 选择 active account。
-- 测试账号连接。
+1. 供应商卡片池：查看已配置、可配置、入口型供应商。
+2. 账号层：查看某个供应商下的多个账号。
+3. 配置层：编辑单个账号的 provider-specific 凭据和原网页入口。
+4. 首页显示：控制账号是否作为该供应商首页大卡片内的子卡片展示。
 
 阿里云百炼当前推荐作为“原网页入口型 provider”使用。点击卡片里的“打开看板”会进入阿里云百炼原页面；如果浏览器登录态仍有效，会直接看到 Coding Plan 页面，否则按阿里云页面要求重新扫码或登录。
 

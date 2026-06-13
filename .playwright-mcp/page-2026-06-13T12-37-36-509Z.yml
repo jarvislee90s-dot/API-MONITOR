@@ -1,0 +1,30 @@
+- main [ref=e3]:
+  - generic [ref=e4]:
+    - generic [ref=e5]:
+      - button "返回" [ref=e6] [cursor=pointer]:
+        - img [ref=e7]
+        - text: 返回
+      - generic [ref=e9]:
+        - paragraph [ref=e10]: Settings
+        - heading "供应商配置" [level=1] [ref=e11]
+      - button "保存配置" [ref=e12] [cursor=pointer]:
+        - img [ref=e13]
+        - text: 保存配置
+    - generic [ref=e17]:
+      - generic [ref=e18]:
+        - img [ref=e19]
+        - generic [ref=e22]: Admin Token
+        - textbox "Admin Token" [ref=e23]: dummy-verification-token
+      - button "保存 Token" [active] [ref=e24] [cursor=pointer]
+    - generic [ref=e40]: 请求失败 (500)
+    - generic [ref=e25]:
+      - region "供应商卡片池" [ref=e26]:
+        - generic [ref=e28]:
+          - heading "供应商" [level=2] [ref=e29]
+          - paragraph [ref=e30]: 选择供应商后，在下方展开账号和配置。停用不会删除已有配置。
+      - region "首页显示账号" [ref=e31]:
+        - generic [ref=e33]:
+          - heading "当前供应商 账号" [level=2] [ref=e34]
+          - paragraph [ref=e35]: 选择要在首页大卡片内显示的账号，停用不会删除配置。
+        - generic [ref=e37]: 暂无首页显示账号
+      - heading "账号" [level=2] [ref=e39]

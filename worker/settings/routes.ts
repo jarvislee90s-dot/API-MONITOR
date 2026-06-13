@@ -2,6 +2,7 @@ import { errorResponse, successResponse, readJsonBody } from "../http";
 import {
   getProviderAccountConfigById,
   listProviderSettings,
+  updateProviderAccountDisplay,
   upsertProviderAccount,
   upsertProviderPreferences,
 } from "./repository";
@@ -86,6 +87,44 @@ export async function handleSettingsRequest(
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to create account";
       return errorResponse(500, "account_creation_failed", message);
+    }
+  }
+
+  const displayMatch = url.pathname.match(/^\/api\/settings\/accounts\/([^/]+)\/display$/);
+  if (request.method === "PATCH" && displayMatch) {
+    try {
+      const accountId = decodeURIComponent(displayMatch[1]!);
+      const body = await readJsonBody<{
+        homepageEnabled: boolean;
+        homepageOrder: number;
+      }>(request);
+      if (
+        typeof body.homepageEnabled !== "boolean" ||
+        !Number.isInteger(body.homepageOrder) ||
+        body.homepageOrder < 0
+      ) {
+        return errorResponse(
+          400,
+          "invalid_request",
+          "homepageEnabled must be boolean and homepageOrder must be a non-negative integer",
+        );
+      }
+      const result = await updateProviderAccountDisplay(
+        env,
+        accountId,
+        {
+          homepageEnabled: body.homepageEnabled,
+          homepageOrder: body.homepageOrder,
+        },
+        fetchImpl,
+      );
+      return successResponse(result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to update account display";
+      if (message === "Provider account not found") {
+        return errorResponse(404, "account_not_found", message);
+      }
+      return errorResponse(500, "account_display_update_failed", message);
     }
   }
 

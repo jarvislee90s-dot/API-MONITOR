@@ -20,6 +20,25 @@ const platformBases: Array<Omit<PlatformSnapshot, "lastRefreshedAt" | "quotaWind
     links: [
       { label: "打开看板", href: "https://maas.xfyun.cn/packageSubscription", tone: "brand" },
     ],
+    selectedAccountId: "xfyun:default",
+    accounts: [
+      {
+        id: "xfyun:default",
+        label: "默认账号",
+        summary: "保留原网页和登录态提示，便于后续接 Browser Run 登录修复与原网页抓取。",
+        status: "login_required",
+        loginState: "待云端校验",
+        sourceUrl: "https://maas.xfyun.cn/packageSubscription",
+        sourceLabel: "packageSubscription",
+        primaryMetricValue: "等待同步",
+        lastRefreshedAt: new Date().toISOString(),
+        quotaWindows: [],
+        trend: [],
+        links: [
+          { label: "打开看板", href: "https://maas.xfyun.cn/packageSubscription", tone: "brand" },
+        ],
+      },
+    ],
   },
   {
     id: "opencode-go",
@@ -40,6 +59,29 @@ const platformBases: Array<Omit<PlatformSnapshot, "lastRefreshedAt" | "quotaWind
         tone: "brand",
       },
     ],
+    selectedAccountId: "opencode-go:default",
+    accounts: [
+      {
+        id: "opencode-go:default",
+        label: "默认账号",
+        summary: "把 rolling、weekly、monthly 三个窗口统一折算成可比的 quota window，便于跨周期观察。",
+        status: "healthy",
+        loginState: "等待同步",
+        sourceUrl: "https://opencode.ai/workspace/wrk_01KTNPYQAX7HWSC5B04H1NEBRG/go",
+        sourceLabel: "wrk_01KTNPYQAX7HWSC5B04H1NEBRG/go",
+        primaryMetricValue: "等待同步",
+        lastRefreshedAt: new Date().toISOString(),
+        quotaWindows: [],
+        trend: [],
+        links: [
+          {
+            label: "打开看板",
+            href: "https://opencode.ai/workspace/wrk_01KTNPYQAX7HWSC5B04H1NEBRG/go",
+            tone: "brand",
+          },
+        ],
+      },
+    ],
   },
   {
     id: "openrouter",
@@ -55,6 +97,25 @@ const platformBases: Array<Omit<PlatformSnapshot, "lastRefreshedAt" | "quotaWind
     accent: "#b45309",
     links: [
       { label: "打开看板", href: "https://openrouter.ai/activity", tone: "brand" },
+    ],
+    selectedAccountId: "openrouter:default",
+    accounts: [
+      {
+        id: "openrouter:default",
+        label: "默认账号",
+        summary: "聚合模型花费与调用量，保留活动页、API 快照和渠道健康状态。",
+        status: "partial",
+        loginState: "等待同步",
+        sourceUrl: "https://openrouter.ai/activity",
+        sourceLabel: "activity",
+        primaryMetricValue: "等待同步",
+        lastRefreshedAt: new Date().toISOString(),
+        quotaWindows: [],
+        trend: [],
+        links: [
+          { label: "打开看板", href: "https://openrouter.ai/activity", tone: "brand" },
+        ],
+      },
     ],
   },
 ];
@@ -151,6 +212,7 @@ export function App() {
     return (
       <SettingsPage
         api={api}
+        dashboard={dashboard}
         onBack={() => {
           window.location.hash = "#/";
         }}

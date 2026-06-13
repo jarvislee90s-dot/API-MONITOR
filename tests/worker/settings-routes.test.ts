@@ -35,6 +35,23 @@ describe("provider settings migration", () => {
   });
 });
 
+describe("provider account homepage visibility migration", () => {
+  it("adds account-level homepage visibility without exposing credentials", () => {
+    const sql = readFileSync(
+      "supabase/migrations/202606130001_provider_account_homepage_visibility.sql",
+      "utf8",
+    );
+
+    expect(sql).toContain("alter table public.provider_accounts");
+    expect(sql).toContain("add column if not exists homepage_enabled boolean not null default false");
+    expect(sql).toContain("add column if not exists homepage_order integer not null default 100");
+    expect(sql).toContain("add column if not exists last_test_summary text");
+    expect(sql).toContain("create index if not exists provider_accounts_homepage_order_idx");
+    expect(sql).toContain("on public.provider_accounts (user_id, provider_key, homepage_enabled, homepage_order)");
+    expect(sql).not.toContain("provider_account_credentials");
+  });
+});
+
 describe("settings routes", () => {
   const env = {
     ADMIN_SETUP_TOKEN: "correct-token",
@@ -109,6 +126,9 @@ describe("settings routes", () => {
             credential_hint: {
               lastFour: "1234",
             },
+            homepage_enabled: true,
+            homepage_order: 1,
+            last_test_summary: "OpenRouter usage snapshot loaded",
             encrypted_payload: "secret",
           },
         ]);
@@ -152,17 +172,116 @@ describe("settings routes", () => {
             credentialHint: {
               lastFour: "1234",
             },
+            homepageEnabled: true,
+            homepageOrder: 1,
+            lastTestSummary: "OpenRouter usage snapshot loaded",
           },
         ],
       },
     });
     expect(JSON.stringify(body)).not.toContain("encrypted_payload");
+    expect(JSON.stringify(body)).not.toContain("encryptedPayload");
+    expect(JSON.stringify(body)).not.toContain("secret");
+    expect(JSON.stringify(body)).not.toContain("nonce");
     expect(fetchCalls.map((url) => url.pathname)).toEqual([
       "/rest/v1/provider_preferences",
       "/rest/v1/provider_accounts",
     ]);
     expect(fetchCalls[0].searchParams.get("user_id")).toBe("eq.user-123");
     expect(fetchCalls[1].searchParams.get("is_archived")).toBe("eq.false");
+  });
+
+  it("updates account homepage visibility without touching credentials", async () => {
+    const fetchCalls: { url: URL; init?: RequestInit }[] = [];
+    const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = new URL(input.toString());
+      fetchCalls.push({ url, init });
+      return Response.json([{ id: "account-1", homepage_enabled: true, homepage_order: 2 }]);
+    };
+
+    const response = await handleSettingsRequest(
+      new Request("https://api-monitor.local/api/settings/accounts/account-1/display", {
+        method: "PATCH",
+        headers: {
+          "content-type": "application/json",
+          "x-api-monitor-admin-token": "correct-token",
+        },
+        body: JSON.stringify({ homepageEnabled: true, homepageOrder: 2 }),
+      }),
+      env,
+      fetchImpl,
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      data: {
+        id: "account-1",
+        homepageEnabled: true,
+        homepageOrder: 2,
+      },
+    });
+
+    expect(fetchCalls).toHaveLength(1);
+    expect(fetchCalls[0]?.url.pathname).toBe("/rest/v1/provider_accounts");
+    expect(fetchCalls[0]?.url.searchParams.get("id")).toBe("eq.account-1");
+    expect(fetchCalls[0]?.url.searchParams.get("user_id")).toBe("eq.user-123");
+    expect(fetchCalls[0]?.init).toMatchObject({
+      method: "PATCH",
+      body: JSON.stringify({
+        homepage_enabled: true,
+        homepage_order: 2,
+      }),
+    });
+    expect(String(fetchCalls[0]?.init?.body)).not.toContain("credential");
+  });
+
+  it("rejects invalid account homepage display payloads", async () => {
+    const response = await handleSettingsRequest(
+      new Request("https://api-monitor.local/api/settings/accounts/account-1/display", {
+        method: "PATCH",
+        headers: {
+          "content-type": "application/json",
+          "x-api-monitor-admin-token": "correct-token",
+        },
+        body: JSON.stringify({ homepageEnabled: "yes", homepageOrder: -1 }),
+      }),
+      env,
+      async () => {
+        throw new Error("fetch should not be called for invalid payload");
+      },
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: false,
+      error: {
+        code: "invalid_request",
+      },
+    });
+  });
+
+  it("returns not found when account display update matches no rows", async () => {
+    const response = await handleSettingsRequest(
+      new Request("https://api-monitor.local/api/settings/accounts/missing-account/display", {
+        method: "PATCH",
+        headers: {
+          "content-type": "application/json",
+          "x-api-monitor-admin-token": "correct-token",
+        },
+        body: JSON.stringify({ homepageEnabled: true, homepageOrder: 2 }),
+      }),
+      env,
+      async () => Response.json([]),
+    );
+
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: false,
+      error: {
+        code: "account_not_found",
+      },
+    });
   });
 
   it("upserts provider preferences with correct admin token", async () => {

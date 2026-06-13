@@ -1,0 +1,173 @@
+- main [ref=e3]:
+  - generic [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]:
+        - generic [ref=e7]:
+          - paragraph [ref=e8]: ApiMonitor
+          - heading "API 与 Coding Plan 用量看板" [level=1] [ref=e9]
+          - paragraph [ref=e10]: 同一屏里看三个平台的健康状态、quota window、趋势、模型花费和原网页入口，活跃时自动刷新，空闲后自动暂停。
+        - generic [ref=e11]:
+          - link "配置" [ref=e12] [cursor=pointer]:
+            - /url: "#/settings"
+            - img [ref=e13]
+            - text: 配置
+          - button "同步中" [disabled] [ref=e14]:
+            - img [ref=e15]
+            - text: 同步中
+          - generic [ref=e20]:
+            - img [ref=e21]
+            - text: 活跃刷新中
+      - generic [ref=e23]:
+        - img [ref=e24]
+        - generic [ref=e29]: 正在刷新云端数据。
+      - generic [ref=e30]:
+        - generic [ref=e31]:
+          - generic [ref=e32]: 总花费
+          - strong [ref=e33]: $0.00
+        - generic [ref=e34]:
+          - generic [ref=e35]: 最新使用量
+          - strong [ref=e36]: "0"
+        - generic [ref=e37]:
+          - generic [ref=e38]: 平台数量
+          - strong [ref=e39]: "3"
+        - generic [ref=e40]:
+          - generic [ref=e41]: 刷新时间
+          - strong [ref=e42]: 6月13日 14:39
+      - generic [ref=e43]:
+        - generic [ref=e44]:
+          - img [ref=e45]
+          - text: 数据状态：部分可用
+        - generic [ref=e48]: 生成于 6月13日 14:39
+    - region "三平台统一看板" [ref=e49]:
+      - article [ref=e50]:
+        - generic [ref=e51]:
+          - generic [ref=e52]:
+            - paragraph [ref=e53]: 原网页入口 / 登录状态
+            - heading "讯飞 MaaS" [level=2] [ref=e54]
+            - paragraph [ref=e55]: 保留原网页和登录态提示，便于后续接 Browser Run 登录修复与原网页抓取。
+          - generic [ref=e56]:
+            - generic [ref=e57]:
+              - img [ref=e58]
+              - text: 待登录
+            - generic [ref=e61]:
+              - img [ref=e62]
+              - text: packageSubscription
+        - generic [ref=e65]:
+          - generic [ref=e66]:
+            - generic [ref=e67]: 当前套餐
+            - strong [ref=e68]: 等待同步
+          - generic [ref=e69]:
+            - generic [ref=e70]: 登录状态
+            - strong [ref=e71]: 待云端校验
+          - generic [ref=e72]:
+            - generic [ref=e73]: 最近同步
+            - strong [ref=e74]: 6月13日 14:39
+        - generic [ref=e75]:
+          - generic [ref=e76]: 暂无额度窗口，等待云端同步后显示。
+          - generic [ref=e77]:
+            - generic [ref=e78]:
+              - heading "讯飞 MaaS 趋势" [level=3] [ref=e79]
+              - generic [ref=e80]: 等待云端快照
+            - generic [ref=e81]: 暂无趋势数据，后续会显示 24 小时或 30 天曲线。
+        - generic [ref=e82]:
+          - generic [ref=e83]:
+            - generic [ref=e84]:
+              - heading "模型花费" [level=3] [ref=e85]
+              - generic [ref=e86]: 按模型聚合
+            - generic [ref=e87]: 暂无模型花费数据。
+          - generic [ref=e88]:
+            - heading "原网页和入口" [level=3] [ref=e89]
+            - paragraph [ref=e90]: 打开供应商原始看板；未登录时会跳转到对应登录页面。
+            - generic "原网页和状态链接" [ref=e91]:
+              - link "打开看板" [ref=e92] [cursor=pointer]:
+                - /url: https://maas.xfyun.cn/packageSubscription
+                - img [ref=e93]
+                - generic [ref=e96]: 打开看板
+      - article [ref=e97]:
+        - generic [ref=e98]:
+          - generic [ref=e99]:
+            - paragraph [ref=e100]: workspaceId + auth cookie
+            - heading "OpenCode Go" [level=2] [ref=e101]
+            - paragraph [ref=e102]: 把 rolling、weekly、monthly 三个窗口统一折算成可比的 quota window，便于跨周期观察。
+          - generic [ref=e103]:
+            - generic [ref=e104]:
+              - img [ref=e105]
+              - text: 健康
+            - generic [ref=e108]:
+              - img [ref=e109]
+              - text: wrk_01KTNPYQAX7HWSC5B04H1NEBRG/go
+        - generic [ref=e112]:
+          - generic [ref=e113]:
+            - generic [ref=e114]: 活跃窗口
+            - strong [ref=e115]: 等待同步
+          - generic [ref=e116]:
+            - generic [ref=e117]: 登录状态
+            - strong [ref=e118]: 等待同步
+          - generic [ref=e119]:
+            - generic [ref=e120]: 最近同步
+            - strong [ref=e121]: 6月13日 14:39
+        - generic [ref=e122]:
+          - generic [ref=e123]: 暂无额度窗口，等待云端同步后显示。
+          - generic [ref=e124]:
+            - generic [ref=e125]:
+              - heading "OpenCode Go 趋势" [level=3] [ref=e126]
+              - generic [ref=e127]: 等待云端快照
+            - generic [ref=e128]: 暂无趋势数据，后续会显示 24 小时或 30 天曲线。
+        - generic [ref=e129]:
+          - generic [ref=e130]:
+            - generic [ref=e131]:
+              - heading "模型花费" [level=3] [ref=e132]
+              - generic [ref=e133]: 按模型聚合
+            - generic [ref=e134]: 暂无模型花费数据。
+          - generic [ref=e135]:
+            - heading "原网页和入口" [level=3] [ref=e136]
+            - paragraph [ref=e137]: 打开供应商原始看板；未登录时会跳转到对应登录页面。
+            - generic "原网页和状态链接" [ref=e138]:
+              - link "打开看板" [ref=e139] [cursor=pointer]:
+                - /url: https://opencode.ai/workspace/wrk_01KTNPYQAX7HWSC5B04H1NEBRG/go
+                - img [ref=e140]
+                - generic [ref=e143]: 打开看板
+      - article [ref=e144]:
+        - generic [ref=e145]:
+          - generic [ref=e146]:
+            - paragraph [ref=e147]: Activity 聚合 / 花费拆分
+            - heading "OpenRouter" [level=2] [ref=e148]
+            - paragraph [ref=e149]: 聚合模型花费与调用量，保留活动页、API 快照和渠道健康状态。
+          - generic [ref=e150]:
+            - generic [ref=e151]:
+              - img [ref=e152]
+              - text: 部分接入
+            - generic [ref=e157]:
+              - img [ref=e158]
+              - text: activity
+        - generic [ref=e161]:
+          - generic [ref=e162]:
+            - generic [ref=e163]: 本周期花费
+            - strong [ref=e164]: 等待同步
+          - generic [ref=e165]:
+            - generic [ref=e166]: 登录状态
+            - strong [ref=e167]: 等待同步
+          - generic [ref=e168]:
+            - generic [ref=e169]: 最近同步
+            - strong [ref=e170]: 6月13日 14:39
+        - generic [ref=e171]:
+          - generic [ref=e172]: 暂无额度窗口，等待云端同步后显示。
+          - generic [ref=e173]:
+            - generic [ref=e174]:
+              - heading "OpenRouter 趋势" [level=3] [ref=e175]
+              - generic [ref=e176]: 等待云端快照
+            - generic [ref=e177]: 暂无趋势数据，后续会显示 24 小时或 30 天曲线。
+        - generic [ref=e178]:
+          - generic [ref=e179]:
+            - generic [ref=e180]:
+              - heading "模型花费" [level=3] [ref=e181]
+              - generic [ref=e182]: 按模型聚合
+            - generic [ref=e183]: 暂无模型花费数据。
+          - generic [ref=e184]:
+            - heading "原网页和入口" [level=3] [ref=e185]
+            - paragraph [ref=e186]: 打开供应商原始看板；未登录时会跳转到对应登录页面。
+            - generic "原网页和状态链接" [ref=e187]:
+              - link "打开看板" [ref=e188] [cursor=pointer]:
+                - /url: https://openrouter.ai/activity
+                - img [ref=e189]
+                - generic [ref=e192]: 打开看板

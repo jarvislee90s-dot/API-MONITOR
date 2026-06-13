@@ -299,6 +299,34 @@ button {
   text-align: right;
 }
 
+.account-switcher {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+}
+
+.account-chip {
+  display: grid;
+  gap: 4px;
+  min-height: 54px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 9px 10px;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.account-chip.is-selected {
+  border-color: color-mix(in srgb, var(--accent) 44%, var(--line));
+  background: #f8fbff;
+}
+
+.account-chip small {
+  color: var(--muted);
+}
+
 .status-pill {
   display: inline-flex;
   align-items: center;
@@ -830,5 +858,100 @@ button.link-chip {
 @keyframes spin {
   to {
     transform: rotate(360deg);
+  }
+}
+.settings-workbench {
+  display: grid;
+  grid-template-columns: minmax(260px, 360px) minmax(260px, 360px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.provider-gallery-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.provider-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 10px;
+}
+
+.provider-gallery-card {
+  display: grid;
+  gap: 6px;
+  min-height: 80px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 12px;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.provider-gallery-card.is-selected {
+  border-color: color-mix(in srgb, var(--accent) 44%, var(--line));
+  background: #f8fbff;
+}
+
+.provider-gallery-card strong {
+  font-size: 14px;
+}
+
+.provider-gallery-card span {
+  font-size: 12px;
+  color: var(--accent-2);
+}
+
+.provider-gallery-card small {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.homepage-account-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.homepage-account-list {
+  display: grid;
+  gap: 10px;
+}
+
+.homepage-account-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 10px;
+}
+
+.homepage-account-item.is-enabled {
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+}
+
+.homepage-account-item small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+}
+
+.homepage-account-item__actions {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+@media (max-width: 1100px) {
+  .settings-workbench {
+    grid-template-columns: 1fr;
   }
 }

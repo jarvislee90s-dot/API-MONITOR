@@ -12,7 +12,9 @@ API 与 Coding Plan 用量聚合看板。它把 OpenRouter、OpenCode Go、讯�
 
 - 统一展示 OpenRouter、OpenCode Go、讯飞 MaaS、阿里云百炼四个平台状态。
 - 支持 5 小时、每周、套餐总量等不同 quota window。
-- 独立配置页支持供应商启停、顺序调整、active account 选择和账号凭据保存。
+- 独立配置页支持"供应商 → 多账号 → 账号配置"的单页多层工作台。
+- 首页保持一个供应商一个大卡片；多账号通过卡片内账号子卡片切换显示。
+- 账号可单独控制是否在首页显示，停用不会删除配置或凭据。
 - 前端活跃时触发刷新，避免 cron 高频轮询。
 - Cloudflare Durable Object 做刷新节流。
 - Supabase Postgres 保存用量快照、窗口数据和刷新事件。
@@ -175,7 +177,8 @@ run_worker_first = ["/api/*"]
 - `.env`、cookie、service role key 不进入 Git。
 - 配置页只把第三方凭据发给 Worker，Worker 加密后写入 Supabase；前端只读取脱敏 `credential_hint`。
 - `ADMIN_SETUP_TOKEN` 只存当前浏览器 `sessionStorage`，不要写进公开页面或截图。
-- 阿里云百炼默认作为原网页入口型 provider：ApiMonitor 只提供统一入口和状态说明，登录态由用户当前浏览器保存；实验性云端抓取需显式开启 `ALIYUN_BAILIAN_CLOUD_FETCH=1`。
+- 账号级停用只影响首页展示，不删除 Supabase 中的账号元数据和加密凭据。
+- 阿里云百炼默认只保存原网页入口；实验性云端抓取字段默认不填写、不启用。
 - `output/`、`.wrangler/`、`node_modules/`、`frontend/dist/` 已被忽略。
 - README 截图只展示用量，不包含密钥。
 - 如果浏览器 DevTools 或日志中曾显示过第三方平台返回的应用凭据，建议在对应平台重置凭据。

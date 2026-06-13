@@ -60,6 +60,23 @@ export interface PlatformSnapshot {
   trend: TrendPoint[];
   modelSpends: ModelSpendRow[];
   links: RawLinkItem[];
+  selectedAccountId: string | null;
+  accounts: PlatformAccountSnapshot[];
+}
+
+export interface PlatformAccountSnapshot {
+  id: string;
+  label: string;
+  summary: string;
+  status: PlatformStatus;
+  loginState: string;
+  sourceUrl: string;
+  sourceLabel: string;
+  primaryMetricValue: string;
+  lastRefreshedAt: string;
+  quotaWindows: QuotaWindow[];
+  trend: TrendPoint[];
+  links: RawLinkItem[];
 }
 
 export interface DashboardSnapshot {
@@ -100,6 +117,9 @@ export interface SafeProviderAccount {
   status: string;
   statusMessage: string | null;
   credentialHint: Record<string, unknown>;
+  homepageEnabled: boolean;
+  homepageOrder: number;
+  lastTestSummary: string | null;
 }
 
 export interface ProviderSettingsPayload {
@@ -146,6 +166,21 @@ type ServerProviderWindow = {
 type ServerUsageCard = {
   providerId: string;
   providerName: string;
+  sourceUrl: string;
+  status: ServerProviderStatus;
+  summary: string;
+  capturedAt: string;
+  trend: ServerProviderWindow[];
+  windows: ServerProviderWindow[];
+  metrics: Record<string, number | string | boolean | null>;
+  meta: Record<string, unknown>;
+  selectedAccountId?: string;
+  accounts?: ServerUsageAccountCard[];
+};
+
+type ServerUsageAccountCard = {
+  accountId: string;
+  accountLabel: string;
   sourceUrl: string;
   status: ServerProviderStatus;
   summary: string;
@@ -376,6 +411,37 @@ function mapServerDashboard(server: ServerUsageDashboard): DashboardSnapshot {
         : windows.map(toTrendPointFromQuotaWindow);
     const primaryWindow = card.windows[0];
 
+    const accounts = (card.accounts ?? []).map((account) => {
+      const accountStatus = mapStatus(account.status);
+      const accountWindows = account.windows.map((window) => toQuotaWindow(accountStatus, window));
+      return {
+        id: account.accountId,
+        label: account.accountLabel,
+        summary: account.summary,
+        status: accountStatus,
+        loginState:
+          account.status === "login_required"
+            ? "需要登录"
+            : account.status === "error"
+              ? "抓取失败"
+              : account.status === "partial"
+                ? "部分可用"
+                : "已连接",
+        sourceUrl: account.sourceUrl,
+        sourceLabel: toSourceLabel(account.sourceUrl),
+        primaryMetricValue: account.windows[0]
+          ? formatWindowValue(account.windows[0])
+          : account.summary,
+        lastRefreshedAt: account.capturedAt,
+        quotaWindows: accountWindows,
+        trend:
+          account.trend.length > 0
+            ? account.trend.map(toTrendPoint)
+            : accountWindows.map(toTrendPointFromQuotaWindow),
+        links: toLinks(card.providerId, account.sourceUrl),
+      };
+    });
+
     return {
       id: card.providerId,
       name: card.providerName,
@@ -400,6 +466,8 @@ function mapServerDashboard(server: ServerUsageDashboard): DashboardSnapshot {
       trend,
       modelSpends: [],
       links: toLinks(card.providerId, card.sourceUrl),
+      selectedAccountId: card.selectedAccountId ?? accounts[0]?.id ?? null,
+      accounts,
     };
   });
 
@@ -562,6 +630,31 @@ export function createApiClient(options: ApiClientOptions = {}) {
             ...headers,
             "x-api-monitor-admin-token": adminToken,
           },
+        },
+      );
+
+      return unwrapEnvelope(payload);
+    },
+
+    async updateProviderAccountDisplay(
+      adminToken: string,
+      accountId: string,
+      input: { homepageEnabled: boolean; homepageOrder: number },
+    ): Promise<{ id: string; homepageEnabled: boolean; homepageOrder: number }> {
+      const payload = await requestJson<
+        | { id: string; homepageEnabled: boolean; homepageOrder: number }
+        | ApiEnvelope<{ id: string; homepageEnabled: boolean; homepageOrder: number }>
+      >(
+        fetcher,
+        buildUrl(options.baseUrl, `/api/settings/accounts/${encodeURIComponent(accountId)}/display`),
+        {
+          method: "PATCH",
+          credentials: "include",
+          headers: {
+            ...headers,
+            "x-api-monitor-admin-token": adminToken,
+          },
+          body: JSON.stringify(input),
         },
       );
 

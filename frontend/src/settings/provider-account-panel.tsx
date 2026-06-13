@@ -35,7 +35,7 @@ export function ProviderAccountPanel({
   if (!provider || !preference) {
     return (
       <section className="settings-panel settings-panel--empty">
-        <h2>账号</h2>
+        <h2>Level 3: 账号配置</h2>
       </section>
     );
   }
@@ -44,13 +44,17 @@ export function ProviderAccountPanel({
     <section className="settings-panel account-panel">
       <div className="settings-panel__head">
         <div>
-          <h2>{provider.providerName}</h2>
+          <h2>Level 3: 账号配置</h2>
           <p>{provider.description}</p>
         </div>
         <a className="btn btn--ghost" href={provider.sourceUrl} target="_blank" rel="noreferrer">
           打开看板
         </a>
       </div>
+
+      {!adminToken ? (
+        <div className="settings-empty">需要 Admin Token 后才能读取账号和保存配置。</div>
+      ) : null}
 
       <div className="account-list">
         {accounts.length === 0 ? (
@@ -63,6 +67,7 @@ export function ProviderAccountPanel({
                   type="radio"
                   name={`active-${provider.providerKey}`}
                   checked={preference.activeProviderAccountId === account.id}
+                  disabled={!adminToken}
                   onChange={() => onPreferenceChange({ ...preference, activeProviderAccountId: account.id })}
                 />
                 <span>
@@ -92,7 +97,7 @@ export function ProviderAccountPanel({
         )}
       </div>
 
-      <CredentialForm provider={provider} onSave={onSaveAccount} />
+      {adminToken ? <CredentialForm provider={provider} onSave={onSaveAccount} /> : null}
     </section>
   );
 }

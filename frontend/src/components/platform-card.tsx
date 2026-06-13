@@ -1,4 +1,4 @@
-import type { CSSProperties } from "react";
+import { useMemo, useState, useEffect, type CSSProperties } from "react";
 import { AlertTriangle, ArrowUpRight, CheckCircle2, Clock3, RefreshCw } from "lucide-react";
 import type { PlatformSnapshot } from "../api/client";
 import { ModelSpendTable } from "./model-spend-table";
@@ -35,7 +35,34 @@ const statusIcon: Record<PlatformSnapshot["status"], typeof CheckCircle2> = {
 };
 
 export function PlatformCard({ platform }: PlatformCardProps) {
-  const StatusIcon = statusIcon[platform.status];
+  const [selectedAccountId, setSelectedAccountId] = useState(platform.selectedAccountId);
+
+  // 当外部 platform.selectedAccountId 变化时，同步内部状态
+  useEffect(() => {
+    setSelectedAccountId(platform.selectedAccountId);
+  }, [platform.selectedAccountId]);
+
+  const selectedAccount = useMemo(() => {
+    return platform.accounts.find((account) => account.id === selectedAccountId) ?? platform.accounts[0] ?? null;
+  }, [platform.accounts, selectedAccountId]);
+
+  const display = selectedAccount
+    ? {
+        ...platform,
+        summary: selectedAccount.summary,
+        status: selectedAccount.status,
+        loginState: selectedAccount.loginState,
+        sourceUrl: selectedAccount.sourceUrl,
+        sourceLabel: selectedAccount.sourceLabel,
+        primaryMetricValue: selectedAccount.primaryMetricValue,
+        lastRefreshedAt: selectedAccount.lastRefreshedAt,
+        quotaWindows: selectedAccount.quotaWindows,
+        trend: selectedAccount.trend,
+        links: selectedAccount.links,
+      }
+    : platform;
+
+  const StatusIcon = statusIcon[display.status];
   const cardStyle = {
     "--accent": platform.accent,
   } as CSSProperties;
@@ -46,41 +73,58 @@ export function PlatformCard({ platform }: PlatformCardProps) {
         <div className="platform-card__heading">
           <p className="section-label">{platform.tagline}</p>
           <h2>{platform.name}</h2>
-          <p className="platform-card__summary">{platform.summary}</p>
+          <p className="platform-card__summary">{display.summary}</p>
         </div>
 
         <div className="platform-card__status">
-          <span className={`status-pill status-pill--${platform.status}`}>
+          <span className={`status-pill status-pill--${display.status}`}>
             <StatusIcon size={14} aria-hidden="true" />
-            {statusText[platform.status]}
+            {statusText[display.status]}
           </span>
           <span className="platform-card__updated">
             <ArrowUpRight size={14} aria-hidden="true" />
-            {platform.sourceLabel}
+            {display.sourceLabel}
           </span>
         </div>
       </header>
 
+      {platform.accounts.length > 1 ? (
+        <div className="account-switcher" aria-label={`${platform.name} 账号切换`}>
+          {platform.accounts.map((account) => (
+            <button
+              key={account.id}
+              type="button"
+              className={`account-chip ${account.id === selectedAccount?.id ? "is-selected" : ""}`}
+              aria-label={`切换到${account.label}`}
+              onClick={() => setSelectedAccountId(account.id)}
+            >
+              <span>{account.label}</span>
+              <small>{account.loginState}</small>
+            </button>
+          ))}
+        </div>
+      ) : null}
+
       <section className="platform-card__metrics">
         <div className="metric-box">
-          <span className="section-label">{platform.primaryMetricLabel}</span>
-          <strong>{platform.primaryMetricValue}</strong>
+          <span className="section-label">{display.primaryMetricLabel}</span>
+          <strong>{display.primaryMetricValue}</strong>
         </div>
         <div className="metric-box">
           <span className="section-label">登录状态</span>
-          <strong>{platform.loginState}</strong>
+          <strong>{display.loginState}</strong>
         </div>
         <div className="metric-box">
           <span className="section-label">最近同步</span>
-          <strong>{formatTimestamp(platform.lastRefreshedAt)}</strong>
+          <strong>{formatTimestamp(display.lastRefreshedAt)}</strong>
         </div>
       </section>
 
       <div className="platform-card__grid">
-        <QuotaWindowList windows={platform.quotaWindows} />
+        <QuotaWindowList windows={display.quotaWindows} />
         <UsageTrendChart
           title={`${platform.name} 趋势`}
-          points={platform.trend}
+          points={display.trend}
           accent={platform.accent}
         />
       </div>
@@ -92,7 +136,7 @@ export function PlatformCard({ platform }: PlatformCardProps) {
           <p className="platform-card__links-copy">
             打开供应商原始看板；未登录时会跳转到对应登录页面。
           </p>
-          <RawLinks links={platform.links} />
+          <RawLinks links={display.links} />
         </div>
       </div>
     </article>

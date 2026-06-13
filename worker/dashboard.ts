@@ -23,6 +23,17 @@ function buildSummary(cards: UsageProviderCard[]): string {
 }
 
 function buildCard(snapshot: ProviderSnapshot): UsageProviderCard {
+  const accountId = typeof snapshot.meta.accountId === "string"
+    ? snapshot.meta.accountId
+    : `${snapshot.providerId}:default`;
+  const accountLabel = typeof snapshot.meta.accountLabel === "string"
+    ? snapshot.meta.accountLabel
+    : "默认账号";
+  const trend = snapshot.windows.map((window) => ({ ...window }));
+  const windows = snapshot.windows.map((window) => ({ ...window }));
+  const metrics = { ...snapshot.metrics };
+  const meta = { ...snapshot.meta };
+
   return {
     providerId: snapshot.providerId,
     providerName: snapshot.providerName,
@@ -30,11 +41,44 @@ function buildCard(snapshot: ProviderSnapshot): UsageProviderCard {
     status: snapshot.status,
     summary: snapshot.summary,
     capturedAt: snapshot.capturedAt,
-    trend: snapshot.windows.map((window) => ({ ...window })),
-    windows: snapshot.windows.map((window) => ({ ...window })),
-    metrics: { ...snapshot.metrics },
-    meta: { ...snapshot.meta },
+    trend,
+    windows,
+    metrics,
+    meta,
+    selectedAccountId: accountId,
+    accounts: [
+      {
+        accountId,
+        accountLabel,
+        sourceUrl: snapshot.sourceUrl,
+        status: snapshot.status,
+        summary: snapshot.summary,
+        capturedAt: snapshot.capturedAt,
+        trend: trend.map((window) => ({ ...window })),
+        windows: windows.map((window) => ({ ...window })),
+        metrics: { ...metrics },
+        meta: { ...meta },
+      },
+    ],
   };
+}
+
+function mergeCards(cards: UsageProviderCard[]): UsageProviderCard[] {
+  const grouped = new Map<UsageProviderCard["providerId"], UsageProviderCard>();
+
+  for (const card of cards) {
+    const existing = grouped.get(card.providerId);
+    if (!existing) {
+      grouped.set(card.providerId, card);
+      continue;
+    }
+
+    existing.accounts.push(...card.accounts);
+    existing.status = mergeStatus(existing.status, card.status);
+    existing.capturedAt = existing.capturedAt > card.capturedAt ? existing.capturedAt : card.capturedAt;
+  }
+
+  return [...grouped.values()];
 }
 
 export function buildUsageDashboard(
@@ -49,6 +93,7 @@ export function buildUsageDashboard(
   const cards = snapshots
     .map(buildCard)
     .filter((card) => preferenceMap.get(card.providerId)?.enabled ?? true)
+    .reduce<UsageProviderCard[]>((acc, card) => mergeCards([...acc, card]), [])
     .sort((left, right) => {
       const leftOrder = preferenceMap.get(left.providerId)?.displayOrder ?? 100;
       const rightOrder = preferenceMap.get(right.providerId)?.displayOrder ?? 100;
