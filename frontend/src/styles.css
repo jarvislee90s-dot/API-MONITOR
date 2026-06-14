@@ -797,6 +797,46 @@ button.link-chip {
   padding-top: 14px;
 }
 
+.credential-form--grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.credential-form--grid label {
+  min-width: 0;
+}
+
+.credential-form--grid input[readonly] {
+  color: var(--muted);
+  background: #f8fafc;
+}
+
+.credential-form__security {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fbff;
+  padding: 10px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.credential-form__security strong {
+  color: var(--text);
+}
+
+.credential-form__editing {
+  grid-column: 1 / -1;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  background: #eff6ff;
+  padding: 9px 10px;
+  color: #1d4ed8;
+  font-weight: 600;
+}
+
 .credential-form .btn {
   width: fit-content;
 }
@@ -950,6 +990,73 @@ button.link-chip {
   justify-content: flex-end;
 }
 
+.account-display-card {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 12px;
+}
+
+.account-display-card--active {
+  border-color: #2563eb;
+  background: #eff6ff;
+  box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.16);
+}
+
+.account-display-card--disabled {
+  background: #f8fafc;
+  opacity: 0.86;
+}
+
+.account-display-card__main {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.account-display-card__main strong {
+  display: block;
+  color: var(--text);
+}
+
+.account-display-card__main small {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+}
+
+.account-display-card__edit {
+  justify-self: start;
+  width: fit-content;
+  padding: 6px 10px;
+}
+
+.account-display-card p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.account-display-card__bars {
+  display: flex;
+  gap: 6px;
+}
+
+.account-display-card__bars span {
+  display: block;
+  width: 52px;
+  height: 20px;
+  border-radius: 5px;
+  background: #cbd5e1;
+}
+
+.account-display-card--active .account-display-card__bars span:first-child {
+  background: #1677ff;
+}
+
 @media (max-width: 1100px) {
   .settings-workbench {
     grid-template-columns: 1fr;
@@ -982,7 +1089,8 @@ button.link-chip {
 }
 
 .add-account-btn {
-  display: block;
+  display: grid;
+  gap: 4px;
   width: 100%;
   margin-top: 12px;
   padding: 10px;
@@ -995,6 +1103,12 @@ button.link-chip {
   transition: background 0.15s;
 }
 
+.add-account-btn span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .add-account-btn:hover {
   background: var(--bg-hover, #f3f4f6);
 }
@@ -1002,4 +1116,44 @@ button.link-chip {
 .add-account-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.auth-shell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+}
+
+.auth-card {
+  width: min(420px, calc(100vw - 32px));
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  padding: 28px;
+}
+
+.auth-card__summary {
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+.auth-form {
+  display: grid;
+  gap: 14px;
+  margin-top: 20px;
+}
+
+.auth-error {
+  color: #b91c1c;
+  background: #fee2e2;
+  border: 1px solid #fecaca;
+  border-radius: 12px;
+  padding: 10px 12px;
+}
+
+@media (max-width: 720px) {
+  .credential-form--grid {
+    grid-template-columns: 1fr;
+  }
 }

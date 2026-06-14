@@ -5,6 +5,7 @@ import { listProviders, getProvider, isProviderId } from "./providers/registry";
 import { RefreshSessionDurableObject } from "./durable-object/refresh-session";
 import { handleSettingsRequest } from "./settings/routes";
 import { getActiveProviderAccountConfig, getProviderAccountConfigById, listProviderSettings } from "./settings/repository";
+import { requireUser } from "./auth";
 import type {
   ProviderFetchInput,
   ProviderDefinition,
@@ -97,9 +98,10 @@ type ProviderRuntimeConfig = {
 
 async function buildProviderConfigs(
   env: WorkerEnv,
+  userId: string | null,
   fetchImpl: typeof fetch,
 ): Promise<ProviderRuntimeConfig[]> {
-  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY || !env.SUPABASE_USER_ID) {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY || !userId) {
     return listProviders().map((provider) => ({
       providerId: provider.id,
       config: buildProviderConfig(env, provider.id),
@@ -107,7 +109,7 @@ async function buildProviderConfigs(
   }
 
   try {
-    const settings = await listProviderSettings(env, fetchImpl);
+    const settings = await listProviderSettings(env, userId, fetchImpl);
     if (settings.preferences.length === 0) {
       return listProviders().map((provider) => ({
         providerId: provider.id,
@@ -127,7 +129,7 @@ async function buildProviderConfigs(
 
       if (homepageAccounts.length > 0) {
         for (const account of homepageAccounts) {
-          const accountConfig = await getProviderAccountConfigById(env, account.id, fetchImpl);
+          const accountConfig = await getProviderAccountConfigById(env, userId, account.id, fetchImpl);
           configs.push({
             providerId: preference.providerKey,
             config: mergeProviderConfig(env, preference.providerKey, accountConfig?.config ?? null),
@@ -138,7 +140,7 @@ async function buildProviderConfigs(
         continue;
       }
 
-      const dbConfig = await getActiveProviderAccountConfig(env, preference.providerKey, fetchImpl);
+      const dbConfig = await getActiveProviderAccountConfig(env, userId, preference.providerKey, fetchImpl);
       configs.push({
         providerId: preference.providerKey,
         config: mergeProviderConfig(env, preference.providerKey, dbConfig),
@@ -155,15 +157,16 @@ async function buildProviderConfigs(
 
 async function buildProviderRuntimeConfig(
   env: WorkerEnv,
+  userId: string | null,
   providerId: string,
   fetchImpl: typeof fetch,
 ): Promise<Record<string, unknown>> {
-  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY || !env.SUPABASE_USER_ID) {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY || !userId) {
     return buildProviderConfig(env, providerId);
   }
 
   try {
-    return mergeProviderConfig(env, providerId, await getActiveProviderAccountConfig(env, providerId, fetchImpl));
+    return mergeProviderConfig(env, providerId, await getActiveProviderAccountConfig(env, userId, providerId, fetchImpl));
   } catch {
     return buildProviderConfig(env, providerId);
   }
@@ -241,8 +244,8 @@ async function fetchProviderSnapshot(
   }
 }
 
-async function collectUsageSnapshots(env: WorkerEnv, providerId?: string): Promise<ProviderSnapshot[]> {
-  const configs = await buildProviderConfigs(env, fetch);
+async function collectUsageSnapshots(env: WorkerEnv, userId: string | null, providerId?: string): Promise<ProviderSnapshot[]> {
+  const configs = await buildProviderConfigs(env, userId, fetch);
   
   const providers = providerId
     ? listProviders().filter((provider) => provider.id === providerId)
@@ -263,28 +266,28 @@ async function collectUsageSnapshots(env: WorkerEnv, providerId?: string): Promi
   return snapshots;
 }
 
-async function readDashboardPreferences(env: WorkerEnv): Promise<DashboardPreference[] | undefined> {
-  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY || !env.SUPABASE_USER_ID) {
+async function readDashboardPreferences(env: WorkerEnv, userId: string | null): Promise<DashboardPreference[] | undefined> {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY || !userId) {
     return undefined;
   }
 
   try {
-    const settings = await listProviderSettings(env, fetch);
+    const settings = await listProviderSettings(env, userId, fetch);
     return settings.preferences.length > 0 ? settings.preferences : undefined;
   } catch {
     return undefined;
   }
 }
 
-async function fetchLatestReadySnapshots(env: WorkerEnv): Promise<Map<string, ProviderSnapshot>> {
+async function fetchLatestReadySnapshots(env: WorkerEnv, userId: string | null): Promise<Map<string, ProviderSnapshot>> {
   const snapshots = new Map<string, ProviderSnapshot>();
-  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY || !env.SUPABASE_USER_ID) {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY || !userId) {
     return snapshots;
   }
 
   const url = new URL("/rest/v1/usage_snapshots", env.SUPABASE_URL);
   url.searchParams.set("select", "provider_key,payload,created_at");
-  url.searchParams.set("user_id", `eq.${env.SUPABASE_USER_ID}`);
+  url.searchParams.set("user_id", `eq.${userId}`);
   url.searchParams.set("status", "eq.ready");
   url.searchParams.set("order", "created_at.desc");
   url.searchParams.set("limit", "20");
@@ -314,12 +317,12 @@ async function fetchLatestReadySnapshots(env: WorkerEnv): Promise<Map<string, Pr
   return snapshots;
 }
 
-async function applyLatestReadyFallback(env: WorkerEnv, snapshots: ProviderSnapshot[]): Promise<ProviderSnapshot[]> {
+async function applyLatestReadyFallback(env: WorkerEnv, userId: string | null, snapshots: ProviderSnapshot[]): Promise<ProviderSnapshot[]> {
   if (snapshots.every((snapshot) => snapshot.status === "ready" && snapshot.windows.length > 0)) {
     return snapshots;
   }
 
-  const latestReadySnapshots = await fetchLatestReadySnapshots(env);
+  const latestReadySnapshots = await fetchLatestReadySnapshots(env, userId);
   if (latestReadySnapshots.size === 0) {
     return snapshots;
   }
@@ -339,8 +342,8 @@ async function applyLatestReadyFallback(env: WorkerEnv, snapshots: ProviderSnaps
   });
 }
 
-async function persistSnapshot(env: WorkerEnv, snapshot: ProviderSnapshot, decision: RefreshDecision | null): Promise<void> {
-  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY || !env.SUPABASE_USER_ID) return;
+async function persistSnapshot(env: WorkerEnv, userId: string | null, snapshot: ProviderSnapshot, decision: RefreshDecision | null): Promise<void> {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY || !userId) return;
 
   const headers = {
     apikey: env.SUPABASE_SERVICE_ROLE_KEY,
@@ -354,7 +357,7 @@ async function persistSnapshot(env: WorkerEnv, snapshot: ProviderSnapshot, decis
   };
 
   const providerAccountsRow = {
-    user_id: env.SUPABASE_USER_ID,
+    user_id: userId,
     provider_key: snapshot.providerId,
     display_name: snapshot.providerName,
     source_url: snapshot.sourceUrl,
@@ -366,7 +369,7 @@ async function persistSnapshot(env: WorkerEnv, snapshot: ProviderSnapshot, decis
   };
 
   const usageSnapshotsRow = {
-    user_id: env.SUPABASE_USER_ID,
+    user_id: userId,
     provider_key: snapshot.providerId,
     captured_at: snapshot.capturedAt,
     status: snapshot.status,
@@ -376,7 +379,7 @@ async function persistSnapshot(env: WorkerEnv, snapshot: ProviderSnapshot, decis
   };
 
   const quotaWindowRows = snapshot.windows.map((window) => ({
-    user_id: env.SUPABASE_USER_ID,
+    user_id: userId,
     provider_key: snapshot.providerId,
     window_key: window.key,
     window_label: window.label,
@@ -390,7 +393,7 @@ async function persistSnapshot(env: WorkerEnv, snapshot: ProviderSnapshot, decis
 
   if (decision) {
     const refreshEventsRow = {
-      user_id: env.SUPABASE_USER_ID,
+      user_id: userId,
       provider_key: snapshot.providerId,
       session_key: decision.session.sessionKey,
       event_type: decision.allowed ? "refresh_allowed" : "refresh_blocked",
@@ -461,7 +464,7 @@ async function handleProviderSnapshot(request: Request, providerId: string, env:
   const fetchInput: ProviderFetchInput = {
     now,
     fetchImpl: fetch,
-    config: await buildProviderRuntimeConfig(env, providerId, fetch),
+    config: await buildProviderRuntimeConfig(env, env.SUPABASE_USER_ID ?? null, providerId, fetch),
   };
   if (providerId === "opencode-go") {
     fetchInput.requestTimeoutMs = 15_000;
@@ -469,21 +472,38 @@ async function handleProviderSnapshot(request: Request, providerId: string, env:
   const snapshot = await provider.fetchSnapshot(fetchInput);
 
   if (request.headers.get("x-api-monitor-persist") === "1") {
-    await persistSnapshot(env, snapshot.snapshot, null);
+    await persistSnapshot(env, env.SUPABASE_USER_ID ?? null, snapshot.snapshot, null);
   }
 
   return successResponse(snapshot);
 }
 
-async function handleUsage(env: WorkerEnv): Promise<Response> {
-  const snapshots = await applyLatestReadyFallback(env, await collectUsageSnapshots(env));
+async function resolveRequestUserId(
+  request: Request,
+  env: WorkerEnv,
+): Promise<{ userId: string | null } | { response: Response }> {
+  const hasBearerToken = Boolean(request.headers.get("authorization"));
+  if (!hasBearerToken) {
+    return { userId: env.SUPABASE_USER_ID ?? null };
+  }
+
+  const auth = await requireUser(request, env, fetch);
+  if ("response" in auth) return auth;
+  return { userId: auth.user.userId };
+}
+
+async function handleUsage(request: Request, env: WorkerEnv): Promise<Response> {
+  const resolved = await resolveRequestUserId(request, env);
+  if ("response" in resolved) return resolved.response;
+  const { userId } = resolved;
+  const snapshots = await applyLatestReadyFallback(env, userId, await collectUsageSnapshots(env, userId));
   const dashboard = buildUsageDashboard(snapshots, {
-    providerPreferences: await readDashboardPreferences(env),
+    providerPreferences: await readDashboardPreferences(env, userId),
   });
   return successResponse(dashboard);
 }
 
-async function handleDashboardRefresh(request: Request, env: WorkerEnv, body: RefreshRequest): Promise<Response> {
+async function handleDashboardRefresh(request: Request, env: WorkerEnv, userId: string | null, body: RefreshRequest): Promise<Response> {
   const sessionKey = body.sessionKey ?? "dashboard";
   const sessionId = env.REFRESH_SESSION.idFromName(sessionKey);
   const sessionStub = env.REFRESH_SESSION.get(sessionId);
@@ -498,17 +518,17 @@ async function handleDashboardRefresh(request: Request, env: WorkerEnv, body: Re
   );
   const decisionPayload = (await decisionResponse.json()) as { ok: boolean; data?: RefreshDecision };
   const decision = decisionPayload.data ?? null;
-  const shouldPersist = body.persist !== false && Boolean(env.SUPABASE_URL && env.SUPABASE_SERVICE_ROLE_KEY && env.SUPABASE_USER_ID);
-  const snapshots = await applyLatestReadyFallback(env, await collectUsageSnapshots(env));
+  const shouldPersist = body.persist !== false && Boolean(env.SUPABASE_URL && env.SUPABASE_SERVICE_ROLE_KEY && userId);
+  const snapshots = await applyLatestReadyFallback(env, userId, await collectUsageSnapshots(env, userId));
 
   if (shouldPersist && decision?.allowed) {
     for (const snapshot of snapshots) {
-      await persistSnapshot(env, snapshot, decision);
+      await persistSnapshot(env, userId, snapshot, decision);
     }
   }
 
   const dashboard = buildUsageDashboard(snapshots, {
-    providerPreferences: await readDashboardPreferences(env),
+    providerPreferences: await readDashboardPreferences(env, userId),
     refresh: {
       scope: "all",
       sessionKey,
@@ -523,9 +543,12 @@ async function handleDashboardRefresh(request: Request, env: WorkerEnv, body: Re
 
 async function handleRefresh(request: Request, env: WorkerEnv): Promise<Response> {
   const body = await readJsonBody<RefreshRequest>(request).catch(() => ({} as RefreshRequest));
+  const resolved = await resolveRequestUserId(request, env);
+  if ("response" in resolved) return resolved.response;
+  const { userId } = resolved;
 
   if (!body.providerId) {
-    return handleDashboardRefresh(request, env, body);
+    return handleDashboardRefresh(request, env, userId, body);
   }
 
   if (!isProviderId(body.providerId)) {
@@ -562,18 +585,18 @@ async function handleRefresh(request: Request, env: WorkerEnv): Promise<Response
     });
   }
 
-  const snapshots = await collectUsageSnapshots(env, body.providerId);
+  const snapshots = await collectUsageSnapshots(env, userId, body.providerId);
   const hasAccountSnapshots = snapshots.some((snapshot) => typeof snapshot.meta.accountId === "string");
 
   if (hasAccountSnapshots) {
     if (body.persist !== false) {
       for (const snapshot of snapshots) {
-        await persistSnapshot(env, snapshot, decision);
+        await persistSnapshot(env, userId, snapshot, decision);
       }
     }
 
     const dashboard = buildUsageDashboard(snapshots, {
-      providerPreferences: await readDashboardPreferences(env),
+      providerPreferences: await readDashboardPreferences(env, userId),
       refresh: {
         scope: "single",
         providerId: body.providerId,
@@ -589,11 +612,11 @@ async function handleRefresh(request: Request, env: WorkerEnv): Promise<Response
   const snapshot = snapshots[0] ?? await fetchProviderSnapshot(
     env,
     body.providerId,
-    await buildProviderRuntimeConfig(env, body.providerId, fetch),
+    await buildProviderRuntimeConfig(env, userId, body.providerId, fetch),
   );
 
   if (body.persist !== false) {
-    await persistSnapshot(env, snapshot, decision);
+    await persistSnapshot(env, userId, snapshot, decision);
   }
 
   return successResponse({
@@ -659,12 +682,24 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
     });
   }
 
+  if (request.method === "GET" && url.pathname === "/api/auth/config") {
+    const publicKey = env.SUPABASE_PUBLISHABLE_KEY ?? env.SUPABASE_ANON_KEY;
+    if (!env.SUPABASE_URL || !publicKey) {
+      return errorResponse(500, "missing_auth_config", "Supabase auth config is not configured");
+    }
+
+    return successResponse({
+      supabaseUrl: env.SUPABASE_URL,
+      supabaseAnonKey: publicKey,
+    });
+  }
+
   if (request.method === "GET" && url.pathname === "/api/providers") {
     return handleProviders();
   }
 
   if (request.method === "GET" && url.pathname === "/api/usage") {
-    return handleUsage(env);
+    return handleUsage(request, env);
   }
 
   if (request.method === "GET" && url.pathname.startsWith("/api/providers/") && url.pathname.endsWith("/snapshot")) {

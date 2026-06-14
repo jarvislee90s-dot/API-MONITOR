@@ -42,7 +42,6 @@ export type ProviderSettingsPayload = {
 type SettingsEnv = {
   SUPABASE_URL?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string;
-  SUPABASE_USER_ID?: string;
 };
 
 type ProviderPreferenceRow = {
@@ -128,10 +127,11 @@ function mapProviderAccount(row: ProviderAccountRow): SafeProviderAccount | null
 
 export async function listProviderSettings(
   env: SettingsEnv,
+  userId: string,
   fetchImpl: typeof fetch,
 ): Promise<ProviderSettingsPayload> {
   const settings = createEmptyProviderSettings();
-  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY || !env.SUPABASE_USER_ID) {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
     return settings;
   }
 
@@ -141,7 +141,7 @@ export async function listProviderSettings(
     "select",
     "provider_key,enabled,display_order,active_provider_account_id",
   );
-  preferencesUrl.searchParams.set("user_id", `eq.${env.SUPABASE_USER_ID}`);
+  preferencesUrl.searchParams.set("user_id", `eq.${userId}`);
   preferencesUrl.searchParams.set("order", "display_order.asc");
 
   const accountsUrl = new URL("/rest/v1/provider_accounts", env.SUPABASE_URL);
@@ -149,7 +149,7 @@ export async function listProviderSettings(
     "select",
     "id,provider_key,account_label,source_url,status,status_message,credential_hint,homepage_enabled,homepage_order,last_test_summary",
   );
-  accountsUrl.searchParams.set("user_id", `eq.${env.SUPABASE_USER_ID}`);
+  accountsUrl.searchParams.set("user_id", `eq.${userId}`);
   accountsUrl.searchParams.set("is_archived", "eq.false");
 
   const [preferenceRows, accountRows] = await Promise.all([
@@ -187,17 +187,18 @@ export type ProviderAccountInput = {
 
 export async function updateProviderAccountDisplay(
   env: SettingsEnv,
+  userId: string,
   accountId: string,
   display: { homepageEnabled: boolean; homepageOrder: number },
   fetchImpl: typeof fetch,
 ): Promise<{ id: string; homepageEnabled: boolean; homepageOrder: number }> {
-  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY || !env.SUPABASE_USER_ID) {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
     throw new Error("Supabase configuration missing");
   }
 
   const url = new URL("/rest/v1/provider_accounts", env.SUPABASE_URL);
   url.searchParams.set("id", `eq.${accountId}`);
-  url.searchParams.set("user_id", `eq.${env.SUPABASE_USER_ID}`);
+  url.searchParams.set("user_id", `eq.${userId}`);
 
   const response = await fetchImpl(url, {
     method: "PATCH",
@@ -235,10 +236,11 @@ export async function updateProviderAccountDisplay(
 
 export async function upsertProviderPreferences(
   env: SettingsEnv & { CREDENTIAL_ENCRYPTION_KEY?: string },
+  userId: string,
   preferences: ProviderPreferenceInput,
   fetchImpl: typeof fetch,
 ): Promise<ProviderPreference> {
-  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY || !env.SUPABASE_USER_ID) {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
     throw new Error("Supabase configuration missing");
   }
 
@@ -248,7 +250,7 @@ export async function upsertProviderPreferences(
   const url = new URL("/rest/v1/provider_preferences", env.SUPABASE_URL);
   url.searchParams.set("on_conflict", "user_id,provider_key");
   const body = {
-    user_id: env.SUPABASE_USER_ID,
+    user_id: userId,
     provider_key: preferences.providerKey,
     enabled: preferences.enabled,
     display_order: preferences.displayOrder,
@@ -278,10 +280,11 @@ export async function upsertProviderPreferences(
 
 export async function upsertProviderAccount(
   env: SettingsEnv & { CREDENTIAL_ENCRYPTION_KEY?: string },
+  userId: string,
   account: ProviderAccountInput,
   fetchImpl: typeof fetch,
 ): Promise<{ id: string }> {
-  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY || !env.SUPABASE_USER_ID) {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
     throw new Error("Supabase configuration missing");
   }
 
@@ -301,7 +304,7 @@ export async function upsertProviderAccount(
   accountUrl.searchParams.set("on_conflict", "user_id,provider_key,account_label");
 
   const accountBody = {
-    user_id: env.SUPABASE_USER_ID,
+    user_id: userId,
     provider_key: account.providerKey,
     display_name: account.accountLabel,
     account_label: account.accountLabel,
@@ -343,7 +346,7 @@ export async function upsertProviderAccount(
     credUrl.searchParams.set("on_conflict", "provider_account_id");
 
     const credBody = {
-      user_id: env.SUPABASE_USER_ID,
+      user_id: userId,
       provider_account_id: accountId,
       encrypted_payload: encrypted.encryptedPayload,
       nonce: encrypted.nonce,
@@ -370,10 +373,11 @@ export async function upsertProviderAccount(
 
 export async function getActiveProviderAccountConfig(
   env: SettingsEnv & { CREDENTIAL_ENCRYPTION_KEY?: string },
+  userId: string,
   providerKey: string,
   fetchImpl: typeof fetch,
 ): Promise<Record<string, unknown> | null> {
-  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY || !env.SUPABASE_USER_ID) {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
     return null;
   }
 
@@ -383,7 +387,7 @@ export async function getActiveProviderAccountConfig(
   const prefUrl = new URL("/rest/v1/provider_preferences", env.SUPABASE_URL);
   prefUrl.searchParams.set("select", "*");
   prefUrl.searchParams.set("provider_key", `eq.${providerKey}`);
-  prefUrl.searchParams.set("user_id", `eq.${env.SUPABASE_USER_ID}`);
+  prefUrl.searchParams.set("user_id", `eq.${userId}`);
   prefUrl.searchParams.set("enabled", "eq.true");
 
   const prefResponse = await fetchImpl(prefUrl, { headers });
@@ -399,7 +403,7 @@ export async function getActiveProviderAccountConfig(
   const accountUrl = new URL("/rest/v1/provider_accounts", env.SUPABASE_URL);
   accountUrl.searchParams.set("select", "*");
   accountUrl.searchParams.set("id", `eq.${activeAccountId}`);
-  accountUrl.searchParams.set("user_id", `eq.${env.SUPABASE_USER_ID}`);
+  accountUrl.searchParams.set("user_id", `eq.${userId}`);
   accountUrl.searchParams.set("provider_key", `eq.${providerKey}`);
 
   const accountResponse = await fetchImpl(accountUrl, { headers });
@@ -453,10 +457,11 @@ export async function getActiveProviderAccountConfig(
 
 export async function getProviderAccountConfigById(
   env: SettingsEnv & { CREDENTIAL_ENCRYPTION_KEY?: string },
+  userId: string,
   accountId: string,
   fetchImpl: typeof fetch,
 ): Promise<{ providerKey: string; config: Record<string, unknown> } | null> {
-  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY || !env.SUPABASE_USER_ID) {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
     return null;
   }
 
@@ -464,7 +469,7 @@ export async function getProviderAccountConfigById(
   const accountUrl = new URL("/rest/v1/provider_accounts", env.SUPABASE_URL);
   accountUrl.searchParams.set("select", "provider_key,config,source_url");
   accountUrl.searchParams.set("id", `eq.${accountId}`);
-  accountUrl.searchParams.set("user_id", `eq.${env.SUPABASE_USER_ID}`);
+  accountUrl.searchParams.set("user_id", `eq.${userId}`);
 
   const accountResponse = await fetchImpl(accountUrl, { headers });
   if (!accountResponse.ok) return null;
@@ -480,7 +485,7 @@ export async function getProviderAccountConfigById(
   const credUrl = new URL("/rest/v1/provider_account_credentials", env.SUPABASE_URL);
   credUrl.searchParams.set("select", "encrypted_payload,nonce,key_version");
   credUrl.searchParams.set("provider_account_id", `eq.${accountId}`);
-  credUrl.searchParams.set("user_id", `eq.${env.SUPABASE_USER_ID}`);
+  credUrl.searchParams.set("user_id", `eq.${userId}`);
 
   const credResponse = await fetchImpl(credUrl, { headers });
   let decryptedConfig: Record<string, unknown> = {};

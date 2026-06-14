@@ -8,10 +8,10 @@ import type {
 import { CredentialForm } from "./credential-form";
 
 interface ProviderAccountPanelProps {
-  adminToken: string;
   provider: ProviderCatalogItem | null;
   preference: ProviderPreference | null;
   accounts: SafeProviderAccount[];
+  editingAccount: SafeProviderAccount | null;
   onPreferenceChange: (preference: ProviderPreference) => void;
   onSaveAccount: (account: ProviderAccountInput) => Promise<void>;
   onTestAccount: (accountId: string) => Promise<void>;
@@ -24,10 +24,10 @@ function formatHint(hint: Record<string, unknown>): string {
 }
 
 export function ProviderAccountPanel({
-  adminToken,
   provider,
   preference,
   accounts,
+  editingAccount,
   onPreferenceChange,
   onSaveAccount,
   onTestAccount,
@@ -52,10 +52,6 @@ export function ProviderAccountPanel({
         </a>
       </div>
 
-      {!adminToken ? (
-        <div className="settings-empty">需要 Admin Token 后才能读取账号和保存配置。</div>
-      ) : null}
-
       <div className="account-list">
         {accounts.length === 0 ? (
           <div className="settings-empty">暂无账号</div>
@@ -67,7 +63,6 @@ export function ProviderAccountPanel({
                   type="radio"
                   name={`active-${provider.providerKey}`}
                   checked={preference.activeProviderAccountId === account.id}
-                  disabled={!adminToken}
                   onChange={() => onPreferenceChange({ ...preference, activeProviderAccountId: account.id })}
                 />
                 <span>
@@ -85,7 +80,6 @@ export function ProviderAccountPanel({
                 <button
                   type="button"
                   className="btn btn--ghost"
-                  disabled={!adminToken}
                   onClick={() => void onTestAccount(account.id)}
                 >
                   <FlaskConical size={15} aria-hidden="true" />
@@ -97,7 +91,7 @@ export function ProviderAccountPanel({
         )}
       </div>
 
-      {adminToken ? <CredentialForm provider={provider} onSave={onSaveAccount} /> : null}
+      <CredentialForm provider={provider} account={editingAccount} onSave={onSaveAccount} />
     </section>
   );
 }

@@ -218,6 +218,100 @@ describe("worker api", () => {
     ]);
   });
 
+  it("returns public Supabase auth config without service credentials", async () => {
+    const env = {
+      ...createEnv(fetch),
+      SUPABASE_URL: "https://project.supabase.co",
+      SUPABASE_ANON_KEY: "anon-public-key",
+      SUPABASE_SERVICE_ROLE_KEY: "service-role-secret",
+    };
+
+    const response = await handleApiRequest(new Request("https://api.monitor.local/api/auth/config"), env);
+    const payload = (await response.json()) as any;
+
+    expect(response.status).toBe(200);
+    expect(payload).toEqual({
+      ok: true,
+      data: {
+        supabaseUrl: "https://project.supabase.co",
+        supabaseAnonKey: "anon-public-key",
+      },
+    });
+    expect(JSON.stringify(payload)).not.toContain("service-role-secret");
+  });
+
+  it("uses the authenticated Supabase user id when reading usage settings", async () => {
+    const providerFetch = createUsageFetchStub();
+    let sawAuthenticatedPreferenceQuery = false;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof Request
+            ? input.url
+            : input.toString();
+
+      if (url.endsWith("/auth/v1/user")) {
+        expect(init?.headers).toMatchObject({
+          apikey: "anon-public-key",
+          Authorization: "Bearer user-jwt",
+        });
+        return new Response(JSON.stringify({ id: "auth-user-123", email: "me@example.com" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+
+      if (url.startsWith("https://supabase.test/rest/v1/provider_preferences")) {
+        sawAuthenticatedPreferenceQuery = true;
+        expect(url).toContain("user_id=eq.auth-user-123");
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+
+      if (url.startsWith("https://supabase.test/rest/v1/provider_accounts")) {
+        expect(url).toContain("user_id=eq.auth-user-123");
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+
+      if (url.startsWith("https://supabase.test/rest/v1/usage_snapshots")) {
+        expect(url).toContain("user_id=eq.auth-user-123");
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+
+      return providerFetch(input);
+    });
+
+    vi.stubGlobal("fetch", fetchImpl as unknown as typeof fetch);
+    try {
+      const env = {
+        ...createEnv(fetchImpl as typeof fetch),
+        SUPABASE_URL: "https://supabase.test",
+        SUPABASE_ANON_KEY: "anon-public-key",
+        SUPABASE_SERVICE_ROLE_KEY: "service-role-test",
+      };
+      const response = await handleApiRequest(
+        new Request("https://api.monitor.local/api/usage", {
+          headers: { Authorization: "Bearer user-jwt" },
+        }),
+        env,
+      );
+
+      expect(response.status).toBe(200);
+      expect(sawAuthenticatedPreferenceQuery).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("returns a unified usage dashboard from /api/usage", async () => {
     const fetchImpl = createUsageFetchStub();
     vi.stubGlobal("fetch", fetchImpl as unknown as typeof fetch);

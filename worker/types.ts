@@ -158,6 +158,8 @@ export interface WorkerEnv extends RefreshSessionEnv {
   CREDENTIAL_ENCRYPTION_KEY?: string;
   SUPABASE_USER_ID?: string;
   SUPABASE_URL?: string;
+  SUPABASE_ANON_KEY?: string;
+  SUPABASE_PUBLISHABLE_KEY?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string;
   OPENROUTER_API_KEY?: string;
   OPENROUTER_BASE_URL?: string;

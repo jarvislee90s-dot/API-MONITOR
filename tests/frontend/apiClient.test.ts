@@ -64,21 +64,40 @@ describe("api client mapping", () => {
     ]);
   });
 
-  it("sends admin token when reading and saving provider settings", async () => {
+  it("loads public auth config from the worker", async () => {
+    const fetcher = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          ok: true,
+          data: {
+            supabaseUrl: "https://project.supabase.co",
+            supabaseAnonKey: "anon-public-key",
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const api = createApiClient({ fetcher: fetcher as typeof fetch });
+
+    await expect(api.getAuthConfig()).resolves.toEqual({
+      supabaseUrl: "https://project.supabase.co",
+      supabaseAnonKey: "anon-public-key",
+    });
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/auth/config",
+      expect.objectContaining({ method: "GET" }),
+    );
+  });
+
+  it("sends bearer token when reading and saving provider settings", async () => {
     const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith("/api/settings/providers") && init?.method === "GET") {
-        return new Response(
-          JSON.stringify({
-            ok: true,
-            data: {
-              catalog: [],
-              preferences: [],
-              accounts: [],
-            },
-          }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
+        return new Response(JSON.stringify({ ok: true, data: { catalog: [], preferences: [], accounts: [] } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
       }
 
       if (url.endsWith("/api/settings/providers") && init?.method === "PUT") {
@@ -91,29 +110,25 @@ describe("api client mapping", () => {
       return new Response("not found", { status: 404 });
     });
 
-    const api = createApiClient({ fetcher: fetcher as typeof fetch });
-    await api.getProviderSettings("admin-token");
-    await api.saveProviderPreferences("admin-token", [
+    const api = createApiClient({
+      fetcher: fetcher as typeof fetch,
+      authTokenProvider: async () => "user-access-token",
+    });
+    await api.getProviderSettings();
+    await api.saveProviderPreferences([
       { providerKey: "openrouter", enabled: true, displayOrder: 1, activeProviderAccountId: null },
     ]);
 
     expect(fetcher).toHaveBeenCalledTimes(2);
     expect(fetcher.mock.calls[0]?.[1]?.headers).toMatchObject({
-      "x-api-monitor-admin-token": "admin-token",
+      Authorization: "Bearer user-access-token",
     });
     expect(fetcher.mock.calls[1]?.[1]?.headers).toMatchObject({
-      "x-api-monitor-admin-token": "admin-token",
+      Authorization: "Bearer user-access-token",
     });
-    expect(fetcher.mock.calls[1]?.[1]?.body).toBe(
-      JSON.stringify({
-        providers: [
-          { providerKey: "openrouter", enabled: true, displayOrder: 1, activeProviderAccountId: null },
-        ],
-      }),
-    );
   });
 
-  it("updates provider account homepage display", async () => {
+  it("updates provider account homepage display with bearer auth", async () => {
     const fetcher = vi.fn(async () =>
       new Response(
         JSON.stringify({
@@ -123,10 +138,14 @@ describe("api client mapping", () => {
         { status: 200, headers: { "content-type": "application/json" } },
       ),
     );
-    const api = createApiClient({ baseUrl: "https://api-monitor.test", fetcher: fetcher as typeof fetch });
+    const api = createApiClient({
+      baseUrl: "https://api-monitor.test",
+      fetcher: fetcher as typeof fetch,
+      authTokenProvider: async () => "user-access-token",
+    });
 
     await expect(
-      api.updateProviderAccountDisplay("admin-token", "account-1", {
+      api.updateProviderAccountDisplay("account-1", {
         homepageEnabled: true,
         homepageOrder: 3,
       }),
@@ -138,7 +157,7 @@ describe("api client mapping", () => {
         method: "PATCH",
         body: JSON.stringify({ homepageEnabled: true, homepageOrder: 3 }),
         headers: expect.objectContaining({
-          "x-api-monitor-admin-token": "admin-token",
+          Authorization: "Bearer user-access-token",
         }),
       }),
     );

@@ -6,6 +6,12 @@ export interface ApiClientOptions {
   baseUrl?: string;
   fetcher?: typeof fetch;
   headers?: HeadersInit;
+  authTokenProvider?: () => Promise<string | null>;
+}
+
+export interface AuthConfig {
+  supabaseUrl: string;
+  supabaseAnonKey: string;
 }
 
 export interface ApiError extends Error {
@@ -493,7 +499,31 @@ export function createApiClient(options: ApiClientOptions = {}) {
     ...options.headers,
   };
 
+  async function createRequestHeaders(): Promise<HeadersInit> {
+    const token = options.authTokenProvider ? await options.authTokenProvider() : null;
+    if (!token) return headers;
+
+    return {
+      ...headers,
+      Authorization: `Bearer ${token}`,
+    };
+  }
+
   return {
+    async getAuthConfig(): Promise<AuthConfig> {
+      const payload = await requestJson<AuthConfig | ApiEnvelope<AuthConfig>>(
+        fetcher,
+        buildUrl(options.baseUrl, "/api/auth/config"),
+        {
+          method: "GET",
+          credentials: "include",
+          headers,
+        },
+      );
+
+      return unwrapEnvelope(payload);
+    },
+
     async getUsageDashboard(): Promise<DashboardSnapshot> {
       const payload = await requestJson<ServerUsageDashboard | ApiEnvelope<ServerUsageDashboard>>(
         fetcher,
@@ -501,7 +531,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
         {
           method: "GET",
           credentials: "include",
-          headers,
+          headers: await createRequestHeaders(),
         },
       );
 
@@ -515,7 +545,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
         {
           method: "POST",
           credentials: "include",
-          headers,
+          headers: await createRequestHeaders(),
           body: JSON.stringify({}),
         },
       );
@@ -555,17 +585,14 @@ export function createApiClient(options: ApiClientOptions = {}) {
       return unwrapEnvelope(payload);
     },
 
-    async getProviderSettings(adminToken: string): Promise<ProviderSettingsPayload> {
+    async getProviderSettings(): Promise<ProviderSettingsPayload> {
       const payload = await requestJson<ProviderSettingsPayload | ApiEnvelope<ProviderSettingsPayload>>(
         fetcher,
         buildUrl(options.baseUrl, "/api/settings/providers"),
         {
           method: "GET",
           credentials: "include",
-          headers: {
-            ...headers,
-            "x-api-monitor-admin-token": adminToken,
-          },
+          headers: await createRequestHeaders(),
         },
       );
 
@@ -573,7 +600,6 @@ export function createApiClient(options: ApiClientOptions = {}) {
     },
 
     async saveProviderPreferences(
-      adminToken: string,
       preferences: ProviderPreference[],
     ): Promise<ProviderPreference[]> {
       const payload = await requestJson<ProviderPreference[] | ApiEnvelope<ProviderPreference[]>>(
@@ -582,10 +608,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
         {
           method: "PUT",
           credentials: "include",
-          headers: {
-            ...headers,
-            "x-api-monitor-admin-token": adminToken,
-          },
+          headers: await createRequestHeaders(),
           body: JSON.stringify({ providers: preferences }),
         },
       );
@@ -594,7 +617,6 @@ export function createApiClient(options: ApiClientOptions = {}) {
     },
 
     async saveProviderAccount(
-      adminToken: string,
       account: ProviderAccountInput,
     ): Promise<{ id: string }> {
       const payload = await requestJson<{ id: string } | ApiEnvelope<{ id: string }>>(
@@ -603,10 +625,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
         {
           method: "POST",
           credentials: "include",
-          headers: {
-            ...headers,
-            "x-api-monitor-admin-token": adminToken,
-          },
+          headers: await createRequestHeaders(),
           body: JSON.stringify(account),
         },
       );
@@ -615,7 +634,6 @@ export function createApiClient(options: ApiClientOptions = {}) {
     },
 
     async testProviderAccount(
-      adminToken: string,
       accountId: string,
     ): Promise<{ ok: boolean; status: string; summary: string }> {
       const payload = await requestJson<
@@ -626,10 +644,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
         {
           method: "POST",
           credentials: "include",
-          headers: {
-            ...headers,
-            "x-api-monitor-admin-token": adminToken,
-          },
+          headers: await createRequestHeaders(),
         },
       );
 
@@ -637,7 +652,6 @@ export function createApiClient(options: ApiClientOptions = {}) {
     },
 
     async updateProviderAccountDisplay(
-      adminToken: string,
       accountId: string,
       input: { homepageEnabled: boolean; homepageOrder: number },
     ): Promise<{ id: string; homepageEnabled: boolean; homepageOrder: number }> {
@@ -650,10 +664,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
         {
           method: "PATCH",
           credentials: "include",
-          headers: {
-            ...headers,
-            "x-api-monitor-admin-token": adminToken,
-          },
+          headers: await createRequestHeaders(),
           body: JSON.stringify(input),
         },
       );

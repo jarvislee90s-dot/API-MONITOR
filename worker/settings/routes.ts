@@ -7,39 +7,30 @@ import {
   upsertProviderPreferences,
 } from "./repository";
 import { getProvider } from "../providers/registry";
+import { requireUser } from "../auth";
 
 type SettingsEnv = {
-  ADMIN_SETUP_TOKEN?: string;
   SUPABASE_URL?: string;
+  SUPABASE_ANON_KEY?: string;
+  SUPABASE_PUBLISHABLE_KEY?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string;
   SUPABASE_USER_ID?: string;
   CREDENTIAL_ENCRYPTION_KEY?: string;
 };
-
-function requireAdmin(request: Request, env: SettingsEnv): Response | null {
-  if (!env.ADMIN_SETUP_TOKEN) {
-    return errorResponse(500, "missing_admin_token", "ADMIN_SETUP_TOKEN is not configured");
-  }
-
-  if (request.headers.get("x-api-monitor-admin-token") !== env.ADMIN_SETUP_TOKEN) {
-    return errorResponse(401, "unauthorized", "Admin token is required");
-  }
-
-  return null;
-}
 
 export async function handleSettingsRequest(
   request: Request,
   env: SettingsEnv,
   fetchImpl: typeof fetch = fetch,
 ): Promise<Response> {
-  const adminError = requireAdmin(request, env);
-  if (adminError) return adminError;
+  const auth = await requireUser(request, env, fetchImpl);
+  if ("response" in auth) return auth.response;
+  const { userId } = auth.user;
 
   const url = new URL(request.url);
 
   if (request.method === "GET" && url.pathname === "/api/settings/providers") {
-    return successResponse(await listProviderSettings(env, fetchImpl));
+    return successResponse(await listProviderSettings(env, userId, fetchImpl));
   }
 
   if (request.method === "PUT" && url.pathname === "/api/settings/providers") {
@@ -60,7 +51,7 @@ export async function handleSettingsRequest(
       const preferences = isBatch ? body.providers! : [body];
       const result = [];
       for (const preference of preferences) {
-        result.push(await upsertProviderPreferences(env, preference, fetchImpl));
+        result.push(await upsertProviderPreferences(env, userId, preference, fetchImpl));
       }
       return successResponse(isBatch ? result : result[0]);
     } catch (error) {
@@ -77,12 +68,17 @@ export async function handleSettingsRequest(
         sourceUrl: string;
         credentials?: Record<string, string>;
       }>(request);
-      const result = await upsertProviderAccount(env, {
-        providerKey: body.providerKey,
-        accountLabel: body.accountLabel,
-        sourceUrl: body.sourceUrl,
-        credentials: body.credentials,
-      }, fetchImpl);
+      const result = await upsertProviderAccount(
+        env,
+        userId,
+        {
+          providerKey: body.providerKey,
+          accountLabel: body.accountLabel,
+          sourceUrl: body.sourceUrl,
+          credentials: body.credentials,
+        },
+        fetchImpl,
+      );
       return successResponse(result);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to create account";
@@ -111,6 +107,7 @@ export async function handleSettingsRequest(
       }
       const result = await updateProviderAccountDisplay(
         env,
+        userId,
         accountId,
         {
           homepageEnabled: body.homepageEnabled,
@@ -135,7 +132,7 @@ export async function handleSettingsRequest(
         return errorResponse(400, "invalid_request", "Account ID is required");
       }
 
-      const accountConfig = await getProviderAccountConfigById(env, accountId, fetchImpl);
+      const accountConfig = await getProviderAccountConfigById(env, userId, accountId, fetchImpl);
       if (!accountConfig) {
         return errorResponse(404, "account_not_found", "Account not found");
       }

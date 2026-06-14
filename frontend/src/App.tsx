@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createApiClient, type DashboardSnapshot, type PlatformSnapshot } from "./api/client";
+import { createSupabaseBrowserAuthClient, type AppAuthSession } from "./auth/auth-client";
+import { LoginPage } from "./auth/login-page";
 import { DashboardShell, type DashboardSyncState } from "./components";
 import { useActiveRefresh } from "./hooks/useActiveRefresh";
 import { SettingsPage } from "./settings/settings-page";
@@ -146,7 +148,18 @@ function getErrorMessage(error: unknown): string {
 }
 
 export function App() {
-  const api = useMemo(() => createApiClient(), []);
+  const authClientRef = useRef<ReturnType<typeof createSupabaseBrowserAuthClient> | null>(null);
+  const api = useMemo(
+    () =>
+      createApiClient({
+        authTokenProvider: async () => authClientRef.current?.getAccessToken() ?? null,
+      }),
+    [],
+  );
+  const [authClient, setAuthClient] = useState<ReturnType<typeof createSupabaseBrowserAuthClient> | null>(null);
+  const [session, setSession] = useState<AppAuthSession | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authError, setAuthError] = useState<string | null>(null);
   const [dashboard, setDashboard] = useState<DashboardSnapshot>(() => createBootstrapDashboard());
   const [syncState, setSyncState] = useState<DashboardSyncState>("loading");
   const [syncMessage, setSyncMessage] = useState<string | null>("正在拉取云端数据。");
@@ -190,8 +203,9 @@ export function App() {
   );
 
   const refreshDashboard = useCallback(() => {
+    if (!session) return;
     void runSync("refresh");
-  }, [runSync]);
+  }, [runSync, session]);
 
   const { isActive } = useActiveRefresh(refreshDashboard, {
     intervalMs: 120_000,
@@ -199,14 +213,71 @@ export function App() {
   });
 
   useEffect(() => {
+    let disposed = false;
+    let unsubscribe: (() => void) | null = null;
+
+    async function initAuth() {
+      try {
+        const config = await api.getAuthConfig();
+        const nextAuthClient = createSupabaseBrowserAuthClient(config);
+        authClientRef.current = nextAuthClient;
+        const nextSession = await nextAuthClient.getSession();
+        if (disposed) return;
+        setAuthClient(nextAuthClient);
+        setSession(nextSession);
+        unsubscribe = nextAuthClient.onSessionChange(setSession);
+      } catch (error) {
+        if (!disposed) {
+          setAuthError(error instanceof Error ? error.message : "登录配置加载失败");
+        }
+      } finally {
+        if (!disposed) setAuthLoading(false);
+      }
+    }
+
+    void initAuth();
+
+    return () => {
+      disposed = true;
+      unsubscribe?.();
+    };
+  }, [api]);
+
+  useEffect(() => {
+    if (!session) return;
     void runSync("refresh");
-  }, [runSync]);
+  }, [runSync, session]);
 
   useEffect(() => {
     const onHashChange = () => setRoute(window.location.hash || "#/");
     window.addEventListener("hashchange", onHashChange);
     return () => window.removeEventListener("hashchange", onHashChange);
   }, []);
+
+  const signIn = useCallback(
+    async (email: string, password: string) => {
+      if (!authClient) return;
+      setAuthLoading(true);
+      setAuthError(null);
+      try {
+        const nextSession = await authClient.signIn(email, password);
+        setSession(nextSession);
+      } catch (error) {
+        setAuthError(error instanceof Error ? error.message : "登录失败");
+      } finally {
+        setAuthLoading(false);
+      }
+    },
+    [authClient],
+  );
+
+  if (authLoading && !authClient) {
+    return <main className="app-shell auth-shell">正在加载登录状态...</main>;
+  }
+
+  if (!session) {
+    return <LoginPage loading={authLoading} error={authError} onSignIn={signIn} />;
+  }
 
   if (route === "#/settings") {
     return (

@@ -21,14 +21,12 @@ describe("SettingsPage", () => {
 
     expect(screen.getByRole("heading", { name: "第三版：多层展开配置模型" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Level 1: 供应商" })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "Level 2: 当前供应商的账号" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Level 2: OpenRouter 的账号" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Level 3: 账号配置" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "编辑 OpenRouter" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "编辑 OpenCode Go" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "编辑 讯飞 MaaS" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "编辑 阿里云百炼" })).toBeTruthy();
-    expect(screen.getByText("需要 Admin Token 后才能读取账号和保存配置。")).toBeTruthy();
-    expect(api.getProviderSettings).not.toHaveBeenCalled();
   });
 
   it("prefills configured accounts from the public dashboard snapshot before admin token is set", () => {
@@ -91,11 +89,9 @@ describe("SettingsPage", () => {
         (button) => button.disabled,
       ),
     ).toBe(true);
-    expect(api.getProviderSettings).not.toHaveBeenCalled();
   });
 
   it("shows provider gallery, account layer, and homepage account controls", async () => {
-    sessionStorage.setItem("api-monitor-admin-token", "admin-token");
 
     const api = {
       getProviderSettings: vi.fn(async () => ({
@@ -165,39 +161,15 @@ describe("SettingsPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
     await waitFor(() => expect(api.saveProviderPreferences).toHaveBeenCalledTimes(1));
     expect(api.saveProviderPreferences).toHaveBeenCalledWith(
-      "admin-token",
       expect.arrayContaining([
         expect.objectContaining({ providerKey: "openrouter", enabled: true, displayOrder: 1 }),
       ]),
     );
   });
 
-  it("reloads settings when saving the same admin token again", async () => {
-    sessionStorage.setItem("api-monitor-admin-token", "admin-token");
-
+  it("does not render the removed admin token controls after a settings load failure", async () => {
     const api = {
-      getProviderSettings: vi
-        .fn()
-        .mockRejectedValueOnce(new Error("请求失败 (500)"))
-        .mockResolvedValueOnce({
-          catalog: [
-            {
-              providerKey: "openrouter",
-              providerName: "OpenRouter",
-              sourceUrl: "https://openrouter.ai/activity",
-              description: "OpenRouter usage",
-            },
-          ],
-          preferences: [
-            {
-              providerKey: "openrouter",
-              enabled: true,
-              displayOrder: 1,
-              activeProviderAccountId: null,
-            },
-          ],
-          accounts: [],
-        }),
+      getProviderSettings: vi.fn().mockRejectedValueOnce(new Error("???? (500)")),
       saveProviderPreferences: vi.fn(),
       saveProviderAccount: vi.fn(),
       testProviderAccount: vi.fn(),
@@ -206,16 +178,12 @@ describe("SettingsPage", () => {
 
     render(<SettingsPage api={api as never} onBack={() => undefined} />);
 
-    expect(await screen.findByText("请求失败 (500)")).toBeTruthy();
-
-    fireEvent.click(screen.getByRole("button", { name: "保存 Token" }));
-
-    await waitFor(() => expect(api.getProviderSettings).toHaveBeenCalledTimes(2));
-    expect(await screen.findByText("配置已同步。")).toBeTruthy();
+    expect(await screen.findByText("???? (500)")).toBeTruthy();
+    expect(screen.queryByText("Admin Token")).toBeNull();
+    expect(screen.queryByRole("button", { name: "?? Token" })).toBeNull();
   });
 
   it("moves homepage accounts up without drag and drop", async () => {
-    sessionStorage.setItem("api-monitor-admin-token", "admin-token");
 
     const api = {
       getProviderSettings: vi.fn(async () => ({
@@ -265,7 +233,7 @@ describe("SettingsPage", () => {
       saveProviderPreferences: vi.fn(),
       saveProviderAccount: vi.fn(),
       testProviderAccount: vi.fn(),
-      updateProviderAccountDisplay: vi.fn(async (_token: string, accountId: string, input: { homepageEnabled: boolean; homepageOrder: number }) => ({
+      updateProviderAccountDisplay: vi.fn(async (accountId: string, input: { homepageEnabled: boolean; homepageOrder: number }) => ({
         id: accountId,
         homepageEnabled: input.homepageEnabled,
         homepageOrder: input.homepageOrder,
@@ -281,20 +249,17 @@ describe("SettingsPage", () => {
     await waitFor(() => expect(api.updateProviderAccountDisplay).toHaveBeenCalledTimes(2));
     expect(api.updateProviderAccountDisplay).toHaveBeenNthCalledWith(
       1,
-      "admin-token",
       "acc-backup",
       { homepageEnabled: true, homepageOrder: 1 },
     );
     expect(api.updateProviderAccountDisplay).toHaveBeenNthCalledWith(
       2,
-      "admin-token",
       "acc-main",
       { homepageEnabled: true, homepageOrder: 2 },
     );
   });
 
   it("refreshes the account layer after saving a provider account", async () => {
-    sessionStorage.setItem("api-monitor-admin-token", "admin-token");
 
     const api = {
       getProviderSettings: vi
@@ -407,7 +372,6 @@ describe("SettingsPage", () => {
       updateProviderAccountDisplay: vi.fn(),
     };
 
-    sessionStorage.setItem("api-monitor-admin-token", "test-token");
     render(<SettingsPage api={api as never} onBack={() => undefined} />);
 
     await waitFor(() => {
@@ -431,11 +395,195 @@ describe("SettingsPage", () => {
       updateProviderAccountDisplay: vi.fn(),
     };
 
-    sessionStorage.setItem("api-monitor-admin-token", "test-token");
     render(<SettingsPage api={api as never} onBack={() => undefined} />);
 
     await waitFor(() => {
       expect(screen.getByText("+ 新增账号")).toBeTruthy();
     });
+  });
+
+  it("renders the reference layered settings layout with account cards and a grid credential form", async () => {
+
+    const api = {
+      getProviderSettings: vi.fn().mockResolvedValue({
+        catalog: [
+          {
+            providerKey: "openrouter",
+            providerName: "OpenRouter",
+            sourceUrl: "https://openrouter.ai/activity",
+            description: "OpenRouter usage",
+          },
+        ],
+        preferences: [
+          {
+            providerKey: "openrouter",
+            enabled: true,
+            displayOrder: 1,
+            activeProviderAccountId: "acc-main",
+          },
+        ],
+        accounts: [
+          {
+            id: "acc-main",
+            providerKey: "openrouter",
+            accountLabel: "主账号",
+            sourceUrl: "https://openrouter.ai/activity",
+            status: "ready",
+            statusMessage: null,
+            credentialHint: { apiKey: "sk-or...9a2f" },
+            homepageEnabled: true,
+            homepageOrder: 1,
+            lastTestSummary: "本周期花费",
+          },
+          {
+            id: "acc-backup",
+            providerKey: "openrouter",
+            accountLabel: "备用账号",
+            sourceUrl: "https://openrouter.ai/activity",
+            status: "disabled",
+            statusMessage: null,
+            credentialHint: { apiKey: "sk-or...88bb" },
+            homepageEnabled: false,
+            homepageOrder: 100,
+            lastTestSummary: "未启用",
+          },
+        ],
+      }),
+      saveProviderPreferences: vi.fn(),
+      saveProviderAccount: vi.fn(),
+      testProviderAccount: vi.fn(),
+      updateProviderAccountDisplay: vi.fn(),
+    };
+
+    render(<SettingsPage api={api as never} onBack={() => undefined} />);
+
+    expect(await screen.findByRole("heading", { name: "Level 2: OpenRouter 的账号" })).toBeTruthy();
+    expect(document.querySelector(".account-display-card.account-display-card--active")).toBeTruthy();
+    expect(document.querySelector(".account-display-card.account-display-card--disabled")).toBeTruthy();
+    expect(screen.getByText("API Key: sk-or...9a2f")).toBeTruthy();
+    expect(screen.getByText("新增后默认不进首页，测试通过后可启用。")).toBeTruthy();
+    expect(document.querySelector(".credential-form.credential-form--grid")).toBeTruthy();
+    expect(screen.getByText("保存后表单清空；账号卡只展示 credentialHint，网页登录态不保存。")).toBeTruthy();
+  });
+
+  it("opens an existing configured account in the editor when clicking its Level 2 card", async () => {
+
+    const api = {
+      getProviderSettings: vi.fn().mockResolvedValue({
+        catalog: [
+          {
+            providerKey: "openrouter",
+            providerName: "OpenRouter",
+            sourceUrl: "https://openrouter.ai/activity",
+            description: "OpenRouter usage",
+          },
+        ],
+        preferences: [
+          {
+            providerKey: "openrouter",
+            enabled: true,
+            displayOrder: 1,
+            activeProviderAccountId: "acc-main",
+          },
+        ],
+        accounts: [
+          {
+            id: "acc-main",
+            providerKey: "openrouter",
+            accountLabel: "主账号",
+            sourceUrl: "https://openrouter.ai/activity",
+            status: "ready",
+            statusMessage: null,
+            credentialHint: { apiKey: "sk-or...9a2f" },
+            homepageEnabled: true,
+            homepageOrder: 1,
+            lastTestSummary: "本周期花费",
+          },
+        ],
+      }),
+      saveProviderPreferences: vi.fn(),
+      saveProviderAccount: vi.fn(),
+      testProviderAccount: vi.fn(),
+      updateProviderAccountDisplay: vi.fn(),
+    };
+
+    render(<SettingsPage api={api as never} onBack={() => undefined} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "编辑账号：主账号" }));
+
+    expect(screen.getByDisplayValue("主账号")).toBeTruthy();
+    expect(screen.getByDisplayValue("https://openrouter.ai/activity")).toBeTruthy();
+    expect(screen.getByText("正在编辑：主账号")).toBeTruthy();
+  });
+
+  it("switches from editing an existing account to add-account mode", async () => {
+    const api = {
+      getProviderSettings: vi.fn().mockResolvedValue({
+        catalog: [
+          {
+            providerKey: "openrouter",
+            providerName: "OpenRouter",
+            sourceUrl: "https://openrouter.ai/activity",
+            description: "OpenRouter usage",
+          },
+        ],
+        preferences: [
+          {
+            providerKey: "openrouter",
+            enabled: true,
+            displayOrder: 1,
+            activeProviderAccountId: "acc-main",
+          },
+        ],
+        accounts: [
+          {
+            id: "acc-main",
+            providerKey: "openrouter",
+            accountLabel: "主账号",
+            sourceUrl: "https://openrouter.ai/activity",
+            status: "ready",
+            statusMessage: null,
+            credentialHint: { apiKey: "sk-or...9a2f" },
+            homepageEnabled: true,
+            homepageOrder: 1,
+            lastTestSummary: "本周期花费",
+          },
+        ],
+      }),
+      saveProviderPreferences: vi.fn(),
+      saveProviderAccount: vi.fn(),
+      testProviderAccount: vi.fn(),
+      updateProviderAccountDisplay: vi.fn(),
+    };
+
+    render(<SettingsPage api={api as never} onBack={() => undefined} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "编辑账号：主账号" }));
+    expect(screen.getByText("正在编辑：主账号")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "+ 新增账号 新增后默认不进首页，测试通过后可启用。" }));
+
+    await waitFor(() => {
+      expect(screen.queryByText("正在编辑：主账号")).toBeNull();
+    });
+    expect(screen.getByDisplayValue("新账号")).toBeTruthy();
+  });
+
+  it("keeps add account actionable without admin token and explains the required token", () => {
+    const api = {
+      getProviderSettings: vi.fn(),
+      saveProviderPreferences: vi.fn(),
+      saveProviderAccount: vi.fn(),
+      testProviderAccount: vi.fn(),
+      updateProviderAccountDisplay: vi.fn(),
+    };
+
+    render(<SettingsPage api={api as never} onBack={() => undefined} />);
+
+    const addButton = screen.getByRole("button", { name: "+ 新增账号 新增后默认不进首页，测试通过后可启用。" });
+    expect((addButton as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.click(addButton);
+
   });
 });

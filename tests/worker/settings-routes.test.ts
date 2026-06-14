@@ -54,10 +54,9 @@ describe("provider account homepage visibility migration", () => {
 
 describe("settings routes", () => {
   const env = {
-    ADMIN_SETUP_TOKEN: "correct-token",
     SUPABASE_URL: "https://example.supabase.co",
     SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
-    SUPABASE_USER_ID: "user-123",
+    SUPABASE_ANON_KEY: "anon-public-key",
   };
 
   it("rejects provider settings updates without the admin token", async () => {
@@ -81,7 +80,7 @@ describe("settings routes", () => {
       new Request("https://api-monitor.local/api/settings/providers", {
         method: "PUT",
         headers: {
-          "x-api-monitor-admin-token": "wrong-token",
+          Authorization: "Bearer wrong-token",
         },
       }),
       env,
@@ -101,6 +100,9 @@ describe("settings routes", () => {
     const fetchCalls: URL[] = [];
     const fetchImpl = async (input: RequestInfo | URL): Promise<Response> => {
       const url = new URL(input.toString());
+      if (url.pathname.endsWith("/auth/v1/user")) {
+        return Response.json({ id: "user-123", email: "me@example.com" });
+      }
       fetchCalls.push(url);
 
       if (url.pathname.endsWith("/provider_preferences")) {
@@ -141,7 +143,7 @@ describe("settings routes", () => {
       new Request("https://api-monitor.local/api/settings/providers", {
         method: "GET",
         headers: {
-          "x-api-monitor-admin-token": "correct-token",
+          Authorization: "Bearer user-jwt",
         },
       }),
       env,
@@ -195,6 +197,9 @@ describe("settings routes", () => {
     const fetchCalls: { url: URL; init?: RequestInit }[] = [];
     const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const url = new URL(input.toString());
+      if (url.pathname.endsWith("/auth/v1/user")) {
+        return Response.json({ id: "user-123", email: "me@example.com" });
+      }
       fetchCalls.push({ url, init });
       return Response.json([{ id: "account-1", homepage_enabled: true, homepage_order: 2 }]);
     };
@@ -204,7 +209,7 @@ describe("settings routes", () => {
         method: "PATCH",
         headers: {
           "content-type": "application/json",
-          "x-api-monitor-admin-token": "correct-token",
+          Authorization: "Bearer user-jwt",
         },
         body: JSON.stringify({ homepageEnabled: true, homepageOrder: 2 }),
       }),
@@ -242,12 +247,16 @@ describe("settings routes", () => {
         method: "PATCH",
         headers: {
           "content-type": "application/json",
-          "x-api-monitor-admin-token": "correct-token",
+          Authorization: "Bearer user-jwt",
         },
         body: JSON.stringify({ homepageEnabled: "yes", homepageOrder: -1 }),
       }),
       env,
-      async () => {
+      async (input) => {
+        const url = new URL(input.toString());
+        if (url.pathname.endsWith("/auth/v1/user")) {
+          return Response.json({ id: "user-123", email: "me@example.com" });
+        }
         throw new Error("fetch should not be called for invalid payload");
       },
     );
@@ -267,12 +276,18 @@ describe("settings routes", () => {
         method: "PATCH",
         headers: {
           "content-type": "application/json",
-          "x-api-monitor-admin-token": "correct-token",
+          Authorization: "Bearer user-jwt",
         },
         body: JSON.stringify({ homepageEnabled: true, homepageOrder: 2 }),
       }),
       env,
-      async () => Response.json([]),
+      async (input) => {
+        const url = new URL(input.toString());
+        if (url.pathname.endsWith("/auth/v1/user")) {
+          return Response.json({ id: "user-123", email: "me@example.com" });
+        }
+        return Response.json([]);
+      },
     );
 
     expect(response.status).toBe(404);
@@ -288,6 +303,9 @@ describe("settings routes", () => {
     const fetchCalls: { url: URL; body: unknown }[] = [];
     const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const url = new URL(input.toString());
+      if (url.pathname.endsWith("/auth/v1/user")) {
+        return Response.json({ id: "user-123", email: "me@example.com" });
+      }
       const bodyText = init?.body ? String(init.body) : "";
       fetchCalls.push({ url, body: bodyText ? JSON.parse(bodyText) : null });
       if (url.pathname.endsWith("/provider_preferences")) {
@@ -299,7 +317,7 @@ describe("settings routes", () => {
     const response = await handleSettingsRequest(
       new Request("https://api-monitor.local/api/settings/providers", {
         method: "PUT",
-        headers: { "content-type": "application/json", "x-api-monitor-admin-token": "correct-token" },
+        headers: { "content-type": "application/json", Authorization: "Bearer user-jwt" },
         body: JSON.stringify({ providerKey: "openrouter", enabled: true, displayOrder: 10, activeProviderAccountId: "account-1" }),
       }),
       env,
@@ -324,6 +342,9 @@ describe("settings routes", () => {
     const fetchCalls: { url: URL; body: unknown }[] = [];
     const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const url = new URL(input.toString());
+      if (url.pathname.endsWith("/auth/v1/user")) {
+        return Response.json({ id: "user-123", email: "me@example.com" });
+      }
       const bodyText = init?.body ? String(init.body) : "";
       fetchCalls.push({ url, body: bodyText ? JSON.parse(bodyText) : null });
       if (url.pathname.endsWith("/provider_preferences")) {
@@ -335,7 +356,7 @@ describe("settings routes", () => {
     const response = await handleSettingsRequest(
       new Request("https://api-monitor.local/api/settings/providers", {
         method: "PUT",
-        headers: { "content-type": "application/json", "x-api-monitor-admin-token": "correct-token" },
+        headers: { "content-type": "application/json", Authorization: "Bearer user-jwt" },
         body: JSON.stringify({
           providers: [
             { providerKey: "openrouter", enabled: true, displayOrder: 1, activeProviderAccountId: "account-1" },
@@ -361,6 +382,9 @@ describe("settings routes", () => {
     const fetchCalls: { url: URL; body: unknown }[] = [];
     const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const url = new URL(input.toString());
+      if (url.pathname.endsWith("/auth/v1/user")) {
+        return Response.json({ id: "user-123", email: "me@example.com" });
+      }
       const bodyText = init?.body ? String(init.body) : "";
       const body = bodyText ? JSON.parse(bodyText) : null;
       fetchCalls.push({ url, body });
@@ -378,7 +402,7 @@ describe("settings routes", () => {
     const response = await handleSettingsRequest(
       new Request("https://api-monitor.local/api/settings/accounts", {
         method: "POST",
-        headers: { "content-type": "application/json", "x-api-monitor-admin-token": "correct-token" },
+        headers: { "content-type": "application/json", Authorization: "Bearer user-jwt" },
         body: JSON.stringify({
           providerKey: "opencode-go",
           accountLabel: "测试账号",
@@ -428,7 +452,7 @@ describe("settings routes", () => {
     const response = await handleSettingsRequest(
       new Request("https://api-monitor.local/api/settings/accounts", {
         method: "POST",
-        headers: { "content-type": "application/json", "x-api-monitor-admin-token": "correct-token" },
+        headers: { "content-type": "application/json", Authorization: "Bearer user-jwt" },
         body: JSON.stringify({
           providerKey: "openrouter",
           accountLabel: "主账号",
@@ -437,7 +461,13 @@ describe("settings routes", () => {
         }),
       }),
       env,
-      async () => Response.json([{ id: "account-new" }]),
+      async (input) => {
+        const url = new URL(input.toString());
+        if (url.pathname.endsWith("/auth/v1/user")) {
+          return Response.json({ id: "user-123", email: "me@example.com" });
+        }
+        return Response.json([{ id: "account-new" }]);
+      },
     );
 
     expect(response.status).toBe(500);
@@ -452,6 +482,9 @@ describe("settings routes", () => {
   it("tests a provider account connection", async () => {
     const fetchImpl = async (input: RequestInfo | URL): Promise<Response> => {
       const url = new URL(typeof input === "string" ? input : input instanceof Request ? input.url : input.toString());
+      if (url.pathname.endsWith("/auth/v1/user")) {
+        return Response.json({ id: "user-123", email: "me@example.com" });
+      }
       if (url.pathname.endsWith("/provider_accounts")) {
         return Response.json([{
           id: "account-1",
@@ -489,7 +522,7 @@ describe("settings routes", () => {
     const response = await handleSettingsRequest(
       new Request("https://api-monitor.local/api/settings/accounts/account-1/test", {
         method: "POST",
-        headers: { "x-api-monitor-admin-token": "correct-token" },
+        headers: { Authorization: "Bearer user-jwt" },
       }),
       envWithKey,
       fetchImpl,
