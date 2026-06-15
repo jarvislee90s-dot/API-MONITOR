@@ -8,3 +8,10 @@ references/
 apimonitor-dashboard-readme.png
 .tmp-*.png
 *.log
+*-page.png
+dashboard.png
+dashboard-*.png
+.handoff/
+.claude/
+.playwright-mcp/
+.playwright-cli/
