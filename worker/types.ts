@@ -154,7 +154,6 @@ export interface RefreshSessionEnv {
 }
 
 export interface WorkerEnv extends RefreshSessionEnv {
-  ADMIN_SETUP_TOKEN?: string;
   CREDENTIAL_ENCRYPTION_KEY?: string;
   SUPABASE_USER_ID?: string;
   SUPABASE_URL?: string;
