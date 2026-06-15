@@ -28,10 +28,9 @@ compatibility_date = "2026-06-11"
 [assets]
 directory = "./frontend/dist"
 not_found_handling = "single-page-application"
-run_worker_first = ["/api/*"]
 ```
 
-`run_worker_first = ["/api/*"]` 需要 Wrangler v4，因此部署命令使用：
+部署命令使用 Wrangler v4（不需要 `run_worker_first`，默认行为即把 `/api/*` 路径 fallback 到 Worker）：
 
 ```powershell
 npx wrangler@4 deploy
@@ -44,9 +43,7 @@ npx wrangler@4 deploy
 ```powershell
 npx wrangler@4 secret put SUPABASE_URL
 npx wrangler@4 secret put SUPABASE_SERVICE_ROLE_KEY
-npx wrangler@4 secret put SUPABASE_USER_ID
 npx wrangler@4 secret put CREDENTIAL_ENCRYPTION_KEY
-npx wrangler@4 secret put ADMIN_SETUP_TOKEN
 npx wrangler@4 secret put OPENROUTER_API_KEY
 npx wrangler@4 secret put OPENCODE_GO_WORKSPACE_ID
 npx wrangler@4 secret put OPENCODE_GO_AUTH_COOKIE
@@ -65,7 +62,7 @@ npx wrangler@4 secret put ALIYUN_BAILIAN_SEC_TOKEN
 - `ALIYUN_BAILIAN_API_URL` 可为空。默认只展示百炼原网页入口和 partial 状态。
 - `ALIYUN_BAILIAN_CLOUD_FETCH` 默认留空。只有设为 `1` 时，Worker 才会尝试实验性百炼云端抓取；抓取遇到登录页、非 JSON 或空数据时会自动回退为原网页入口卡片。
 
-`CREDENTIAL_ENCRYPTION_KEY` 必须是 32 个 UTF-8 字节。配置页保存的第三方凭据会由 Worker 加密后写入 Supabase，前端只读取脱敏提示。
+`CREDENTIAL_ENCRYPTION_KEY` 必须是 32 个 UTF-8 字节。配置页保存的第三方凭据会由 Worker 加密后写入 Supabase `provider_account_credentials` 表（已部署 `202606120001_provider_settings_and_credentials.sql` migration 的项目），前端只读取脱敏提示。在该 migration 部署前的过渡期，账号级配置和凭据以 JSONB 形式存到 `provider_accounts.config`（未加密），但表读取仍受 RLS 保护。
 
 ## 4. 部署
 
