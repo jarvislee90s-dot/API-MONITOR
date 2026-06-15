@@ -1,4 +1,4 @@
-import { CheckCircle2, FlaskConical } from "lucide-react";
+import { CheckCircle2, FlaskConical, Trash2 } from "lucide-react";
 import type {
   ProviderAccountInput,
   ProviderCatalogItem,
@@ -6,6 +6,7 @@ import type {
   SafeProviderAccount,
 } from "../api/client";
 import { CredentialForm } from "./credential-form";
+import { formatPreviewValue } from "./credential-preview";
 
 interface ProviderAccountPanelProps {
   provider: ProviderCatalogItem | null;
@@ -15,12 +16,13 @@ interface ProviderAccountPanelProps {
   onPreferenceChange: (preference: ProviderPreference) => void;
   onSaveAccount: (account: ProviderAccountInput) => Promise<void>;
   onTestAccount: (accountId: string) => Promise<void>;
+  onDeleteAccount: (accountId: string) => Promise<void>;
 }
 
 function formatHint(hint: Record<string, unknown>): string {
   const entries = Object.entries(hint);
   if (entries.length === 0) return "未保存凭据";
-  return entries.map(([key, value]) => `${key}: ${String(value)}`).join(" · ");
+  return entries.map(([key, value]) => `${key}: ${formatPreviewValue(String(value))}`).join(" · ");
 }
 
 export function ProviderAccountPanel({
@@ -31,6 +33,7 @@ export function ProviderAccountPanel({
   onPreferenceChange,
   onSaveAccount,
   onTestAccount,
+  onDeleteAccount,
 }: ProviderAccountPanelProps) {
   if (!provider || !preference) {
     return (
@@ -84,6 +87,15 @@ export function ProviderAccountPanel({
                 >
                   <FlaskConical size={15} aria-hidden="true" />
                   测试
+                </button>
+                <button
+                  type="button"
+                  className="btn btn--ghost btn--danger"
+                  aria-label={`删除账号：${account.accountLabel}`}
+                  onClick={() => void onDeleteAccount(account.id)}
+                >
+                  <Trash2 size={15} aria-hidden="true" />
+                  删除
                 </button>
               </div>
             </article>

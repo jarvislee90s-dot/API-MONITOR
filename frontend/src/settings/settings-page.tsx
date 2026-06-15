@@ -1,4 +1,4 @@
-import { ArrowLeft, ChevronDown, ChevronUp, Save, Eye, EyeOff } from "lucide-react";
+import { ArrowLeft, GripVertical, Save, Eye, EyeOff } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   ProviderAccountInput,
@@ -13,12 +13,15 @@ import { ProviderGallery } from "./provider-gallery";
 import { ProviderAccountPanel } from "./provider-account-panel";
 import { PUBLIC_PROVIDER_CATALOG } from "./provider-catalog";
 import { getAccountStatusLabel, getStatusTone } from "./account-status-labels";
+import { formatPreviewValue } from "./credential-preview";
 
 type SettingsApi = Pick<
   ReturnType<typeof createApiClient>,
   | "getProviderSettings"
   | "saveProviderPreferences"
   | "saveProviderAccount"
+  | "updateProviderAccount"
+  | "deleteProviderAccount"
   | "testProviderAccount"
   | "updateProviderAccountDisplay"
 >;
@@ -99,7 +102,7 @@ function formatCredentialPreview(account: SafeProviderAccount): string {
   const [key, value] = Object.entries(account.credentialHint)[0] ?? [];
   if (!key || value == null) return "凭据：未保存";
   const label = key.toLowerCase().includes("key") ? "API Key" : key;
-  return `${label}: ${String(value)}`;
+  return `${label}: ${formatPreviewValue(String(value))}`;
 }
 
 export function SettingsPage({ api, dashboard, onBack }: SettingsPageProps) {
@@ -111,6 +114,10 @@ export function SettingsPage({ api, dashboard, onBack }: SettingsPageProps) {
   const [isAddingAccount, setIsAddingAccount] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [draggingAccountId, setDraggingAccountId] = useState<string | null>(null);
+  const [dragOverAccountId, setDragOverAccountId] = useState<string | null>(null);
+  const [draggingProviderKey, setDraggingProviderKey] = useState<string | null>(null);
+  const [dragOverProviderKey, setDragOverProviderKey] = useState<string | null>(null);
   const dashboardAccounts = useMemo(() => createAccountsFromDashboard(dashboard), [dashboard]);
 
   const selectedProvider = useMemo(() => {
@@ -198,10 +205,32 @@ export function SettingsPage({ api, dashboard, onBack }: SettingsPageProps) {
   }
 
   async function saveAccount(account: ProviderAccountInput) {
-    await api.saveProviderAccount(account);
-    await loadSettings();
-    setIsAddingAccount(false);
-    setMessage("账号已保存。");
+    try {
+      if (account.id) {
+        await api.updateProviderAccount(account.id, account);
+      } else {
+        await api.saveProviderAccount(account);
+      }
+      await loadSettings();
+      setIsAddingAccount(false);
+      setMessage("账号已保存。");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "保存账号失败。");
+    }
+  }
+
+  async function deleteAccount(accountId: string) {
+    await api.deleteProviderAccount(accountId);
+    setAccounts((current) => current.filter((account) => account.id !== accountId));
+    setPreferences((current) =>
+      current.map((preference) =>
+        preference.activeProviderAccountId === accountId
+          ? { ...preference, activeProviderAccountId: null }
+          : preference,
+      ),
+    );
+    setEditingAccountId((current) => (current === accountId ? null : current));
+    setMessage("账号已删除。");
   }
 
   async function testAccount(accountId: string) {
@@ -223,33 +252,55 @@ export function SettingsPage({ api, dashboard, onBack }: SettingsPageProps) {
     );
   }
 
-  async function moveHomepageAccount(accountId: string, direction: "up" | "down") {
-    const currentIndex = homepageAccounts.findIndex((account) => account.id === accountId);
-    const targetIndex = direction === "up" ? currentIndex - 1 : currentIndex + 1;
-    const account = homepageAccounts[currentIndex];
-    const targetAccount = homepageAccounts[targetIndex];
-    if (!account || !targetAccount) return;
+  async function reorderHomepageAccount(draggedAccountId: string, targetAccountId: string) {
+    if (draggedAccountId === targetAccountId) return;
+    const draggedAccount = homepageAccounts.find((account) => account.id === draggedAccountId);
+    const targetAccount = homepageAccounts.find((account) => account.id === targetAccountId);
+    if (!draggedAccount || !targetAccount) return;
 
-    const updatedAccount = await api.updateProviderAccountDisplay(account.id, {
+    const updatedDraggedAccount = await api.updateProviderAccountDisplay(draggedAccount.id, {
       homepageEnabled: true,
       homepageOrder: targetAccount.homepageOrder,
     });
     const updatedTargetAccount = await api.updateProviderAccountDisplay(targetAccount.id, {
       homepageEnabled: true,
-      homepageOrder: account.homepageOrder,
+      homepageOrder: draggedAccount.homepageOrder,
     });
 
     setAccounts((current) =>
       current.map((item) => {
-        if (item.id === updatedAccount.id) {
-          return { ...item, homepageEnabled: updatedAccount.homepageEnabled, homepageOrder: updatedAccount.homepageOrder };
+        if (item.id === updatedDraggedAccount.id) {
+          return {
+            ...item,
+            homepageEnabled: updatedDraggedAccount.homepageEnabled,
+            homepageOrder: updatedDraggedAccount.homepageOrder,
+          };
         }
         if (item.id === updatedTargetAccount.id) {
-          return { ...item, homepageEnabled: updatedTargetAccount.homepageEnabled, homepageOrder: updatedTargetAccount.homepageOrder };
+          return {
+            ...item,
+            homepageEnabled: updatedTargetAccount.homepageEnabled,
+            homepageOrder: updatedTargetAccount.homepageOrder,
+          };
         }
         return item;
       }),
     );
+  }
+
+  function reorderProvider(draggedProviderKey: string, targetProviderKey: string) {
+    if (!draggedProviderKey || draggedProviderKey === targetProviderKey) return;
+    setPreferences((current) => {
+      const draggedIndex = current.findIndex((preference) => preference.providerKey === draggedProviderKey);
+      const targetIndex = current.findIndex((preference) => preference.providerKey === targetProviderKey);
+      if (draggedIndex < 0 || targetIndex < 0) return current;
+
+      const next = [...current];
+      const [draggedPreference] = next.splice(draggedIndex, 1);
+      if (!draggedPreference) return current;
+      next.splice(targetIndex, 0, draggedPreference);
+      return next.map((preference, index) => ({ ...preference, displayOrder: index + 1 }));
+    });
   }
 
   function updatePreference(nextPreference: ProviderPreference) {
@@ -282,7 +333,7 @@ export function SettingsPage({ api, dashboard, onBack }: SettingsPageProps) {
           </button>
           <div>
             <p className="kicker">Settings</p>
-            <h1>第三版：多层展开配置模型</h1>
+            <h1>模型供应商与账号配置</h1>
           </div>
           <button type="button" className="btn btn--primary" onClick={() => void savePreferences()} disabled={loading}>
             <Save size={16} aria-hidden="true" />
@@ -298,6 +349,22 @@ export function SettingsPage({ api, dashboard, onBack }: SettingsPageProps) {
             preferences={preferences}
             accounts={accounts}
             selectedProviderKey={selectedProviderKey}
+            draggingProviderKey={draggingProviderKey}
+            dragOverProviderKey={dragOverProviderKey}
+            onProviderDragStart={setDraggingProviderKey}
+            onProviderDragOver={setDragOverProviderKey}
+            onProviderDragLeave={(providerKey) => {
+              setDragOverProviderKey((current) => (current === providerKey ? null : current));
+            }}
+            onProviderDrop={(draggedProviderKey, targetProviderKey) => {
+              reorderProvider(draggedProviderKey, targetProviderKey);
+              setDraggingProviderKey(null);
+              setDragOverProviderKey(null);
+            }}
+            onProviderDragEnd={() => {
+              setDraggingProviderKey(null);
+              setDragOverProviderKey(null);
+            }}
             onSelectProvider={(providerKey) => {
               setIsAddingAccount(false);
               setSelectedProviderKey(providerKey);
@@ -317,16 +384,46 @@ export function SettingsPage({ api, dashboard, onBack }: SettingsPageProps) {
                 homepageAccounts.map((account, index) => (
                   <article
                     key={account.id}
+                    draggable
                     className={`account-display-card account-display-card--enabled ${
                       selectedPreference?.activeProviderAccountId === account.id ? "account-display-card--active" : ""
+                    } ${draggingAccountId === account.id ? "account-display-card--dragging" : ""} ${
+                      dragOverAccountId === account.id && draggingAccountId !== account.id
+                        ? "account-display-card--drop-target"
+                        : ""
                     }`}
+                    onDragStart={(event) => {
+                      event.dataTransfer.effectAllowed = "move";
+                      event.dataTransfer.setData("text/plain", account.id);
+                      setDraggingAccountId(account.id);
+                    }}
+                    onDragOver={(event) => {
+                      event.preventDefault();
+                      event.dataTransfer.dropEffect = "move";
+                      setDragOverAccountId(account.id);
+                    }}
+                    onDragLeave={() => {
+                      setDragOverAccountId((current) => (current === account.id ? null : current));
+                    }}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      const draggedId = event.dataTransfer.getData("text/plain");
+                      setDraggingAccountId(null);
+                      setDragOverAccountId(null);
+                      void reorderHomepageAccount(draggedId, account.id);
+                    }}
+                    onDragEnd={() => {
+                      setDraggingAccountId(null);
+                      setDragOverAccountId(null);
+                    }}
                   >
                     <div className="account-display-card__main">
+                      <GripVertical className="account-display-card__drag-icon" size={16} aria-hidden="true" />
                       <span>
                         <strong>{account.accountLabel}</strong>
                         <small>{formatCredentialPreview(account)}</small>
                       </span>
-                      <span className="status-badge status-badge--healthy">首页显示</span>
+                      <span className="account-role-badge">{index === 0 ? "主账号" : "备用账号"}</span>
                     </div>
                     <button
                       type="button"
@@ -345,24 +442,6 @@ export function SettingsPage({ api, dashboard, onBack }: SettingsPageProps) {
                       {getAccountStatusLabel(account)}
                     </span>
                     <div className="homepage-account-item__actions">
-                      <button
-                        type="button"
-                        className="icon-btn"
-                        aria-label={`上移首页显示：${account.accountLabel}`}
-                        disabled={index === 0}
-                        onClick={() => void moveHomepageAccount(account.id, "up")}
-                      >
-                        <ChevronUp size={15} aria-hidden="true" />
-                      </button>
-                      <button
-                        type="button"
-                        className="icon-btn"
-                        aria-label={`下移首页显示：${account.accountLabel}`}
-                        disabled={index === homepageAccounts.length - 1}
-                        onClick={() => void moveHomepageAccount(account.id, "down")}
-                      >
-                        <ChevronDown size={15} aria-hidden="true" />
-                      </button>
                       <button
                         type="button"
                         className="btn btn--ghost"
@@ -432,6 +511,7 @@ export function SettingsPage({ api, dashboard, onBack }: SettingsPageProps) {
             onPreferenceChange={updatePreference}
             onSaveAccount={saveAccount}
             onTestAccount={testAccount}
+            onDeleteAccount={deleteAccount}
           />
         </div>
       </div>
