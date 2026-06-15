@@ -1,5 +1,7 @@
 # ApiMonitor
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 API 与 Coding Plan 用量聚合看板。它把 OpenRouter、OpenCode Go、讯飞 MaaS Coding Plan、阿里云百炼 Coding Plan 的用量状态聚合到一个响应式网页里，并用 Supabase 保存刷新快照和云端配置。
 
 线上示例：
@@ -19,7 +21,6 @@ API 与 Coding Plan 用量聚合看板。它把 OpenRouter、OpenCode Go、讯�
 - Cloudflare Durable Object 做刷新节流。
 - Supabase Postgres 保存用量快照、窗口数据和刷新事件。
 - Supabase 保存配置，Worker 使用 AES-GCM 加密第三方凭据。
-- Worker secrets 只保存在云端，不暴露到前端。
 - OpenCode Go 支持“最近成功快照”回退，降低云端抓取不稳定时的页面空窗。
 
 ## 当前状态
@@ -122,9 +123,7 @@ npm run build
 ```powershell
 npx wrangler@4 secret put SUPABASE_URL
 npx wrangler@4 secret put SUPABASE_SERVICE_ROLE_KEY
-npx wrangler@4 secret put SUPABASE_USER_ID
 npx wrangler@4 secret put CREDENTIAL_ENCRYPTION_KEY
-npx wrangler@4 secret put ADMIN_SETUP_TOKEN
 npx wrangler@4 secret put OPENROUTER_API_KEY
 npx wrangler@4 secret put OPENCODE_GO_WORKSPACE_ID
 npx wrangler@4 secret put OPENCODE_GO_AUTH_COOKIE
@@ -146,7 +145,7 @@ npm run deploy:worker
 [assets]
 directory = "./frontend/dist"
 not_found_handling = "single-page-application"
-run_worker_first = ["/api/*"]
+# 不需要 run_worker_first：wrangler 4 默认行为是 assets 不匹配时自动 fallback 到 worker
 ```
 
 ## 环境变量
@@ -157,9 +156,7 @@ run_worker_first = ["/api/*"]
 | --- | --- |
 | `SUPABASE_URL` | Supabase 项目地址 |
 | `SUPABASE_SERVICE_ROLE_KEY` | Worker 写入 Supabase 使用 |
-| `SUPABASE_USER_ID` | 当前看板归属用户 |
 | `CREDENTIAL_ENCRYPTION_KEY` | 32 字节 AES-GCM 加密 key，用于云端账号凭据 |
-| `ADMIN_SETUP_TOKEN` | 配置页调用 settings API 的管理 token |
 | `OPENROUTER_API_KEY` | OpenRouter key endpoint |
 | `OPENCODE_GO_WORKSPACE_ID` | OpenCode Go workspace id |
 | `OPENCODE_GO_AUTH_COOKIE` | OpenCode Go 登录 cookie |
@@ -175,8 +172,7 @@ run_worker_first = ["/api/*"]
 ## 安全说明
 
 - `.env`、cookie、service role key 不进入 Git。
-- 配置页只把第三方凭据发给 Worker，Worker 加密后写入 Supabase；前端只读取脱敏 `credential_hint`。
-- `ADMIN_SETUP_TOKEN` 只存当前浏览器 `sessionStorage`，不要写进公开页面或截图。
+- 配置页只把第三方凭据发给 Worker，Worker 加密后写入 Supabase `provider_account_credentials` 表；前端只读取脱敏 `credential_hint`。在新 schema migration 部署前的过渡期，账号级配置和凭据 JSONB 会以兼容模式存到 `provider_accounts.config`（未加密）；迁移完成后此兼容模式自动失效。
 - 账号级停用只影响首页展示，不删除 Supabase 中的账号元数据和加密凭据。
 - 阿里云百炼默认只保存原网页入口；实验性云端抓取字段默认不填写、不启用。
 - `output/`、`.wrangler/`、`node_modules/`、`frontend/dist/` 已被忽略。
@@ -193,6 +189,18 @@ run_worker_first = ["/api/*"]
 | `npm run deploy:worker` | 构建前端并部署 Worker + 静态资源 |
 | `npm run test:worker` | 只跑 Worker 测试 |
 | `npm run test:frontend` | 只跑前端测试 |
+
+## 致谢
+
+本项目在架构和实现过程中参考了以下开源项目，致谢其作者：
+
+- [all-api-hub](references/all-api-hub) — 账号卡片与原网页入口
+- [codeburn](references/codeburn) — Provider adapter 抽象
+- [onwatch](references/onwatch) — OpenRouter API 思路
+- [one-api](references/one-api) — 余额与渠道健康模型
+- [opencode-quota](references/opencode-quota) — OpenCode Go 用量窗口抓取思路
+
+参考项目在 `references/` 目录下，仅供设计参考，**未将代码直接复制到正式实现**。
 
 ## 后续计划
 
