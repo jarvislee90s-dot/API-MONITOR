@@ -17,7 +17,7 @@ API 与 Coding Plan 用量聚合看板。它把 OpenRouter、OpenCode Go、讯�
 - 独立配置页支持"供应商 → 多账号 → 账号配置"的单页多层工作台。
 - 首页保持一个供应商一个大卡片；多账号通过卡片内账号子卡片切换显示。
 - 账号可单独控制是否在首页显示，停用不会删除配置或凭据。
-- 前端活跃时触发刷新，避免 cron 高频轮询。
+- 前端活跃时最多每 2 分钟刷新一次；10 分钟无交互后停止自动刷新，避免 cron 高频轮询。
 - Cloudflare Durable Object 做刷新节流。
 - Supabase Postgres 保存用量快照、窗口数据和刷新事件。
 - Supabase 保存配置，Worker 使用 AES-GCM 加密第三方凭据。
