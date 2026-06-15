@@ -7,6 +7,13 @@ interface ProviderGalleryProps {
   accounts: SafeProviderAccount[];
   selectedProviderKey: string | null;
   onSelectProvider: (providerKey: string) => void;
+  draggingProviderKey: string | null;
+  dragOverProviderKey: string | null;
+  onProviderDragStart: (providerKey: string) => void;
+  onProviderDragOver: (providerKey: string) => void;
+  onProviderDragLeave: (providerKey: string) => void;
+  onProviderDrop: (draggedProviderKey: string, targetProviderKey: string) => void;
+  onProviderDragEnd: () => void;
 }
 
 // 入口型 provider 判断：阿里云百炼默认作为原网页入口，不主动抓取数据
@@ -30,8 +37,24 @@ export function ProviderGallery({
   accounts,
   selectedProviderKey,
   onSelectProvider,
+  draggingProviderKey,
+  dragOverProviderKey,
+  onProviderDragStart,
+  onProviderDragOver,
+  onProviderDragLeave,
+  onProviderDrop,
+  onProviderDragEnd,
 }: ProviderGalleryProps) {
   const preferenceMap = new Map(preferences.map((preference) => [preference.providerKey, preference]));
+  const catalogMap = new Map(catalog.map((provider) => [provider.providerKey, provider]));
+  const orderedCatalog = [
+    ...preferences
+      .slice()
+      .sort((left, right) => left.displayOrder - right.displayOrder)
+      .map((preference) => catalogMap.get(preference.providerKey))
+      .filter((provider): provider is ProviderCatalogItem => Boolean(provider)),
+    ...catalog.filter((provider) => !preferenceMap.has(provider.providerKey)),
+  ];
 
   return (
     <section className="settings-panel provider-gallery-panel" aria-label="供应商卡片池">
@@ -42,7 +65,7 @@ export function ProviderGallery({
         </div>
       </div>
       <div className="provider-gallery">
-        {catalog.map((provider) => {
+        {orderedCatalog.map((provider) => {
           const state = providerState(provider.providerKey, accounts);
           const enabled = preferenceMap.get(provider.providerKey)?.enabled ?? true;
           const Icon = state === "configured" ? CheckCircle2 : state === "entry" ? ExternalLink : CircleDashed;
@@ -51,8 +74,31 @@ export function ProviderGallery({
             <button
               key={provider.providerKey}
               type="button"
-              className={`provider-gallery-card ${selectedProviderKey === provider.providerKey ? "is-selected" : ""}`}
+              draggable
+              className={`provider-gallery-card ${selectedProviderKey === provider.providerKey ? "is-selected" : ""} ${
+                draggingProviderKey === provider.providerKey ? "provider-gallery-card--dragging" : ""
+              } ${
+                dragOverProviderKey === provider.providerKey && draggingProviderKey !== provider.providerKey
+                  ? "provider-gallery-card--drop-target"
+                  : ""
+              }`}
               aria-label={`编辑 ${provider.providerName}`}
+              onDragStart={(event) => {
+                event.dataTransfer.effectAllowed = "move";
+                event.dataTransfer.setData("text/plain", provider.providerKey);
+                onProviderDragStart(provider.providerKey);
+              }}
+              onDragOver={(event) => {
+                event.preventDefault();
+                event.dataTransfer.dropEffect = "move";
+                onProviderDragOver(provider.providerKey);
+              }}
+              onDragLeave={() => onProviderDragLeave(provider.providerKey)}
+              onDrop={(event) => {
+                event.preventDefault();
+                onProviderDrop(event.dataTransfer.getData("text/plain"), provider.providerKey);
+              }}
+              onDragEnd={onProviderDragEnd}
               onClick={() => onSelectProvider(provider.providerKey)}
             >
               <Icon size={18} aria-hidden="true" />

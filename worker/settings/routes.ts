@@ -1,7 +1,9 @@
 import { errorResponse, successResponse, readJsonBody } from "../http";
 import {
+  deleteProviderAccount,
   getProviderAccountConfigById,
   listProviderSettings,
+  updateProviderAccount,
   updateProviderAccountDisplay,
   upsertProviderAccount,
   upsertProviderPreferences,
@@ -83,6 +85,48 @@ export async function handleSettingsRequest(
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to create account";
       return errorResponse(500, "account_creation_failed", message);
+    }
+  }
+
+  const accountMatch = url.pathname.match(/^\/api\/settings\/accounts\/([^/]+)$/);
+  if (request.method === "PATCH" && accountMatch) {
+    try {
+      const accountId = decodeURIComponent(accountMatch[1]!);
+      const body = await readJsonBody<{
+        providerKey: string;
+        accountLabel: string;
+        sourceUrl: string;
+        credentials?: Record<string, string>;
+      }>(request);
+      const result = await updateProviderAccount(
+        env,
+        userId,
+        accountId,
+        {
+          providerKey: body.providerKey,
+          accountLabel: body.accountLabel,
+          sourceUrl: body.sourceUrl,
+          credentials: body.credentials,
+        },
+        fetchImpl,
+      );
+      return successResponse(result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to update account";
+      if (message === "Provider account not found") {
+        return errorResponse(404, "account_not_found", message);
+      }
+      return errorResponse(500, "account_update_failed", message);
+    }
+  }
+
+  if (request.method === "DELETE" && accountMatch) {
+    try {
+      const accountId = decodeURIComponent(accountMatch[1]!);
+      return successResponse(await deleteProviderAccount(env, userId, accountId, fetchImpl));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to delete account";
+      return errorResponse(500, "account_delete_failed", message);
     }
   }
 

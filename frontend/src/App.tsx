@@ -5,6 +5,7 @@ import { LoginPage } from "./auth/login-page";
 import { DashboardShell, type DashboardSyncState } from "./components";
 import { useActiveRefresh } from "./hooks/useActiveRefresh";
 import { SettingsPage } from "./settings/settings-page";
+import type { AuthConfig } from "./api/client";
 
 const platformBases: Array<Omit<PlatformSnapshot, "lastRefreshedAt" | "quotaWindows" | "trend" | "modelSpends">> = [
   {
@@ -147,6 +148,15 @@ function getErrorMessage(error: unknown): string {
   return "请求云端数据失败。";
 }
 
+function getLocalAuthConfig(): AuthConfig | null {
+  const config = globalThis.__LOCAL_SUPABASE_AUTH_CONFIG__;
+  if (!config?.supabaseUrl || !config.supabaseAnonKey) return null;
+  return {
+    supabaseUrl: config.supabaseUrl,
+    supabaseAnonKey: config.supabaseAnonKey,
+  };
+}
+
 export function App() {
   const authClientRef = useRef<ReturnType<typeof createSupabaseBrowserAuthClient> | null>(null);
   const api = useMemo(
@@ -218,7 +228,11 @@ export function App() {
 
     async function initAuth() {
       try {
-        const config = await api.getAuthConfig();
+        const config = await api.getAuthConfig().catch((error) => {
+          const localConfig = getLocalAuthConfig();
+          if (localConfig) return localConfig;
+          throw error;
+        });
         const nextAuthClient = createSupabaseBrowserAuthClient(config);
         authClientRef.current = nextAuthClient;
         const nextSession = await nextAuthClient.getSession();

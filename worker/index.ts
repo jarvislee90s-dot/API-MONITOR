@@ -96,6 +96,21 @@ type ProviderRuntimeConfig = {
   accountLabel?: string;
 };
 
+function createPreferencesFromAccounts(settings: {
+  accounts: Array<{ providerKey: string; id: string }>;
+}): Array<{ providerKey: string; enabled: boolean; displayOrder: number; activeProviderAccountId: string | null }> {
+  const providerKeys = [...new Set(settings.accounts.map((account) => account.providerKey).filter(isProviderId))];
+  return providerKeys.map((providerKey, index) => {
+    const firstAccount = settings.accounts.find((account) => account.providerKey === providerKey);
+    return {
+      providerKey,
+      enabled: true,
+      displayOrder: index + 1,
+      activeProviderAccountId: firstAccount?.id ?? null,
+    };
+  });
+}
+
 async function buildProviderConfigs(
   env: WorkerEnv,
   userId: string | null,
@@ -110,14 +125,17 @@ async function buildProviderConfigs(
 
   try {
     const settings = await listProviderSettings(env, userId, fetchImpl);
-    if (settings.preferences.length === 0) {
+    const providerPreferences =
+      settings.preferences.length > 0 ? settings.preferences : createPreferencesFromAccounts(settings);
+
+    if (providerPreferences.length === 0) {
       return listProviders().map((provider) => ({
         providerId: provider.id,
         config: buildProviderConfig(env, provider.id),
       }));
     }
 
-    const enabledPreferences = settings.preferences
+    const enabledPreferences = providerPreferences
       .filter((preference) => preference.enabled && isProviderId(preference.providerKey))
       .sort((left, right) => left.displayOrder - right.displayOrder);
 
@@ -139,12 +157,6 @@ async function buildProviderConfigs(
         }
         continue;
       }
-
-      const dbConfig = await getActiveProviderAccountConfig(env, userId, preference.providerKey, fetchImpl);
-      configs.push({
-        providerId: preference.providerKey,
-        config: mergeProviderConfig(env, preference.providerKey, dbConfig),
-      });
     }
     return configs;
   } catch {

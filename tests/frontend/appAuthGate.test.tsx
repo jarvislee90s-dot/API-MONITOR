@@ -1,6 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../../frontend/src/App";
+import { createSupabaseBrowserAuthClient } from "../../frontend/src/auth/auth-client";
 
 const getAuthConfig = vi.fn();
 const getUsageDashboard = vi.fn();
@@ -52,6 +53,7 @@ describe("App auth gate", () => {
     onSessionChange.mockReturnValue(() => undefined);
     signIn.mockResolvedValue(null);
     signOut.mockResolvedValue(undefined);
+    globalThis.__LOCAL_SUPABASE_AUTH_CONFIG__ = undefined;
     window.location.hash = "";
     vi.clearAllMocks();
   });
@@ -64,6 +66,22 @@ describe("App auth gate", () => {
     expect(getAuthConfig).toHaveBeenCalledTimes(1);
     expect(getUsageDashboard).not.toHaveBeenCalled();
     expect(refreshUsage).not.toHaveBeenCalled();
+  });
+
+  it("falls back to local public Supabase config when the worker config is missing", async () => {
+    getAuthConfig.mockRejectedValueOnce(new Error("Supabase auth config is not configured"));
+    globalThis.__LOCAL_SUPABASE_AUTH_CONFIG__ = {
+      supabaseUrl: "https://local-project.supabase.co",
+      supabaseAnonKey: "local-anon-public-key",
+    };
+
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "登录后访问用量看板" });
+    expect(createSupabaseBrowserAuthClient).toHaveBeenCalledWith({
+      supabaseUrl: "https://local-project.supabase.co",
+      supabaseAnonKey: "local-anon-public-key",
+    });
   });
 
   it("loads dashboard data after restoring a session", async () => {

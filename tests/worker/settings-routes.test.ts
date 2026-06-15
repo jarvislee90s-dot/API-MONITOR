@@ -193,6 +193,79 @@ describe("settings routes", () => {
     expect(fetchCalls[1].searchParams.get("is_archived")).toBe("eq.false");
   });
 
+  it("falls back to legacy provider account columns when layered settings tables are missing", async () => {
+    const fetchCalls: URL[] = [];
+    const fetchImpl = async (input: RequestInfo | URL): Promise<Response> => {
+      const url = new URL(input.toString());
+      if (url.pathname.endsWith("/auth/v1/user")) {
+        return Response.json({ id: "user-123", email: "me@example.com" });
+      }
+      fetchCalls.push(url);
+
+      if (url.pathname.endsWith("/provider_preferences")) {
+        return new Response(JSON.stringify({ message: "not found" }), { status: 404 });
+      }
+
+      if (url.pathname.endsWith("/provider_accounts")) {
+        const select = url.searchParams.get("select") ?? "";
+        if (select.includes("account_label")) {
+          return new Response(JSON.stringify({ message: "column does not exist" }), { status: 400 });
+        }
+        return Response.json([
+          {
+            id: "legacy-account-1",
+            provider_key: "openrouter",
+            display_name: "旧表主账号",
+            source_url: "https://openrouter.ai/activity",
+            status: "ready",
+            status_message: "可用",
+            config: {
+              apiKey: "sk-secret-value",
+              __homepageEnabled: true,
+              __homepageOrder: 2,
+            },
+          },
+        ]);
+      }
+
+      return new Response("not found", { status: 404 });
+    };
+
+    const response = await handleSettingsRequest(
+      new Request("https://api-monitor.local/api/settings/providers", {
+        method: "GET",
+        headers: { Authorization: "Bearer user-jwt" },
+      }),
+      env,
+      fetchImpl,
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toMatchObject({
+      ok: true,
+      data: {
+        preferences: [],
+        accounts: [
+          {
+            id: "legacy-account-1",
+            providerKey: "openrouter",
+            accountLabel: "旧表主账号",
+            homepageEnabled: true,
+            homepageOrder: 2,
+          },
+        ],
+      },
+    });
+    expect(JSON.stringify(body)).not.toContain("sk-secret-value");
+    expect(fetchCalls.map((url) => url.searchParams.get("select"))).toEqual([
+      "provider_key,enabled,display_order,active_provider_account_id",
+      "id,provider_key,account_label,source_url,status,status_message,credential_hint,homepage_enabled,homepage_order,last_test_summary",
+      "id,provider_key,display_name,source_url,status,status_message,config",
+      "id,display_name,config",
+    ]);
+  });
+
   it("updates account homepage visibility without touching credentials", async () => {
     const fetchCalls: { url: URL; init?: RequestInit }[] = [];
     const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -266,6 +339,57 @@ describe("settings routes", () => {
       ok: false,
       error: {
         code: "invalid_request",
+      },
+    });
+  });
+
+  it("persists homepage visibility into legacy account config when homepage columns are missing", async () => {
+    const fetchCalls: { url: URL; init?: RequestInit; body: Record<string, unknown> | null }[] = [];
+    const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = new URL(input.toString());
+      if (url.pathname.endsWith("/auth/v1/user")) {
+        return Response.json({ id: "user-123", email: "me@example.com" });
+      }
+      const body = init?.body ? JSON.parse(String(init.body)) : null;
+      fetchCalls.push({ url, init, body });
+
+      if (init?.method === "PATCH" && body?.homepage_enabled !== undefined) {
+        return new Response(JSON.stringify({ message: "column does not exist" }), { status: 400 });
+      }
+      if (init?.method === "PATCH" && body?.config) {
+        return Response.json([{ id: "account-1" }]);
+      }
+      return Response.json([{ id: "account-1", config: { apiKey: "sk-secret" } }]);
+    };
+
+    const response = await handleSettingsRequest(
+      new Request("https://api-monitor.local/api/settings/accounts/account-1/display", {
+        method: "PATCH",
+        headers: {
+          "content-type": "application/json",
+          Authorization: "Bearer user-jwt",
+        },
+        body: JSON.stringify({ homepageEnabled: false, homepageOrder: 100 }),
+      }),
+      env,
+      fetchImpl,
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      data: {
+        id: "account-1",
+        homepageEnabled: false,
+        homepageOrder: 100,
+      },
+    });
+    const legacyPatch = fetchCalls.find((call) => call.body?.config);
+    expect(legacyPatch?.body).toMatchObject({
+      config: {
+        apiKey: "sk-secret",
+        __homepageEnabled: false,
+        __homepageOrder: 100,
       },
     });
   });
@@ -446,6 +570,288 @@ describe("settings routes", () => {
     });
     expect(credentialBody.encrypted_payload).toBeDefined();
     expect(credentialBody.nonce).toBeDefined();
+  });
+
+  it("saves provider accounts to legacy config when credential table columns are missing", async () => {
+    const fetchCalls: { url: URL; body: Record<string, unknown> | null }[] = [];
+    const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = new URL(input.toString());
+      if (url.pathname.endsWith("/auth/v1/user")) {
+        return Response.json({ id: "user-123", email: "me@example.com" });
+      }
+      const body = init?.body ? JSON.parse(String(init.body)) : null;
+      fetchCalls.push({ url, body });
+
+      if (url.pathname.endsWith("/provider_accounts") && body?.account_label) {
+        return new Response(JSON.stringify({ message: "column does not exist" }), { status: 400 });
+      }
+      if (url.pathname.endsWith("/provider_accounts")) {
+        return Response.json([{ id: "legacy-account-new" }]);
+      }
+      return new Response("not found", { status: 404 });
+    };
+
+    const response = await handleSettingsRequest(
+      new Request("https://api-monitor.local/api/settings/accounts", {
+        method: "POST",
+        headers: { "content-type": "application/json", Authorization: "Bearer user-jwt" },
+        body: JSON.stringify({
+          providerKey: "openrouter",
+          accountLabel: "旧表账号",
+          sourceUrl: "https://openrouter.ai/activity",
+          credentials: { apiKey: "sk-secret-value" },
+        }),
+      }),
+      env,
+      fetchImpl,
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      data: { id: "legacy-account-new" },
+    });
+    const legacyAccountCall = fetchCalls.find(
+      (call) => call.body?.display_name === "旧表账号" && !("account_label" in call.body),
+    );
+    expect(legacyAccountCall?.url.searchParams.get("on_conflict")).toBeNull();
+    expect(legacyAccountCall?.body).toMatchObject({
+      user_id: "user-123",
+      provider_key: "openrouter",
+      display_name: "旧表账号",
+      source_url: "https://openrouter.ai/activity",
+      config: {
+        apiKey: "sk-secret-value",
+        __homepageEnabled: true,
+        __homepageOrder: 100,
+      },
+    });
+  });
+
+  it("creates a separate legacy account instead of overwriting an existing account with the same source URL", async () => {
+    const fetchCalls: { url: URL; body: Record<string, unknown> | null }[] = [];
+    const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = new URL(input.toString());
+      if (url.pathname.endsWith("/auth/v1/user")) {
+        return Response.json({ id: "user-123", email: "me@example.com" });
+      }
+      const body = init?.body ? JSON.parse(String(init.body)) : null;
+      fetchCalls.push({ url, body });
+
+      if (url.pathname.endsWith("/provider_accounts") && body?.account_label) {
+        return new Response(JSON.stringify({ message: "column does not exist" }), { status: 400 });
+      }
+      if (url.pathname.endsWith("/provider_accounts")) {
+        return Response.json([{ id: "legacy-account-new" }]);
+      }
+      return new Response("not found", { status: 404 });
+    };
+
+    const response = await handleSettingsRequest(
+      new Request("https://api-monitor.local/api/settings/accounts", {
+        method: "POST",
+        headers: { "content-type": "application/json", Authorization: "Bearer user-jwt" },
+        body: JSON.stringify({
+          providerKey: "openrouter",
+          accountLabel: "第二个账号",
+          sourceUrl: "https://openrouter.ai/activity",
+          credentials: { apiKey: "sk-second-secret" },
+        }),
+      }),
+      env,
+      fetchImpl,
+    );
+
+    expect(response.status).toBe(200);
+    const legacyAccountCall = fetchCalls.find(
+      (call) => call.body?.display_name === "第二个账号" && !("account_label" in call.body),
+    );
+    expect(legacyAccountCall?.url.searchParams.get("on_conflict")).toBeNull();
+    expect(legacyAccountCall?.body).toMatchObject({
+      display_name: "第二个账号",
+      source_url: "https://openrouter.ai/activity",
+    });
+  });
+
+  it("updates an existing legacy account by id without creating a new account", async () => {
+    const fetchCalls: { url: URL; init?: RequestInit; body: Record<string, unknown> | null }[] = [];
+    const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = new URL(input.toString());
+      if (url.pathname.endsWith("/auth/v1/user")) {
+        return Response.json({ id: "user-123", email: "me@example.com" });
+      }
+      const body = init?.body ? JSON.parse(String(init.body)) : null;
+      fetchCalls.push({ url, init, body });
+
+      if (init?.method === "PATCH" && body?.account_label) {
+        return new Response(JSON.stringify({ message: "column does not exist" }), { status: 400 });
+      }
+      if (init?.method === "PATCH" && body?.display_name) {
+        return Response.json([{ id: "legacy-account-1" }]);
+      }
+      return new Response("not found", { status: 404 });
+    };
+
+    const response = await handleSettingsRequest(
+      new Request("https://api-monitor.local/api/settings/accounts/legacy-account-1", {
+        method: "PATCH",
+        headers: { "content-type": "application/json", Authorization: "Bearer user-jwt" },
+        body: JSON.stringify({
+          providerKey: "openrouter",
+          accountLabel: "改名后的账号",
+          sourceUrl: "https://openrouter.ai/activity",
+          credentials: { apiKey: "sk-updated-secret" },
+        }),
+      }),
+      env,
+      fetchImpl,
+    );
+
+    expect(response.status).toBe(200);
+    const legacyPatch = fetchCalls.find(
+      (call) => call.body?.display_name === "改名后的账号" && !("account_label" in call.body),
+    );
+    expect(legacyPatch?.init?.method).toBe("PATCH");
+    expect(legacyPatch?.url.searchParams.get("id")).toBe("eq.legacy-account-1");
+    expect(legacyPatch?.url.searchParams.get("user_id")).toBe("eq.user-123");
+    expect(legacyPatch?.body).toMatchObject({
+      display_name: "改名后的账号",
+      source_url: "https://openrouter.ai/activity",
+      config: {
+        apiKey: "sk-updated-secret",
+      },
+    });
+  });
+
+  it("deletes a provider account owned by the current user", async () => {
+    const fetchCalls: { url: URL; init?: RequestInit }[] = [];
+    const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = new URL(input.toString());
+      if (url.pathname.endsWith("/auth/v1/user")) {
+        return Response.json({ id: "user-123", email: "me@example.com" });
+      }
+      fetchCalls.push({ url, init });
+      return new Response(null, { status: 204 });
+    };
+
+    const response = await handleSettingsRequest(
+      new Request("https://api-monitor.local/api/settings/accounts/account-1", {
+        method: "DELETE",
+        headers: { Authorization: "Bearer user-jwt" },
+      }),
+      env,
+      fetchImpl,
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      data: { id: "account-1" },
+    });
+    expect(fetchCalls).toHaveLength(1);
+    expect(fetchCalls[0]?.init?.method).toBe("DELETE");
+    expect(fetchCalls[0]?.url.pathname).toBe("/rest/v1/provider_accounts");
+    expect(fetchCalls[0]?.url.searchParams.get("id")).toBe("eq.account-1");
+    expect(fetchCalls[0]?.url.searchParams.get("user_id")).toBe("eq.user-123");
+  });
+
+  it("reads provider preferences from legacy __preferences__ system record", async () => {
+    const fetchImpl = async (input: RequestInfo | URL): Promise<Response> => {
+      const url = new URL(input.toString());
+      if (url.pathname.endsWith("/auth/v1/user")) {
+        return Response.json({ id: "user-123", email: "me@example.com" });
+      }
+      if (url.pathname.endsWith("/provider_preferences")) {
+        return new Response(JSON.stringify({ message: "relation does not exist" }), { status: 404 });
+      }
+      if (url.pathname.endsWith("/provider_accounts")) {
+        const select = url.searchParams.get("select") ?? "";
+        if (select.includes("display_name,config")) {
+          return Response.json([
+            {
+              id: "sys-pref",
+              display_name: "__preferences__",
+              config: {
+                __preferences: [
+                  { provider_key: "opencode-go", enabled: false, display_order: 1, active_provider_account_id: null },
+                  { provider_key: "openrouter", enabled: true, display_order: 2, active_provider_account_id: "acc-1" },
+                ],
+              },
+            },
+          ]);
+        }
+        if (select.includes("display_name,source_url")) {
+          return Response.json([]);
+        }
+      }
+      return new Response("not found", { status: 404 });
+    };
+
+    const response = await handleSettingsRequest(
+      new Request("https://api-monitor.local/api/settings/providers", {
+        method: "GET",
+        headers: { Authorization: "Bearer user-jwt" },
+      }),
+      env,
+      fetchImpl,
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toMatchObject({
+      ok: true,
+      data: {
+        preferences: [
+          { providerKey: "opencode-go", enabled: false, displayOrder: 1, activeProviderAccountId: null },
+          { providerKey: "openrouter", enabled: true, displayOrder: 2, activeProviderAccountId: "acc-1" },
+        ],
+      },
+    });
+  });
+
+  it("writes provider preferences to legacy __preferences__ system record when new schema is missing", async () => {
+    const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = new URL(input.toString());
+      if (url.pathname.endsWith("/auth/v1/user")) {
+        return Response.json({ id: "user-123", email: "me@example.com" });
+      }
+      if (url.pathname.endsWith("/provider_preferences") && init?.method === "POST") {
+        return new Response(JSON.stringify({ message: "relation does not exist" }), { status: 404 });
+      }
+      if (url.pathname.endsWith("/provider_accounts") && init?.method === "GET") {
+        return Response.json([]);
+      }
+      if (url.pathname.endsWith("/provider_accounts") && init?.method === "POST") {
+        const body = JSON.parse(String(init.body));
+        return Response.json([{ id: body.id ?? "sys-new" }]);
+      }
+      if (url.pathname.endsWith("/provider_accounts") && init?.method === "PATCH") {
+        return new Response(null, { status: 204 });
+      }
+      return new Response("not found", { status: 404 });
+    };
+
+    const response = await handleSettingsRequest(
+      new Request("https://api-monitor.local/api/settings/providers", {
+        method: "PUT",
+        headers: { "content-type": "application/json", Authorization: "Bearer user-jwt" },
+        body: JSON.stringify({
+          providerKey: "openrouter",
+          enabled: true,
+          displayOrder: 1,
+          activeProviderAccountId: "acc-1",
+        }),
+      }),
+      env,
+      fetchImpl,
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toMatchObject({
+      ok: true,
+      data: { providerKey: "openrouter", displayOrder: 1 },
+    });
   });
 
   it("rejects credential saves when encryption key is missing", async () => {

@@ -57,6 +57,7 @@ export function CredentialForm({ provider, account, onSave }: CredentialFormProp
     setSaving(true);
     try {
       await onSave({
+        id: account?.id,
         providerKey: currentProvider.providerKey,
         accountLabel,
         sourceUrl,
@@ -67,6 +68,9 @@ export function CredentialForm({ provider, account, onSave }: CredentialFormProp
         ),
       });
       setCredentials({});
+    } catch (error) {
+      // 错误已由父组件 saveAccount 的 catch 写入 message 横幅；这里仅打印到 console 便于排查
+      console.error("保存账号失败", error);
     } finally {
       setSaving(false);
     }

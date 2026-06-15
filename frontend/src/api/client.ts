@@ -135,6 +135,7 @@ export interface ProviderSettingsPayload {
 }
 
 export interface ProviderAccountInput {
+  id?: string;
   providerKey: string;
   accountLabel: string;
   sourceUrl: string;
@@ -627,6 +628,38 @@ export function createApiClient(options: ApiClientOptions = {}) {
           credentials: "include",
           headers: await createRequestHeaders(),
           body: JSON.stringify(account),
+        },
+      );
+
+      return unwrapEnvelope(payload);
+    },
+
+    async updateProviderAccount(
+      accountId: string,
+      account: ProviderAccountInput,
+    ): Promise<{ id: string }> {
+      const payload = await requestJson<{ id: string } | ApiEnvelope<{ id: string }>>(
+        fetcher,
+        buildUrl(options.baseUrl, `/api/settings/accounts/${encodeURIComponent(accountId)}`),
+        {
+          method: "PATCH",
+          credentials: "include",
+          headers: await createRequestHeaders(),
+          body: JSON.stringify(account),
+        },
+      );
+
+      return unwrapEnvelope(payload);
+    },
+
+    async deleteProviderAccount(accountId: string): Promise<{ id: string }> {
+      const payload = await requestJson<{ id: string } | ApiEnvelope<{ id: string }>>(
+        fetcher,
+        buildUrl(options.baseUrl, `/api/settings/accounts/${encodeURIComponent(accountId)}`),
+        {
+          method: "DELETE",
+          credentials: "include",
+          headers: await createRequestHeaders(),
         },
       );
 

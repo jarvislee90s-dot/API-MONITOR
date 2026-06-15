@@ -796,7 +796,7 @@ describe("worker api", () => {
 
       expect(response.status).toBe(200);
       expect(payload.ok).toBe(true);
-      expect(payload.data.refreshed).toBe(true);
+      expect(payload.data.refresh.refreshed).toBe(true);
       // The workspace URL should come from DB account config (wrk_db) instead of env (wrk_123)
       const opencodeCalls = fetchImpl.mock.calls.filter((call) => {
         const url = String(call[0]);
@@ -810,7 +810,7 @@ describe("worker api", () => {
         const url = String(call[0]);
         return url.startsWith("https://supabase.test/rest/v1/provider_accounts") && url.includes("id=eq.account-db-1");
       });
-      expect(String(accountReadCall?.[0])).toContain("provider_key=eq.opencode-go");
+      expect(String(accountReadCall?.[0])).toContain("user_id=eq.00000000-0000-0000-0000-000000000001");
     } finally {
       vi.unstubAllGlobals();
     }
@@ -963,6 +963,164 @@ describe("worker api", () => {
         return url.includes("/api/v1/auth/key");
       });
       expect(openrouterCalls).toHaveLength(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("hides providers with no homepage-enabled accounts and keeps provider preference order", async () => {
+    const encryptionKey = "0123456789abcdef0123456789abcdef";
+    const encryptedOpenRouter = await encryptCredentialPayload({ apiKey: "sk-openrouter" }, encryptionKey);
+    const encryptedOpenCode = await encryptCredentialPayload(
+      { workspaceId: "wrk_ordered", authCookie: "cookie=ordered" },
+      encryptionKey,
+    );
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+
+      if (url.startsWith("https://supabase.test/rest/v1/provider_preferences")) {
+        return Response.json([
+          {
+            provider_key: "opencode-go",
+            enabled: true,
+            display_order: 1,
+            active_provider_account_id: "opencode-enabled",
+          },
+          {
+            provider_key: "openrouter",
+            enabled: true,
+            display_order: 2,
+            active_provider_account_id: "openrouter-enabled",
+          },
+          {
+            provider_key: "xfyun-maas",
+            enabled: true,
+            display_order: 3,
+            active_provider_account_id: "xfyun-disabled",
+          },
+        ]);
+      }
+
+      if (url.startsWith("https://supabase.test/rest/v1/provider_accounts")) {
+        const parsed = new URL(url);
+        const accountIdFilter = parsed.searchParams.get("id");
+        if (accountIdFilter === "eq.opencode-enabled") {
+          return Response.json([
+            {
+              id: "opencode-enabled",
+              provider_key: "opencode-go",
+              account_label: "OpenCode 启用账号",
+              source_url: "https://opencode.ai/workspace/wrk_ordered/go",
+              config: {},
+            },
+          ]);
+        }
+        if (accountIdFilter === "eq.openrouter-enabled") {
+          return Response.json([
+            {
+              id: "openrouter-enabled",
+              provider_key: "openrouter",
+              account_label: "OpenRouter 启用账号",
+              source_url: "https://openrouter.ai/activity",
+              config: {},
+            },
+          ]);
+        }
+
+        return Response.json([
+          {
+            id: "openrouter-enabled",
+            provider_key: "openrouter",
+            account_label: "OpenRouter 启用账号",
+            source_url: "https://openrouter.ai/activity",
+            status: "ready",
+            credential_hint: { apiKey: "sk...router" },
+            homepage_enabled: true,
+            homepage_order: 1,
+            last_test_summary: "router ready",
+          },
+          {
+            id: "opencode-enabled",
+            provider_key: "opencode-go",
+            account_label: "OpenCode 启用账号",
+            source_url: "https://opencode.ai/workspace/wrk_ordered/go",
+            status: "ready",
+            credential_hint: { workspaceId: "wrk_ordered" },
+            homepage_enabled: true,
+            homepage_order: 1,
+            last_test_summary: "opencode ready",
+          },
+          {
+            id: "xfyun-disabled",
+            provider_key: "xfyun-maas",
+            account_label: "讯飞停用账号",
+            source_url: "https://maas.xfyun.cn/packageSubscription",
+            status: "ready",
+            credential_hint: {},
+            homepage_enabled: false,
+            homepage_order: 100,
+            last_test_summary: "disabled",
+          },
+        ]);
+      }
+
+      if (url.startsWith("https://supabase.test/rest/v1/provider_account_credentials")) {
+        const parsed = new URL(url);
+        const accountId = parsed.searchParams.get("provider_account_id");
+        if (accountId === "eq.openrouter-enabled") {
+          return Response.json([
+            {
+              encrypted_payload: encryptedOpenRouter.encryptedPayload,
+              nonce: encryptedOpenRouter.nonce,
+              key_version: encryptedOpenRouter.keyVersion,
+            },
+          ]);
+        }
+        if (accountId === "eq.opencode-enabled") {
+          return Response.json([
+            {
+              encrypted_payload: encryptedOpenCode.encryptedPayload,
+              nonce: encryptedOpenCode.nonce,
+              key_version: encryptedOpenCode.keyVersion,
+            },
+          ]);
+        }
+        return Response.json([]);
+      }
+
+      if (url.startsWith("https://supabase.test/rest/v1/usage_snapshots")) {
+        return Response.json([]);
+      }
+
+      if (url.includes("/api/v1/auth/key")) {
+        return Response.json({ data: { usage: 7, limit: 100, limit_remaining: 93 } });
+      }
+
+      if (url.includes("/workspace/wrk_ordered/go")) {
+        return Response.json({ current: 3, limit: 100 });
+      }
+
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    vi.stubGlobal("fetch", fetchImpl as unknown as typeof fetch);
+    try {
+      const env = {
+        ...createEnv(fetchImpl as typeof fetch),
+        SUPABASE_URL: "https://supabase.test",
+        SUPABASE_SERVICE_ROLE_KEY: "service-role-test",
+        SUPABASE_USER_ID: "00000000-0000-0000-0000-000000000001",
+        CREDENTIAL_ENCRYPTION_KEY: encryptionKey,
+      };
+
+      const response = await handleApiRequest(new Request("https://api.monitor.local/api/usage"), env);
+      const payload = (await response.json()) as any;
+
+      expect(response.status).toBe(200);
+      expect(payload.data.cards.map((card: { providerId: string }) => card.providerId)).toEqual([
+        "opencode-go",
+        "openrouter",
+      ]);
     } finally {
       vi.unstubAllGlobals();
     }
