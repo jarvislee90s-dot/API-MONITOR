@@ -2,12 +2,18 @@ import { clampNumber, parseHeadersCookie, toIsoString } from "../http";
 import type { ProviderDefinition, ProviderFetchInput, ProviderFetchResult } from "../types";
 import { createResult } from "./types";
 import { parseOpenCodeGoWindows } from "./opencode-go-parser";
+import { renderOpenCodeGoBrowserHtml } from "./opencode-go-browser";
 
 type OpenCodeGoConfig = {
   workspaceId?: string;
   authCookie?: string;
   baseUrl?: string;
+  browserFallbackEnabled?: boolean | string;
 };
+
+function isBrowserFallbackEnabled(value: boolean | string | undefined): boolean {
+  return value === true || value === "1" || value === "true";
+}
 
 function toCookiePair(name: unknown, value: unknown): string | null {
   if (typeof name !== "string" || name.trim() === "") return null;
@@ -117,46 +123,128 @@ export async function fetchOpenCodeGoSnapshot(input: ProviderFetchInput): Promis
   });
 
   const html = await response.text();
-  if (!response.ok) {
-    const location = response.headers.get("location");
-    const redirectedToLogin = response.status >= 300 && response.status < 400 && isOpenCodeAuthUrl(location);
-    const status = response.status === 401 || response.status === 403 || redirectedToLogin ? "login_required" : "error";
+  const location = response.headers.get("location");
+  const redirectedToLogin = response.status >= 300 && response.status < 400 && isOpenCodeAuthUrl(location);
+  const fetchStatus = !response.ok
+    ? response.status === 401 || response.status === 403 || redirectedToLogin ? "login_required" : "error"
+    : "ready";
+  const loginRequired = response.ok
+    ? isOpenCodeAuthUrl(response.url) || /<title[^>]*>\s*OpenAuth\s*<\/title>|sign in|log in|login|登录|登入/i.test(html)
+    : fetchStatus === "login_required";
+  const parsedWindows = response.ok && !loginRequired
+    ? parseOpenCodeGoWindows(html, input.now)
+    : [];
+  const fetchSummary = !response.ok
+    ? redirectedToLogin
+      ? "OpenCode Go dashboard redirected to login"
+      : `OpenCode Go dashboard returned HTTP ${response.status}`
+    : loginRequired
+      ? "OpenCode Go dashboard appears to require login"
+      : parsedWindows.length > 0
+        ? "OpenCode Go usage windows parsed"
+        : "OpenCode Go dashboard loaded but usage windows were not found";
+
+  if (parsedWindows.length > 0) {
     return createResult({
       providerId: "opencode-go",
       providerName: "OpenCode Go",
       sourceUrl,
-      status,
+      status: "ready",
       capturedAt: now,
-      summary: redirectedToLogin
-        ? "OpenCode Go dashboard redirected to login"
-        : `OpenCode Go dashboard returned HTTP ${response.status}`,
-      windows: [],
-      metrics: { httpStatus: response.status },
-      meta: {},
+      summary: "OpenCode Go usage windows parsed",
+      windows: parsedWindows,
+      metrics: {
+        hasRolling: parsedWindows.some((window) => window.key === "rolling"),
+        hasWeekly: parsedWindows.some((window) => window.key === "weekly"),
+        hasMonthly: parsedWindows.some((window) => window.key === "monthly"),
+      },
+      meta: { fetchMethod: "worker_fetch" },
     });
   }
 
-  const loginRequired = isOpenCodeAuthUrl(response.url) || /<title[^>]*>\s*OpenAuth\s*<\/title>|sign in|log in|login|登录|登入/i.test(html);
-  const parsedWindows = parseOpenCodeGoWindows(html, input.now);
+  if (isBrowserFallbackEnabled(config.browserFallbackEnabled)) {
+    const renderer = input.browserRenderer ?? (input.browser ? renderOpenCodeGoBrowserHtml : null);
+    if (!renderer) {
+      return createResult({
+        providerId: "opencode-go",
+        providerName: "OpenCode Go",
+        sourceUrl,
+        status: fetchStatus === "error" ? "error" : "login_required",
+        capturedAt: now,
+        summary: fetchSummary,
+        windows: [],
+        metrics: { httpStatus: response.status },
+        meta: {
+          fetchMethod: "worker_fetch",
+          browserFallbackAttempted: true,
+          browserFallbackStatus: "missing_binding",
+        },
+      });
+    }
+
+    try {
+      const browserHtml = await renderer({
+        sourceUrl,
+        authCookie: normalizeOpenCodeCookie(config.authCookie),
+        browser: input.browser,
+      });
+      const browserWindows = parseOpenCodeGoWindows(browserHtml, input.now);
+      if (browserWindows.length > 0) {
+        return createResult({
+          providerId: "opencode-go",
+          providerName: "OpenCode Go",
+          sourceUrl,
+          status: "ready",
+          capturedAt: now,
+          summary: "OpenCode Go usage windows parsed by Cloudflare Browser Run",
+          windows: browserWindows,
+          metrics: {
+            hasRolling: browserWindows.some((window) => window.key === "rolling"),
+            hasWeekly: browserWindows.some((window) => window.key === "weekly"),
+            hasMonthly: browserWindows.some((window) => window.key === "monthly"),
+          },
+          meta: {
+            fetchMethod: "browser_rendered",
+            liveFetchStatus: fetchStatus === "ready" ? "partial" : fetchStatus,
+            liveFetchSummary: fetchSummary,
+          },
+        });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Browser Run fallback failed";
+      return createResult({
+        providerId: "opencode-go",
+        providerName: "OpenCode Go",
+        sourceUrl,
+        status: fetchStatus === "error" ? "error" : "login_required",
+        capturedAt: now,
+        summary: fetchSummary,
+        windows: [],
+        metrics: { httpStatus: response.status },
+        meta: {
+          fetchMethod: "worker_fetch",
+          browserFallbackAttempted: true,
+          browserFallbackStatus: "error",
+          browserFallbackSummary: message,
+        },
+      });
+    }
+  }
 
   return createResult({
     providerId: "opencode-go",
     providerName: "OpenCode Go",
     sourceUrl,
-    status: loginRequired ? "login_required" : parsedWindows.length > 0 ? "ready" : "partial",
+    status: loginRequired ? "login_required" : "partial",
     capturedAt: now,
-    summary: loginRequired
-      ? "OpenCode Go dashboard appears to require login"
-      : parsedWindows.length > 0
-        ? "OpenCode Go usage windows parsed"
-        : "OpenCode Go dashboard loaded but usage windows were not found",
-    windows: parsedWindows,
+    summary: fetchSummary,
+    windows: [],
     metrics: {
-      hasRolling: parsedWindows.some((window) => window.key === "rolling"),
-      hasWeekly: parsedWindows.some((window) => window.key === "weekly"),
-      hasMonthly: parsedWindows.some((window) => window.key === "monthly"),
+      hasRolling: false,
+      hasWeekly: false,
+      hasMonthly: false,
     },
-    meta: {},
+    meta: { fetchMethod: "worker_fetch" },
   });
 }
 

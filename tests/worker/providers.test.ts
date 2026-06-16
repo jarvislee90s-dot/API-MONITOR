@@ -291,6 +291,32 @@ describe("opencode-go adapter", () => {
       browser: undefined,
     });
   });
+
+  it("keeps login_required when browser fallback is enabled but no renderer or binding is available", async () => {
+    const fetchImpl = vi.fn(async () => {
+      return new Response("", {
+        status: 302,
+        headers: { location: "https://auth.opencode.ai/authorize?client_id=app" },
+      });
+    });
+
+    const result = await fetchOpenCodeGoSnapshot({
+      now: new Date("2026-06-16T07:00:00.000Z"),
+      fetchImpl: fetchImpl as typeof fetch,
+      config: {
+        workspaceId: "wrk_123",
+        authCookie: "auth=abc123",
+        browserFallbackEnabled: true,
+      },
+    });
+
+    expect(result.snapshot.status).toBe("login_required");
+    expect(result.snapshot.meta).toMatchObject({
+      fetchMethod: "worker_fetch",
+      browserFallbackAttempted: true,
+      browserFallbackStatus: "missing_binding",
+    });
+  });
 });
 
 describe("xfyun maas adapter", () => {
