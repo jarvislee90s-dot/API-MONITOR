@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { getProvider, isProviderId, listProviders } from "../../worker/providers/registry";
 import { fetchOpenRouterSnapshot } from "../../worker/providers/openrouter";
 import { fetchOpenCodeGoSnapshot } from "../../worker/providers/opencode-go";
+import { parseOpenCodeGoWindows } from "../../worker/providers/opencode-go-parser";
 import { fetchXfyunMaaSSnapshot } from "../../worker/providers/xfyun-maas";
 import { fetchAliyunBailianSnapshot } from "../../worker/providers/aliyun-bailian";
 
@@ -222,6 +223,32 @@ describe("opencode-go adapter", () => {
     });
 
     expect(fetchedUrls).toEqual(["https://opencode.ai/workspace/wrk_123/go"]);
+  });
+
+  it("parses OpenCode Go usage windows through the shared parser", () => {
+    const html = [
+      "<html><script>",
+      "rollingUsage:$R[10]={usagePercent:6,resetInSec:10200}",
+      "weeklyUsage:$R[11]={usagePercent:16,resetInSec:489600}",
+      "monthlyUsage:$R[12]={usagePercent:25,resetInSec:1987200}",
+      "</script></html>",
+    ].join("");
+
+    const windows = parseOpenCodeGoWindows(html, new Date("2026-06-16T07:00:00.000Z"));
+
+    expect(windows.map((window) => window.key)).toEqual(["rolling", "weekly", "monthly"]);
+    expect(windows[0]).toMatchObject({
+      key: "rolling",
+      label: "5h",
+      used: 6,
+      limit: 100,
+      remaining: 94,
+      percentUsed: 6,
+      percentRemaining: 94,
+      resetAt: "2026-06-16T17:50:00+08:00",
+    });
+    expect(windows[1]).toMatchObject({ key: "weekly", used: 16, remaining: 84 });
+    expect(windows[2]).toMatchObject({ key: "monthly", used: 25, remaining: 75 });
   });
 });
 

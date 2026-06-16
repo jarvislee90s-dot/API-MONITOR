@@ -1,21 +1,13 @@
 import { clampNumber, parseHeadersCookie, toIsoString } from "../http";
 import type { ProviderDefinition, ProviderFetchInput, ProviderFetchResult } from "../types";
 import { createResult } from "./types";
+import { parseOpenCodeGoWindows } from "./opencode-go-parser";
 
 type OpenCodeGoConfig = {
   workspaceId?: string;
   authCookie?: string;
   baseUrl?: string;
 };
-
-type WindowKey = "rolling" | "weekly" | "monthly";
-
-const WINDOW_KEYS: WindowKey[] = ["rolling", "weekly", "monthly"];
-
-function toBeijingOffsetIso(date: Date): string {
-  const beijingDate = new Date(date.getTime() + 8 * 60 * 60 * 1000);
-  return beijingDate.toISOString().replace(/\.\d{3}Z$/, "+08:00");
-}
 
 function toCookiePair(name: unknown, value: unknown): string | null {
   if (typeof name !== "string" || name.trim() === "") return null;
@@ -91,23 +83,6 @@ function getDashboardUrl(config: OpenCodeGoConfig): string {
   return `${origin}/workspace/${encodeURIComponent(config.workspaceId)}/go`;
 }
 
-function parseWindow(html: string, key: WindowKey): { used: number; resetInSec?: number } | null {
-  const pattern = new RegExp(`${key}Usage:\\$R\\[\\d+\\]=\\{([^}]*)\\}`, "i");
-  const match = html.match(pattern);
-  if (!match?.[1]) return null;
-
-  const body = match[1];
-  const usedMatch = body.match(/usagePercent:([0-9]+(?:\.[0-9]+)?)/i);
-  const resetMatch = body.match(/resetInSec:([0-9]+(?:\.[0-9]+)?)/i);
-  const used = usedMatch ? Number(usedMatch[1]) : Number.NaN;
-  if (!Number.isFinite(used)) return null;
-
-  return {
-    used,
-    resetInSec: resetMatch ? Number(resetMatch[1]) : undefined,
-  };
-}
-
 export async function fetchOpenCodeGoSnapshot(input: ProviderFetchInput): Promise<ProviderFetchResult> {
   const now = toIsoString(input.now);
   const fetchImpl = input.fetchImpl ?? fetch;
@@ -162,25 +137,7 @@ export async function fetchOpenCodeGoSnapshot(input: ProviderFetchInput): Promis
   }
 
   const loginRequired = isOpenCodeAuthUrl(response.url) || /<title[^>]*>\s*OpenAuth\s*<\/title>|sign in|log in|login|登录|登入/i.test(html);
-  const parsedWindows = WINDOW_KEYS.flatMap((key) => {
-    const parsed = parseWindow(html, key);
-    if (!parsed) return [];
-    const limit = 100;
-    return [
-      {
-        key,
-        label: key === "rolling" ? "5h" : key === "weekly" ? "Weekly" : "Monthly",
-        used: parsed.used,
-        limit,
-        remaining: Math.max(0, 100 - parsed.used),
-        percentUsed: Math.min(100, parsed.used),
-        percentRemaining: Math.max(0, 100 - parsed.used),
-        resetAt: parsed.resetInSec
-          ? toBeijingOffsetIso(new Date(input.now.getTime() + parsed.resetInSec * 1000))
-          : null,
-      },
-    ];
-  });
+  const parsedWindows = parseOpenCodeGoWindows(html, input.now);
 
   return createResult({
     providerId: "opencode-go",
