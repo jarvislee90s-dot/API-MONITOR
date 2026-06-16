@@ -162,4 +162,129 @@ describe("api client mapping", () => {
       }),
     );
   });
+
+  it("maps fallback snapshots to warning state and surfaces cached data hint", async () => {
+    const fetcher = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          data: {
+            kind: "usage_dashboard",
+            generatedAt: "2026-06-13T13:30:00.000Z",
+            status: "ready",
+            summary: "ready",
+            totals: {
+              providers: 1,
+              ready: 1,
+              partial: 0,
+              loginRequired: 0,
+              error: 0,
+            },
+            cards: [
+              {
+                providerId: "opencode-go",
+                providerName: "OpenCode Go",
+                sourceUrl: "https://opencode.ai/workspace/wrk_123/go",
+                status: "ready",
+                summary: "OpenCode Go usage windows parsed（使用最近成功快照）",
+                capturedAt: "2026-06-13T13:27:00.000Z",
+                trend: [],
+                windows: [
+                  {
+                    key: "weekly",
+                    label: "Weekly",
+                    used: 26,
+                    limit: 100,
+                  },
+                ],
+                metrics: {},
+                meta: {
+                  isFallback: true,
+                  liveStatus: "partial",
+                  liveSummary: "OpenCode Go dashboard loaded but usage windows were not found",
+                  fallbackFrom: "OpenCode Go dashboard loaded but usage windows were not found",
+                },
+                selectedAccountId: "opencode-go:default",
+                accounts: [
+                  {
+                    accountId: "opencode-go:default",
+                    accountLabel: "默认账号",
+                    sourceUrl: "https://opencode.ai/workspace/wrk_123/go",
+                    status: "ready",
+                    summary: "OpenCode Go usage windows parsed（使用最近成功快照）",
+                    capturedAt: "2026-06-13T13:27:00.000Z",
+                    trend: [],
+                    windows: [
+                      {
+                        key: "weekly",
+                        label: "Weekly",
+                        used: 26,
+                        limit: 100,
+                      },
+                    ],
+                    metrics: {},
+                    meta: {
+                      isFallback: true,
+                      liveStatus: "partial",
+                    },
+                  },
+                ],
+              },
+            ],
+            modelSpends: [],
+          },
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      );
+    });
+
+    const dashboard = await createApiClient({ fetcher: fetcher as typeof fetch }).getUsageDashboard();
+    const platform = dashboard.platforms[0]!;
+    const account = platform.accounts[0]!;
+
+    expect(platform.status).toBe("partial");
+    expect(platform.loginState).toBe("使用缓存数据");
+    expect(account.status).toBe("partial");
+    expect(account.loginState).toBe("使用缓存数据");
+    expect(account.liveStatus).toBe("partial");
+  });
+
+  it("maps browser-rendered OpenCode snapshots to connected cloud browser state", async () => {
+    const fetcher = vi.fn(async () => Response.json({
+      ok: true,
+      data: {
+        kind: "usage_dashboard",
+        generatedAt: "2026-06-16T07:00:00.000Z",
+        status: "ready",
+        summary: "ready",
+        cards: [{
+          providerId: "opencode-go",
+          providerName: "OpenCode Go",
+          sourceUrl: "https://opencode.ai/workspace/wrk_123/go",
+          status: "ready",
+          summary: "OpenCode Go usage windows parsed by Cloudflare Browser Run",
+          capturedAt: "2026-06-16T07:00:00.000Z",
+          trend: [],
+          windows: [{ key: "rolling", label: "5h", used: 6, limit: 100, remaining: 94 }],
+          metrics: {},
+          meta: { fetchMethod: "browser_rendered" },
+          selectedAccountId: "opencode-go:default",
+          accounts: [],
+        }],
+        modelSpends: [],
+        totals: { providers: 1, ready: 1, partial: 0, loginRequired: 0, error: 0 },
+      },
+    }));
+    const client = createApiClient({ fetcher: fetcher as unknown as typeof fetch });
+
+    const dashboard = await client.getUsageDashboard();
+
+    expect(dashboard.platforms[0]).toMatchObject({
+      status: "healthy",
+      loginState: "云端浏览器同步",
+    });
+  });
 });

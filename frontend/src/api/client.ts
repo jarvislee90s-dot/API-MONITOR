@@ -311,7 +311,26 @@ async function requestJson<T>(
   return parseJsonResponse<T>(response);
 }
 
-function mapStatus(status: ServerProviderStatus): PlatformStatus {
+function resolveLoginState(status: ServerProviderStatus, meta?: Record<string, unknown>): string {
+  if (meta?.isFallback === true) return "使用缓存数据";
+  if (meta?.fetchMethod === "browser_rendered") return "云端浏览器同步";
+  if (status === "login_required") return "需要登录";
+  if (status === "error") return "抓取失败";
+  if (status === "partial") return "部分可用";
+  return "已连接";
+}
+
+function mapStatus(status: ServerProviderStatus, meta?: Record<string, unknown>): PlatformStatus {
+  if (meta?.isFallback === true) {
+    const liveStatus = typeof meta.liveStatus === "string" ? (meta.liveStatus as ServerProviderStatus) : null;
+    if (liveStatus === "login_required" || liveStatus === "error" || liveStatus === "disabled") {
+      return "warning";
+    }
+    if (liveStatus === "partial") {
+      return "partial";
+    }
+    return "warning";
+  }
   if (status === "ready") return "healthy";
   if (status === "login_required") return "warning";
   if (status === "error" || status === "disabled") return "warning";
@@ -409,7 +428,7 @@ function toLinks(_providerId: string, sourceUrl: string): RawLinkItem[] {
 
 function mapServerDashboard(server: ServerUsageDashboard): DashboardSnapshot {
   const platforms = server.cards.map((card) => {
-    const status = mapStatus(card.status);
+    const status = mapStatus(card.status, card.meta);
     const sourceLabel = toSourceLabel(card.sourceUrl);
     const windows = card.windows.map((window) => toQuotaWindow(status, window));
     const trend =
@@ -419,21 +438,17 @@ function mapServerDashboard(server: ServerUsageDashboard): DashboardSnapshot {
     const primaryWindow = card.windows[0];
 
     const accounts = (card.accounts ?? []).map((account) => {
-      const accountStatus = mapStatus(account.status);
+      const accountStatus = mapStatus(account.status, account.meta);
       const accountWindows = account.windows.map((window) => toQuotaWindow(accountStatus, window));
+      const isFallback = account.meta?.isFallback === true;
+      const liveStatus = typeof account.meta?.liveStatus === "string" ? account.meta.liveStatus : null;
       return {
         id: account.accountId,
         label: account.accountLabel,
         summary: account.summary,
         status: accountStatus,
-        loginState:
-          account.status === "login_required"
-            ? "需要登录"
-            : account.status === "error"
-              ? "抓取失败"
-              : account.status === "partial"
-                ? "部分可用"
-                : "已连接",
+        loginState: resolveLoginState(account.status, account.meta),
+        ...(isFallback && liveStatus ? { liveStatus } : {}),
         sourceUrl: account.sourceUrl,
         sourceLabel: toSourceLabel(account.sourceUrl),
         primaryMetricValue: account.windows[0]
@@ -455,14 +470,7 @@ function mapServerDashboard(server: ServerUsageDashboard): DashboardSnapshot {
       tagline: resolveTagline(card.providerId),
       summary: card.summary,
       status,
-      loginState:
-        card.status === "login_required"
-          ? "需要登录"
-          : card.status === "error"
-            ? "抓取失败"
-            : card.status === "partial"
-              ? "部分可用"
-              : "已连接",
+      loginState: resolveLoginState(card.status, card.meta),
       sourceUrl: card.sourceUrl,
       sourceLabel,
       primaryMetricLabel: resolvePrimaryMetricLabel(card.providerId, card.windows),
