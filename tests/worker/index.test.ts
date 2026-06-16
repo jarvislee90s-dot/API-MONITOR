@@ -439,6 +439,85 @@ describe("worker api", () => {
       });
       expect(openCodeCard.summary).toContain("OpenCode Go usage windows parsed");
       expect(openCodeCard.windows).toHaveLength(1);
+      expect(openCodeCard.meta).toMatchObject({
+        isFallback: true,
+        liveStatus: "partial",
+      });
+      expect(openCodeCard.meta.fallbackFrom).toContain("usage windows were not found");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("persists live refresh snapshots before applying dashboard fallback", async () => {
+    const readyOpenCodeSnapshot: ProviderSnapshot = {
+      providerId: "opencode-go",
+      providerName: "OpenCode Go",
+      sourceUrl: "https://opencode.ai/workspace/wrk_123/go",
+      status: "ready",
+      capturedAt: "2026-06-13T13:27:00.000Z",
+      summary: "OpenCode Go usage windows parsed",
+      windows: [{ key: "weekly", label: "Weekly", used: 16, limit: 100, remaining: 84 }],
+      metrics: {},
+      meta: {},
+    };
+    const usageWrites: unknown[] = [];
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+
+      if (url.includes("/api/v1/auth/key")) {
+        return Response.json({ data: { usage: 1, limit: 100, limit_remaining: 99 } });
+      }
+      if (url.includes("opencode.ai/workspace")) {
+        return new Response("<html>No usage markers in this cloud response</html>", {
+          status: 200,
+          headers: { "content-type": "text/html; charset=utf-8" },
+        });
+      }
+      if (url.includes("maas.xfyun.cn/api/subscription")) {
+        return Response.json({ used: 20, limit: 100, remaining: 80 });
+      }
+      if (url.startsWith("https://supabase.test/rest/v1/usage_snapshots") && init?.method === "POST") {
+        const body = JSON.parse(String(init.body));
+        usageWrites.push(body);
+        return new Response("", { status: 201 });
+      }
+      if (url.startsWith("https://supabase.test/rest/v1/usage_snapshots")) {
+        return Response.json([{ provider_key: "opencode-go", payload: readyOpenCodeSnapshot }]);
+      }
+      if (url.startsWith("https://supabase.test/rest/v1/provider_accounts")) return new Response("", { status: 201 });
+      if (url.startsWith("https://supabase.test/rest/v1/quota_windows")) return new Response("", { status: 201 });
+      if (url.startsWith("https://supabase.test/rest/v1/refresh_events")) return new Response("", { status: 201 });
+
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    vi.stubGlobal("fetch", fetchImpl as unknown as typeof fetch);
+    try {
+      const env = {
+        ...createEnv(fetchImpl as typeof fetch),
+        SUPABASE_URL: "https://supabase.test",
+        SUPABASE_SERVICE_ROLE_KEY: "service-role-test",
+        SUPABASE_USER_ID: "00000000-0000-0000-0000-000000000001",
+      };
+
+      const response = await handleApiRequest(
+        new Request("https://api.monitor.local/api/refresh", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ sessionKey: "dashboard" }),
+        }),
+        env,
+      );
+      const payload = (await response.json()) as any;
+      const persistedOpenCode = usageWrites.find((row: any) => row.provider_key === "opencode-go") as any;
+      const displayedOpenCode = payload.data.cards.find((card: any) => card.providerId === "opencode-go");
+
+      expect(response.status).toBe(200);
+      expect(displayedOpenCode.meta.isFallback).toBe(true);
+      expect(persistedOpenCode.status).toBe("partial");
+      expect(persistedOpenCode.payload.meta.isFallback).toBeUndefined();
+      expect(persistedOpenCode.captured_at).not.toBe("2026-06-13T13:27:00.000Z");
     } finally {
       vi.unstubAllGlobals();
     }

@@ -51,6 +51,7 @@ function buildProviderConfig(env: WorkerEnv, providerId: string): Record<string,
       workspaceId: env.OPENCODE_GO_WORKSPACE_ID,
       authCookie: env.OPENCODE_GO_AUTH_COOKIE,
       baseUrl: env.OPENCODE_GO_BASE_URL,
+      browserFallbackEnabled: env.OPENCODE_GO_BROWSER_FALLBACK,
     };
   }
 
@@ -224,6 +225,7 @@ async function fetchProviderSnapshot(
   };
   if (providerId === "opencode-go") {
     fetchInput.requestTimeoutMs = 15_000;
+    fetchInput.browser = env.OPENCODE_BROWSER;
   }
 
   try {
@@ -349,6 +351,9 @@ async function applyLatestReadyFallback(env: WorkerEnv, userId: string | null, s
       meta: {
         ...fallback.meta,
         fallbackFrom: snapshot.summary,
+        isFallback: true,
+        liveStatus: snapshot.status,
+        liveSummary: snapshot.summary,
       },
     };
   });
@@ -531,15 +536,16 @@ async function handleDashboardRefresh(request: Request, env: WorkerEnv, userId: 
   const decisionPayload = (await decisionResponse.json()) as { ok: boolean; data?: RefreshDecision };
   const decision = decisionPayload.data ?? null;
   const shouldPersist = body.persist !== false && Boolean(env.SUPABASE_URL && env.SUPABASE_SERVICE_ROLE_KEY && userId);
-  const snapshots = await applyLatestReadyFallback(env, userId, await collectUsageSnapshots(env, userId));
+  const liveSnapshots = await collectUsageSnapshots(env, userId);
+  const displaySnapshots = await applyLatestReadyFallback(env, userId, liveSnapshots);
 
   if (shouldPersist && decision?.allowed) {
-    for (const snapshot of snapshots) {
+    for (const snapshot of liveSnapshots) {
       await persistSnapshot(env, userId, snapshot, decision);
     }
   }
 
-  const dashboard = buildUsageDashboard(snapshots, {
+  const dashboard = buildUsageDashboard(displaySnapshots, {
     providerPreferences: await readDashboardPreferences(env, userId),
     refresh: {
       scope: "all",
