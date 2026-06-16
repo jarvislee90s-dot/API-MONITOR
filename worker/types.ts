@@ -94,6 +94,11 @@ export type OpenCodeBrowserRenderInput = {
 
 export type OpenCodeBrowserRenderer = (input: OpenCodeBrowserRenderInput) => Promise<string>;
 
+// Minimal Fetcher interface for Cloudflare service/browser bindings
+export interface Fetcher {
+  fetch: typeof fetch;
+}
+
 export type ProviderFetchInput = {
   now: Date;
   fetchImpl?: typeof fetch;

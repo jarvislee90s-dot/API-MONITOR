@@ -76,6 +76,7 @@ export interface PlatformAccountSnapshot {
   summary: string;
   status: PlatformStatus;
   loginState: string;
+  liveStatus?: string;
   sourceUrl: string;
   sourceLabel: string;
   primaryMetricValue: string;
