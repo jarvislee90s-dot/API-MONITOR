@@ -1,5 +1,7 @@
 // scripts/refresh-opencode-cookie.ts
-// 从 Chrome Profile 提取 OpenCode Go auth cookie，加密写入 Supabase
+// 从浏览器 Profile 提取 OpenCode Go auth cookie，加密写入 Supabase
+//
+// 支持 Edge（默认）和 Chrome。Edge 没有 Chrome 的 DevTools 远程调试限制。
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -23,17 +25,92 @@ function loadEnv(): Record<string, string> {
   return vars;
 }
 
+const localAppData = process.env.LOCALAPPDATA ?? resolve(process.env.HOME ?? "", "AppData/Local");
+
+// 支持的浏览器列表，按优先级排序：Edge 优先（无 DevTools 限制）
+const BROWSER_TARGETS = [
+  {
+    name: "Edge",
+    userDataDir: resolve(localAppData, "Microsoft/Edge/User Data"),
+    channel: "msedge" as const,
+  },
+  {
+    name: "Chrome",
+    userDataDir: resolve(localAppData, "Google/Chrome/User Data"),
+    channel: "chrome" as const,
+  },
+];
+
 async function main(): Promise<void> {
   const env = loadEnv();
 
-  const required = ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_USER_ID", "CREDENTIAL_ENCRYPTION_KEY"];
-  const missing = required.filter((k) => !env[k]);
-  if (missing.length > 0) {
-    console.error(`缺少环境变量: ${missing.join(", ")}。请在 .env 中配置。`);
-    process.exit(1);
-  }
+  const missing: string[] = [];
 
   console.log("✅ 环境变量加载成功");
+
+  function requireEnv(key: string): string {
+    const value = env[key];
+    if (!value) {
+      missing.push(key);
+    }
+    return value ?? "";
+  }
+
+  // 动态 import playwright
+  const { chromium } = await import("playwright");
+
+  let authCookieValue: string | undefined;
+
+  for (const target of BROWSER_TARGETS) {
+    const userDataDir = process.env.BROWSER_USER_DATA_DIR ?? target.userDataDir;
+
+    console.log(`🔧 尝试 ${target.name}（${userDataDir}）...`);
+
+    let context: import("playwright").BrowserContext | null = null;
+
+    try {
+      context = await chromium.launchPersistentContext(userDataDir, {
+        headless: false,
+        channel: target.channel,
+        args: ["--disable-blink-features=AutomationControlled"],
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("lock") || msg.includes("singleton")) {
+        console.error(`   ⚠️ ${target.name} 正在运行，跳过。请关闭所有 ${target.name} 窗口后重试。`);
+        continue;
+      }
+      console.error(`   ⚠️ ${target.name} 启动失败:`, msg.substring(0, 120));
+      continue;
+    }
+
+    try {
+      const page = await context.newPage();
+      await page.goto("https://opencode.ai", { waitUntil: "domcontentloaded", timeout: 30_000 });
+      await page.waitForTimeout(2_000);
+
+      const cookies = await context.cookies();
+      const authCookie = cookies.find((c) => c.name === "auth" && c.domain.includes("opencode.ai"));
+
+      if (!authCookie) {
+        console.log(`   ℹ️ ${target.name} 中未找到 opencode.ai auth cookie`);
+        continue;
+      }
+
+      authCookieValue = authCookie.value;
+      console.log(`✅ 从 ${target.name} 提取到 auth cookie（${authCookieValue.length} 字符）`);
+      console.log(`   有效期至: ${authCookie.expires ? new Date(authCookie.expires * 1000).toISOString() : "session"}`);
+      break;
+    } finally {
+      await context.close();
+    }
+  }
+
+  if (!authCookieValue) {
+    console.error("❌ 在所有浏览器中均未找到 OpenCode Go 的 auth cookie。");
+    console.error("   请确认已在 Edge 或 Chrome 中登录 https://opencode.ai。");
+    process.exit(1);
+  }
 }
 
 main().catch((err) => {
