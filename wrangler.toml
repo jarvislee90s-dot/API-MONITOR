@@ -1,6 +1,7 @@
 name = "apimonitor"
 main = "./worker/index.ts"
 compatibility_date = "2026-06-11"
+compatibility_flags = [ "nodejs_compat" ]
 
 [vars]
 OPENROUTER_BASE_URL = "https://openrouter.ai"
@@ -18,3 +19,6 @@ new_sqlite_classes = ["RefreshSessionDurableObject"]
 [assets]
 directory = "./frontend/dist"
 not_found_handling = "single-page-application"
+
+[browser]
+binding = "OPENCODE_BROWSER"

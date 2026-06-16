@@ -250,6 +250,47 @@ describe("opencode-go adapter", () => {
     expect(windows[1]).toMatchObject({ key: "weekly", used: 16, remaining: 84 });
     expect(windows[2]).toMatchObject({ key: "monthly", used: 25, remaining: 75 });
   });
+
+  it("uses the injected browser renderer when lightweight OpenCode fetch redirects to login", async () => {
+    const fetchImpl = vi.fn(async () => {
+      return new Response("", {
+        status: 302,
+        headers: { location: "https://auth.opencode.ai/authorize?client_id=app" },
+      });
+    });
+    const browserRenderer = vi.fn(async () => {
+      return [
+        "<html><script>",
+        "rollingUsage:$R[10]={usagePercent:6,resetInSec:10200}",
+        "weeklyUsage:$R[11]={usagePercent:16,resetInSec:489600}",
+        "monthlyUsage:$R[12]={usagePercent:25,resetInSec:1987200}",
+        "</script></html>",
+      ].join("");
+    });
+
+    const result = await fetchOpenCodeGoSnapshot({
+      now: new Date("2026-06-16T07:00:00.000Z"),
+      fetchImpl: fetchImpl as typeof fetch,
+      browserRenderer,
+      config: {
+        workspaceId: "wrk_123",
+        authCookie: "auth=abc123",
+        browserFallbackEnabled: true,
+      },
+    });
+
+    expect(result.snapshot.status).toBe("ready");
+    expect(result.snapshot.windows.map((window) => window.key)).toEqual(["rolling", "weekly", "monthly"]);
+    expect(result.snapshot.meta).toMatchObject({
+      fetchMethod: "browser_rendered",
+      liveFetchStatus: "login_required",
+    });
+    expect(browserRenderer).toHaveBeenCalledWith({
+      sourceUrl: "https://opencode.ai/workspace/wrk_123/go",
+      authCookie: "auth=abc123",
+      browser: undefined,
+    });
+  });
 });
 
 describe("xfyun maas adapter", () => {

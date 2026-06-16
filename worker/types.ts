@@ -86,10 +86,20 @@ export type UsageDashboard = {
   };
 };
 
+export type OpenCodeBrowserRenderInput = {
+  sourceUrl: string;
+  authCookie?: string;
+  browser?: Fetcher;
+};
+
+export type OpenCodeBrowserRenderer = (input: OpenCodeBrowserRenderInput) => Promise<string>;
+
 export type ProviderFetchInput = {
   now: Date;
   fetchImpl?: typeof fetch;
   requestTimeoutMs?: number;
+  browser?: Fetcher;
+  browserRenderer?: OpenCodeBrowserRenderer;
   config?: Record<string, unknown>;
 };
 
@@ -165,6 +175,8 @@ export interface WorkerEnv extends RefreshSessionEnv {
   OPENCODE_GO_WORKSPACE_ID?: string;
   OPENCODE_GO_AUTH_COOKIE?: string;
   OPENCODE_GO_BASE_URL?: string;
+  OPENCODE_BROWSER?: Fetcher;
+  OPENCODE_GO_BROWSER_FALLBACK?: string;
   ALIYUN_BAILIAN_PAGE_URL?: string;
   ALIYUN_BAILIAN_API_URL?: string;
   ALIYUN_BAILIAN_AUTH_COOKIE?: string;
