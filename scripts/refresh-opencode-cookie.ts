@@ -15,8 +15,8 @@ function loadEnv(): Record<string, string> {
     if (!trimmed || trimmed.startsWith("#")) continue;
     const eqIdx = trimmed.indexOf("=");
     if (eqIdx < 0) continue;
-    const key = trimmed.slice(0, eqIdx);
-    let value = trimmed.slice(eqIdx + 1);
+    const key = trimmed.slice(0, eqIdx).trim();
+    let value = trimmed.slice(eqIdx + 1).trim();
     if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
       value = value.slice(1, -1);
     }
@@ -40,6 +40,40 @@ const BROWSER_TARGETS = [
     channel: "chrome" as const,
   },
 ];
+
+async function validateCookie(
+  cookie: string,
+  workspaceId: string,
+): Promise<{ valid: boolean; windows: string[]; error?: string }> {
+  const url = `https://opencode.ai/workspace/${encodeURIComponent(workspaceId)}/go`;
+  try {
+    const resp = await fetch(url, {
+      redirect: "manual",
+      headers: {
+        Cookie: `auth=${cookie}`,
+        Accept: "text/html,application/xhtml+xml",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ApiMonitor/0.1",
+      },
+    });
+    const html = await resp.text();
+
+    if (resp.status >= 300 && resp.status < 400) {
+      const location = resp.headers.get("location") ?? "";
+      return { valid: false, windows: [], error: `被重定向到: ${location}` };
+    }
+
+    const patterns = ["rollingUsage", "weeklyUsage", "monthlyUsage"];
+    const found = patterns.filter((p) => html.includes(p));
+
+    if (found.length === 0) {
+      return { valid: false, windows: [], error: "页面中未找到用量数据" };
+    }
+
+    return { valid: true, windows: found };
+  } catch (err) {
+    return { valid: false, windows: [], error: String(err) };
+  }
+}
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -100,6 +134,20 @@ async function main(): Promise<void> {
       authCookieValue = authCookie.value;
       console.log(`✅ 从 ${target.name} 提取到 auth cookie（${authCookieValue.length} 字符）`);
       console.log(`   有效期至: ${authCookie.expires ? new Date(authCookie.expires * 1000).toISOString() : "session"}`);
+
+      // 验证 cookie
+      const workspaceId = env.OPENCODE_GO_WORKSPACE_ID;
+      if (!workspaceId) {
+        console.warn("⚠️ .env 中未配置 OPENCODE_GO_WORKSPACE_ID，跳过验证");
+      } else {
+        console.log("🔍 验证 cookie 有效性...");
+        const validation = await validateCookie(authCookieValue, workspaceId);
+        if (!validation.valid) {
+          console.error(`❌ Cookie 无效: ${validation.error}`);
+          process.exit(1);
+        }
+        console.log(`✅ Cookie 验证通过，找到 ${validation.windows.join(", ")}`);
+      }
       break;
     } finally {
       await context.close();
