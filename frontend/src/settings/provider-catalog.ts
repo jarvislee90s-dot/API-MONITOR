@@ -25,4 +25,10 @@ export const PUBLIC_PROVIDER_CATALOG: ProviderCatalogItem[] = [
     sourceUrl: "https://bailian.console.aliyun.com/cn-beijing?tab=plan#/efm/subscription/coding-plan",
     description: "Coding Plan / 百炼控制台",
   },
+  {
+    providerKey: "volc-ark",
+    providerName: "火山方舟",
+    sourceUrl: "https://console.volcengine.com/ark/region:ark+cn-beijing/openManagement?LLM=%7B%7D&advancedActiveKey=subscribe",
+    description: "Coding Plan 用量 / 5小时周月百分比",
+  },
 ];

@@ -342,6 +342,7 @@ function resolveAccent(providerId: string): string {
   if (providerId === "xfyun-maas") return "#2563eb";
   if (providerId === "opencode-go") return "#0f766e";
   if (providerId === "aliyun-bailian") return "#7c3aed";
+  if (providerId === "volc-ark") return "#dc2626";
   return "#b45309";
 }
 
@@ -349,6 +350,7 @@ function resolveTagline(providerId: string): string {
   if (providerId === "xfyun-maas") return "原网页入口 / 登录状态";
   if (providerId === "opencode-go") return "workspaceId + auth cookie";
   if (providerId === "aliyun-bailian") return "Coding Plan / 百炼控制台";
+  if (providerId === "volc-ark") return "Coding Plan 用量 / 5小时周月";
   return "Activity 聚合 / 花费拆分";
 }
 

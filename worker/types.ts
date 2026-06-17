@@ -1,4 +1,4 @@
-export type ProviderId = "openrouter" | "opencode-go" | "xfyun-maas" | "aliyun-bailian";
+export type ProviderId = "openrouter" | "opencode-go" | "xfyun-maas" | "aliyun-bailian" | "volc-ark";
 
 export type ProviderStatus = "ready" | "partial" | "login_required" | "disabled" | "error";
 
@@ -192,6 +192,9 @@ export interface WorkerEnv extends RefreshSessionEnv {
   XFYUN_MAAS_API_URL?: string;
   XFYUN_MAAS_PAGE_URL?: string;
   XFYUN_MAAS_AUTH_COOKIE?: string;
+  VOLC_ARK_PAGE_URL?: string;
+  VOLC_ARK_API_URL?: string;
+  VOLC_ARK_AUTH_COOKIE?: string;
   REFRESH_SESSION: DurableObjectNamespaceLike;
 }
 

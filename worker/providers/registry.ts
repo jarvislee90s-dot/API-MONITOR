@@ -2,9 +2,10 @@ import { openrouter } from "./openrouter";
 import { opencodeGo } from "./opencode-go";
 import { xfyunMaaS } from "./xfyun-maas";
 import { aliyunBailian } from "./aliyun-bailian";
+import { volcArk } from "./volc-ark";
 import type { ProviderDefinition, ProviderId } from "../types";
 
-const PROVIDERS: ProviderDefinition[] = [openrouter, opencodeGo, xfyunMaaS, aliyunBailian];
+const PROVIDERS: ProviderDefinition[] = [openrouter, opencodeGo, xfyunMaaS, aliyunBailian, volcArk];
 
 export function listProviders(): ProviderDefinition[] {
   return [...PROVIDERS];

@@ -6,6 +6,7 @@ import { fetchOpenCodeGoSnapshot } from "../../worker/providers/opencode-go";
 import { parseOpenCodeGoWindows } from "../../worker/providers/opencode-go-parser";
 import { fetchXfyunMaaSSnapshot } from "../../worker/providers/xfyun-maas";
 import { fetchAliyunBailianSnapshot } from "../../worker/providers/aliyun-bailian";
+import { fetchVolcArkSnapshot } from "../../worker/providers/volc-ark";
 
 describe("provider registry", () => {
   it("exposes the cloud adapters", () => {
@@ -14,13 +15,16 @@ describe("provider registry", () => {
       "opencode-go",
       "xfyun-maas",
       "aliyun-bailian",
+      "volc-ark",
     ]);
     expect(getProvider("openrouter")?.name).toBe("OpenRouter");
     expect(getProvider("opencode-go")?.name).toBe("OpenCode Go");
     expect(getProvider("xfyun-maas")?.name).toBe("讯飞 MaaS");
     expect(getProvider("aliyun-bailian")?.name).toBe("阿里云百炼");
+    expect(getProvider("volc-ark")?.name).toBe("火山方舟");
     expect(isProviderId("openrouter")).toBe(true);
     expect(isProviderId("aliyun-bailian")).toBe(true);
+    expect(isProviderId("volc-ark")).toBe(true);
     expect(isProviderId("unknown")).toBe(false);
   });
 });
@@ -726,3 +730,118 @@ describe("aliyun-bailian adapter", () => {
     expect(result.snapshot.meta.cloudFetchStatus).toBe("login_required");
   });
 });
+
+describe("volc-ark adapter", () => {
+  it("returns login_required when the auth cookie is missing", async () => {
+    const result = await fetchVolcArkSnapshot({
+      now: new Date("2026-06-17T00:00:00.000Z"),
+      config: {},
+    });
+
+    expect(result.snapshot.status).toBe("login_required");
+    expect(result.snapshot.summary).toContain("cookie");
+  });
+
+  it("parses the GetCodingPlanUsage response into a ready snapshot", async () => {
+    const seenHeaders: Record<string, string>[] = [];
+    const fetchImpl = vi.fn(async (_url, init) => {
+      if (init?.headers) {
+        // 直接读取原始 headers 对象，避免 new Headers() 按 WHATWG 规范丢弃 Cookie 等禁止头
+        seenHeaders.push(init.headers as Record<string, string>);
+      }
+      return new Response(
+        JSON.stringify({
+          ResponseMetadata: { RequestId: "req-1", Action: "GetCodingPlanUsage" },
+          Result: {
+            Status: "Running",
+            UpdateTimestamp: 1781678769,
+            QuotaUsage: [
+              { Level: "session", Percent: 8.14, ResetTimestamp: 1781688895 },
+              { Level: "weekly", Percent: 13.87, ResetTimestamp: 1782057600 },
+              { Level: "monthly", Percent: 6.93, ResetTimestamp: 1784303999 },
+            ],
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+
+    const result = await fetchVolcArkSnapshot({
+      now: new Date("2026-06-17T06:46:09.000Z"),
+      fetchImpl: fetchImpl,
+      config: { authCookie: "csrfToken=abc123; digest=jwt-token; AccountID=2105060814" },
+    });
+
+    expect(result.snapshot.status).toBe("ready");
+    expect(result.snapshot.windows.map((w) => w.key)).toEqual(["session", "weekly", "monthly"]);
+    expect(result.snapshot.windows[0]).toMatchObject({
+      label: "5小时",
+      used: 8.14,
+      limit: 100,
+      remaining: 91.86,
+      percentUsed: 8.14,
+    });
+    expect(result.snapshot.metrics).toMatchObject({
+      planStatus: "Running",
+      sessionPercent: 8.14,
+      weeklyPercent: 13.87,
+      monthlyPercent: 6.93,
+    });
+    // 确认 csrf token 从 cookie 提取并写入请求头
+    expect(seenHeaders[0]["x-csrf-token"]).toBe("abc123");
+    expect(seenHeaders[0]["Cookie"]).toContain("digest=jwt-token");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects non-Volcengine API URLs before sending cookies", async () => {
+    const fetchImpl = vi.fn(async () => new Response("should not fetch"));
+
+    const result = await fetchVolcArkSnapshot({
+      now: new Date("2026-06-17T00:00:00.000Z"),
+      fetchImpl: fetchImpl,
+      config: {
+        apiUrl: "https://example.com/api/coding-plan/usage",
+        authCookie: "csrfToken=abc; digest=jwt",
+      },
+    });
+
+    expect(result.snapshot.status).toBe("error");
+    expect(result.snapshot.summary).toContain("API URL");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("reports login_required on HTTP 401", async () => {
+    const fetchImpl = vi.fn(async () =>
+      new Response("{}", { status: 401, headers: { "content-type": "application/json" } }),
+    );
+
+    const result = await fetchVolcArkSnapshot({
+      now: new Date("2026-06-17T00:00:00.000Z"),
+      fetchImpl: fetchImpl,
+      config: { authCookie: "csrfToken=abc; digest=expired" },
+    });
+
+    expect(result.snapshot.status).toBe("login_required");
+    expect(result.snapshot.summary).toContain("401");
+  });
+
+  it("falls back to the default API URL when apiUrl is an empty string", async () => {
+    const fetchImpl = vi.fn(async () =>
+      new Response(
+        JSON.stringify({ Result: { Status: "Running", QuotaUsage: [] } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const result = await fetchVolcArkSnapshot({
+      now: new Date("2026-06-17T00:00:00.000Z"),
+      fetchImpl: fetchImpl,
+      config: { authCookie: "csrfToken=abc; digest=jwt", apiUrl: "" },
+    });
+
+    // 空 apiUrl 应回退到默认火山引擎端点，不应报错
+    expect(result.snapshot.status).not.toBe("error");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+});
+

@@ -215,6 +215,7 @@ describe("worker api", () => {
       "opencode-go",
       "xfyun-maas",
       "aliyun-bailian",
+      "volc-ark",
     ]);
   });
 
@@ -323,13 +324,13 @@ describe("worker api", () => {
       expect(response.status).toBe(200);
       expect(payload.ok).toBe(true);
       expect(payload.data.kind).toBe("usage_dashboard");
-      expect(payload.data.cards).toHaveLength(4);
+      expect(payload.data.cards).toHaveLength(5);
       expect(payload.data.modelSpends).toEqual([]);
       expect(payload.data.totals).toMatchObject({
-        providers: 4,
+        providers: 5,
         ready: 3,
         partial: 1,
-        loginRequired: 0,
+        loginRequired: 1,
         error: 0,
       });
       expect(payload.data.cards[0]).toMatchObject({
@@ -599,7 +600,7 @@ describe("worker api", () => {
         sessionKey: "dashboard",
         refreshed: true,
       });
-      expect(payload.data.cards).toHaveLength(4);
+      expect(payload.data.cards).toHaveLength(5);
     } finally {
       vi.unstubAllGlobals();
     }

@@ -7,6 +7,7 @@ compatibility_date = "2026-06-11"
 OPENROUTER_BASE_URL = "https://openrouter.ai"
 OPENCODE_GO_BASE_URL = "https://opencode.ai"
 XFYUN_MAAS_PAGE_URL = "https://maas.xfyun.cn/packageSubscription"
+VOLC_ARK_PAGE_URL = "https://console.volcengine.com/ark/region:ark+cn-beijing/openManagement?LLM=%7B%7D&advancedActiveKey=subscribe"
 
 [[durable_objects.bindings]]
 name = "REFRESH_SESSION"

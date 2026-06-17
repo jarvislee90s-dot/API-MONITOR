@@ -67,6 +67,14 @@ function buildProviderConfig(env: WorkerEnv, providerId: string): Record<string,
     };
   }
 
+  if (providerId === "volc-ark") {
+    return {
+      pageUrl: env.VOLC_ARK_PAGE_URL,
+      apiUrl: env.VOLC_ARK_API_URL,
+      authCookie: env.VOLC_ARK_AUTH_COOKIE,
+    };
+  }
+
   return {
     pageUrl: env.XFYUN_MAAS_PAGE_URL,
     apiUrl: env.XFYUN_MAAS_API_URL,

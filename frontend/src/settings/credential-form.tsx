@@ -18,6 +18,7 @@ function credentialFields(providerKey: string | undefined): string[] {
   if (providerKey === "opencode-go") return ["workspaceId", "authCookie"];
   if (providerKey === "xfyun-maas") return ["authCookie", "apiUrl"];
   if (providerKey === "aliyun-bailian") return ["authCookie", "apiUrl"];
+  if (providerKey === "volc-ark") return ["authCookie", "apiUrl"];
   return ["authCookie"];
 }
 

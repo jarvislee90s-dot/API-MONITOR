@@ -29,6 +29,9 @@ function createDirectEnv(): WorkerEnv {
     ALIYUN_BAILIAN_PAGE_URL: readEnv("ALIYUN_BAILIAN_PAGE_URL"),
     ALIYUN_BAILIAN_API_URL: readEnv("ALIYUN_BAILIAN_API_URL"),
     ALIYUN_BAILIAN_AUTH_COOKIE: readEnv("ALIYUN_BAILIAN_AUTH_COOKIE"),
+    VOLC_ARK_PAGE_URL: readEnv("VOLC_ARK_PAGE_URL"),
+    VOLC_ARK_API_URL: readEnv("VOLC_ARK_API_URL"),
+    VOLC_ARK_AUTH_COOKIE: readEnv("VOLC_ARK_AUTH_COOKIE"),
   };
 }
 
@@ -37,6 +40,7 @@ const requiredEnvByProvider: Record<ProviderId, string[]> = {
   "opencode-go": ["OPENCODE_GO_WORKSPACE_ID", "OPENCODE_GO_AUTH_COOKIE"],
   "xfyun-maas": ["XFYUN_MAAS_API_URL", "XFYUN_MAAS_AUTH_COOKIE"],
   "aliyun-bailian": ["ALIYUN_BAILIAN_API_URL", "ALIYUN_BAILIAN_AUTH_COOKIE"],
+  "volc-ark": ["VOLC_ARK_AUTH_COOKIE"],
 };
 
 describe.skipIf(process.env.RUN_REAL_E2E !== "1")("real provider snapshot e2e", () => {

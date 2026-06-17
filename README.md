@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-API 与 Coding Plan 用量聚合看板。它把 OpenRouter、OpenCode Go、讯飞 MaaS Coding Plan、阿里云百炼 Coding Plan 的用量状态聚合到一个响应式网页里，并用 Supabase 保存刷新快照和云端配置。
+API 与 Coding Plan 用量聚合看板。它把 OpenRouter、OpenCode Go、讯飞 MaaS Coding Plan、阿里云百炼 Coding Plan、火山方舟 Coding Plan 的用量状态聚合到一个响应式网页里，并用 Supabase 保存刷新快照和云端配置。
 
 线上示例：
 
@@ -16,7 +16,7 @@ API 与 Coding Plan 用量聚合看板。它把 OpenRouter、OpenCode Go、讯�
 
 ## 功能亮点
 
-- 统一展示 OpenRouter、OpenCode Go、讯飞 MaaS、阿里云百炼四个平台状态。
+- 统一展示 OpenRouter、OpenCode Go、讯飞 MaaS、阿里云百炼、火山方舟五个平台状态。
 - 支持 5 小时、每周、套餐总量等不同 quota window。
 - 独立配置页支持"供应商 → 多账号 → 账号配置"的单页多层工作台。
 - 首页保持一个供应商一个大卡片；多账号通过卡片内账号子卡片切换显示。
@@ -38,6 +38,7 @@ API 与 Coding Plan 用量聚合看板。它把 OpenRouter、OpenCode Go、讯�
 | OpenCode Go | 已接入，含最近成功快照回退 |
 | 讯飞 MaaS | 已接入 `coding-plan/list` 用量接口 |
 | 阿里云百炼 | 已接入原网页入口；云端抓取保留为实验选项 |
+| 火山方舟 | 已接入 `GetCodingPlanUsage` 用量接口（5小时/周/月百分比） |
 | 配置页 | 已接入 `#/settings` |
 
 ## 架构
@@ -118,15 +119,39 @@ flowchart TB
 - **本地脚本依赖浏览器登录态**：需先在 Edge 或 Chrome 中登录 opencode.ai，运行前关闭所有浏览器窗口（含后台进程）避免 Profile 锁定。
 - **cookie 过期后需重新登录浏览器**：脚本从浏览器 Profile 提取 uth cookie，cookie 过期则抓取会被重定向到登录页。
 
-### 刷新 OpenCode Go 用量
+### 刷新 Cookie 与用量（本地脚本）
 
-cookie 过期或想刷新数据时，关闭所有 Edge/Chrome 进程后运行：
+部分供应商的登录态 cookie 会过期，或其用量页屏蔽数据中心 IP，需要本地脚本辅助刷新。三个脚本均复用本地浏览器 Profile 提取登录态，运行前需关闭对应浏览器（含后台进程）避免 Profile 锁定；`.env` 中需配置 `CLOUDFLARE_API_TOKEN`。
 
-`powershell
+#### 火山方舟 Cookie 刷新
+
+火山方舟登录态 cookie 过期后，看板会显示 `login_required`。运行：
+
+```powershell
+node --experimental-strip-types scripts/refresh-volc-ark-cookie.ts
+```
+
+脚本从浏览器提取 `csrfToken` / `digest` / `AccountID` / `userInfo` 四个 cookie，调 `GetCodingPlanUsage` 验证有效性后，同时更新本地 `.env` 的 `VOLC_ARK_AUTH_COOKIE` 和 Cloudflare Worker 的同名 secret。若本地浏览器 Profile 被占用，会自动回退到临时浏览器——在弹出窗口登录火山方舟即可，脚本自动继续。
+
+#### OpenCode Go 用量刷新
+
+opencode.ai 屏蔽数据中心 IP，Worker 云端点同步无效，需本地脚本抓取用量并推送：
+
+```powershell
 node --experimental-strip-types scripts/refresh-opencode-usage.ts
-`
+```
 
-脚本会自动从 .env 读取 INGEST_API_KEY、APIMONITOR_INGEST_URL、OPENCODE_GO_WORKSPACE_ID，启动浏览器提取 cookie、抓取用量页、解析并推送到 Worker ingest 端点。推送目标为自定义域名，国内可直连，无需设置代理。
+脚本从 .env 读取 `INGEST_API_KEY`、`APIMONITOR_INGEST_URL`、`OPENCODE_GO_WORKSPACE_ID`，提取 auth cookie、抓取用量页、解析 3 个窗口后推送到 Worker `/api/ingest/opencode-go` 端点。推送目标为自定义域名，国内可直连。
+
+#### OpenCode Go Cookie 刷新
+
+只更新 OpenCode Go 的 auth cookie（不抓用量），同步到 Cloudflare Worker 的 `OPENCODE_GO_AUTH_COOKIE` secret：
+
+```powershell
+node --experimental-strip-types scripts/refresh-opencode-cookie.ts
+```
+
+脚本提取 cookie 后会用 `OPENCODE_GO_WORKSPACE_ID` 验证有效性，再通过 Cloudflare API 更新 Worker secret。Worker 下次刷新即使用新 cookie。
 
 ## 目录结构
 
@@ -204,6 +229,7 @@ npx wrangler@4 secret put XFYUN_MAAS_API_URL
 npx wrangler@4 secret put XFYUN_MAAS_AUTH_COOKIE
 npx wrangler@4 secret put ALIYUN_BAILIAN_AUTH_COOKIE
 npx wrangler@4 secret put ALIYUN_BAILIAN_SEC_TOKEN
+npx wrangler@4 secret put VOLC_ARK_AUTH_COOKIE
 ```
 
 部署：
@@ -240,6 +266,9 @@ not_found_handling = "single-page-application"
 | `ALIYUN_BAILIAN_AUTH_COOKIE` | 阿里云百炼登录 cookie，默认入口模式不主动使用 |
 | `ALIYUN_BAILIAN_SEC_TOKEN` | 可选，实验性云端抓取需要的阿里云 token |
 | `ALIYUN_BAILIAN_CLOUD_FETCH` | 可选，设为 `1` 才启用百炼云端抓取实验 |
+| `VOLC_ARK_PAGE_URL` | 火山方舟 Coding Plan 订阅页入口 |
+| `VOLC_ARK_API_URL` | 可选，留空则用默认 `GetCodingPlanUsage` 端点 |
+| `VOLC_ARK_AUTH_COOKIE` | 火山方舟登录态 cookie（csrfToken / digest / AccountID / userInfo） |
 | `CLOUDFLARE_API_TOKEN` | 本地 Wrangler 部署使用 |
 | `INGEST_API_KEY` | 本地脚本推送 opencode 快照的共享密钥（Worker 端需配置同名 secret） |
 | `APIMONITOR_INGEST_URL` | 本地脚本推送目标（Worker 线上地址，已配置为自定义域名） |
