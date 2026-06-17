@@ -6,6 +6,7 @@ import { RefreshSessionDurableObject } from "./durable-object/refresh-session";
 import { handleSettingsRequest } from "./settings/routes";
 import { getActiveProviderAccountConfig, getProviderAccountConfigById, listProviderSettings } from "./settings/repository";
 import { requireUser } from "./auth";
+import { handleIngestOpenCodeGo } from "./ingest";
 import type {
   ProviderFetchInput,
   ProviderDefinition,
@@ -50,6 +51,7 @@ function buildProviderConfig(env: WorkerEnv, providerId: string): Record<string,
     return {
       workspaceId: env.OPENCODE_GO_WORKSPACE_ID,
       authCookie: env.OPENCODE_GO_AUTH_COOKIE,
+      apiKey: env.OPENCODE_GO_API_KEY,
       baseUrl: env.OPENCODE_GO_BASE_URL,
       browserFallbackEnabled: env.OPENCODE_GO_BROWSER_FALLBACK,
     };
@@ -359,7 +361,7 @@ async function applyLatestReadyFallback(env: WorkerEnv, userId: string | null, s
   });
 }
 
-async function persistSnapshot(env: WorkerEnv, userId: string | null, snapshot: ProviderSnapshot, decision: RefreshDecision | null): Promise<void> {
+export async function persistSnapshot(env: WorkerEnv, userId: string | null, snapshot: ProviderSnapshot, decision: RefreshDecision | null): Promise<void> {
   if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY || !userId) return;
 
   const headers = {
@@ -723,6 +725,10 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
   if (request.method === "GET" && url.pathname.startsWith("/api/providers/") && url.pathname.endsWith("/snapshot")) {
     const providerId = url.pathname.split("/")[3] ?? "";
     return handleProviderSnapshot(request, providerId, env);
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/ingest/opencode-go") {
+    return handleIngestOpenCodeGo(request, env);
   }
 
   if (request.method === "POST" && url.pathname === "/api/refresh") {

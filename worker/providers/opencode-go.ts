@@ -7,6 +7,7 @@ import { renderOpenCodeGoBrowserHtml } from "./opencode-go-browser";
 type OpenCodeGoConfig = {
   workspaceId?: string;
   authCookie?: string;
+  apiKey?: string;
   baseUrl?: string;
   browserFallbackEnabled?: boolean | string;
 };
@@ -95,31 +96,41 @@ export async function fetchOpenCodeGoSnapshot(input: ProviderFetchInput): Promis
   const config = (input.config ?? {}) as OpenCodeGoConfig;
   const sourceUrl = getDashboardUrl(config);
 
-  if (!config.workspaceId || !config.authCookie) {
+  if (!config.workspaceId || (!config.authCookie && !config.apiKey)) {
     return createResult({
       providerId: "opencode-go",
       providerName: "OpenCode Go",
       sourceUrl,
       status: "login_required",
       capturedAt: now,
-      summary: "Missing workspaceId or auth cookie",
+      summary: "Missing workspaceId, auth cookie, or API key",
       windows: [],
       metrics: {
         hasWorkspaceId: Boolean(config.workspaceId),
         hasAuthCookie: Boolean(config.authCookie),
+        hasApiKey: Boolean(config.apiKey),
       },
       meta: {},
     });
   }
 
+  const requestHeaders: Record<string, string> = {
+    Accept: "text/html,application/xhtml+xml",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ApiMonitor/0.1",
+  };
+
+  if (config.apiKey) {
+    requestHeaders["Authorization"] = `Bearer ${config.apiKey}`;
+  } else if (config.authCookie) {
+    const normalizedCookie = normalizeOpenCodeCookie(config.authCookie);
+    if (normalizedCookie) {
+      requestHeaders["Cookie"] = normalizedCookie;
+    }
+  }
+
   const response = await fetchImpl(sourceUrl, {
     redirect: "manual",
-    // 这里只读取云端注入的会话材料，不把它们回传给前端。
-    headers: {
-      ...(normalizeOpenCodeCookie(config.authCookie) ? { Cookie: normalizeOpenCodeCookie(config.authCookie)! } : {}),
-      Accept: "text/html,application/xhtml+xml",
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ApiMonitor/0.1",
-    },
+    headers: requestHeaders,
   });
 
   const html = await response.text();
@@ -158,7 +169,9 @@ export async function fetchOpenCodeGoSnapshot(input: ProviderFetchInput): Promis
         hasWeekly: parsedWindows.some((window) => window.key === "weekly"),
         hasMonthly: parsedWindows.some((window) => window.key === "monthly"),
       },
-      meta: { fetchMethod: "worker_fetch" },
+      meta: {
+        fetchMethod: config.apiKey ? "api_key" : "worker_fetch",
+      },
     });
   }
 

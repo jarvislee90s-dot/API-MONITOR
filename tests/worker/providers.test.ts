@@ -93,7 +93,51 @@ describe("opencode-go adapter", () => {
     });
 
     expect(result.snapshot.status).toBe("login_required");
-    expect(result.snapshot.summary).toContain("Missing workspaceId or auth cookie");
+    expect(result.snapshot.summary).toContain("Missing workspaceId, auth cookie, or API key");
+  });
+
+  it("uses Bearer auth when an OpenCode API key is configured", async () => {
+    const html = [
+      "<html><script>",
+      "rollingUsage:$R[10]={usagePercent:12,resetInSec:7200}",
+      "weeklyUsage:$R[11]={resetInSec:500000,usagePercent:34}",
+      "monthlyUsage:$R[12]={usagePercent:45,resetInSec:2480000}",
+      "</script></html>",
+    ].join("");
+
+    const seenHeaders: Record<string, string>[] = [];
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      if (init?.headers) {
+        const headers: Record<string, string> = {};
+        const h = new Headers(init.headers);
+        h.forEach((v, k) => { headers[k] = v; });
+        seenHeaders.push(headers);
+      }
+      return new Response(html, {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    });
+
+    const result = await fetchOpenCodeGoSnapshot({
+      now: new Date("2026-06-16T07:00:00.000Z"),
+      fetchImpl: fetchImpl as typeof fetch,
+      config: {
+        workspaceId: "wrk_abc",
+        apiKey: "sk-test-key",
+      },
+    });
+
+    expect(result.snapshot.status).toBe("ready");
+    expect(result.snapshot.windows.map((w) => w.key)).toEqual(["rolling", "weekly", "monthly"]);
+    expect(result.snapshot.windows[0]).toMatchObject({
+      used: 12,
+      remaining: 88,
+      percentUsed: 12,
+    });
+    expect(result.snapshot.meta).toMatchObject({ fetchMethod: "api_key" });
+    expect(seenHeaders[0]).toMatchObject({ Authorization: "Bearer sk-test-key" });
+    expect(seenHeaders[0]).not.toHaveProperty("Cookie");
   });
 
   it("parses rolling, weekly, and monthly usage windows", async () => {

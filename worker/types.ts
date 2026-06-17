@@ -179,6 +179,8 @@ export interface WorkerEnv extends RefreshSessionEnv {
   OPENROUTER_BASE_URL?: string;
   OPENCODE_GO_WORKSPACE_ID?: string;
   OPENCODE_GO_AUTH_COOKIE?: string;
+  OPENCODE_GO_API_KEY?: string;
+  INGEST_API_KEY?: string;
   OPENCODE_GO_BASE_URL?: string;
   OPENCODE_BROWSER?: Fetcher;
   OPENCODE_GO_BROWSER_FALLBACK?: string;

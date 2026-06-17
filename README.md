@@ -1,4 +1,4 @@
-# ApiMonitor
+﻿# ApiMonitor
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -7,6 +7,10 @@ API 与 Coding Plan 用量聚合看板。它把 OpenRouter、OpenCode Go、讯�
 线上示例：
 
 [https://apimonitor.jarvislee90s.workers.dev](https://apimonitor.jarvislee90s.workers.dev)
+
+自定义域名（国内可直连，不受 *.workers.dev SNI 阻断影响）：
+
+[https://apimonitor.bondtoolbox.asia](https://apimonitor.bondtoolbox.asia)
 
 ![ApiMonitor dashboard](docs/assets/dashboard.png)
 
@@ -54,6 +58,75 @@ flowchart LR
   Supabase --> Events["refresh_events"]
   Supabase --> Settings["provider_preferences / encrypted credentials"]
 ```
+
+## OpenCode Go 用量抓取机制
+
+OpenCode Go 与其他供应商（讯飞 MaaS、OpenRouter）的抓取方式有本质区别，源于一个核心矛盾：**opencode.ai 屏蔽数据中心 IP**。Cloudflare Worker 的出口 IP 属于数据中心 IP，直连 opencode 用量页会被 302 重定向到登录页；而讯飞、OpenRouter 不屏蔽，Worker 云端能实时抓到。
+
+### 数据通路对比
+
+其他供应商走"云端直抓"，点首页同步即可实时刷新：
+
+`mermaid
+flowchart LR
+    A1["前端点 同步"] --> A2["POST /api/refresh"]
+    A2 --> A3["Worker 云端抓取<br/>数据中心 IP 直连"]
+    A3 --> A4["成功 拿到实时数据"]
+    A4 --> A5["落库 ready 快照"]
+    A5 --> A6["看板展示实时值"]
+`
+
+OpenCode Go 走"本地脚本抓取 + 推送"，点同步无效（云端被封），只能靠本地脚本更新：
+
+`mermaid
+flowchart TB
+    subgraph cloud["点同步（云端通路，对 opencode-go 无效）"]
+        B1["前端点 同步"] --> B2["POST /api/refresh"]
+        B2 --> B3["Worker 云端抓取<br/>fetchOpenCodeGoSnapshot"]
+        B3 --> B4["数据中心 IP 被 opencode 封<br/>302 重定向到 login"]
+        B4 --> B5["落库 login_required 快照<br/>windows 为空"]
+        B5 --> B6["/api/usage 展示时 fallback<br/>到最近成功快照"]
+        B6 --> B7["看板仍显示旧数据<br/>同步无效"]
+    end
+
+    subgraph local["本地脚本通路（唯一能更新数据的路径）"]
+        L1["关闭所有浏览器"] --> L2["本地脚本启动<br/>playwright 开 Edge"]
+        L2 --> L3["从浏览器 Profile<br/>提取 auth cookie"]
+        L3 --> L4["本地国内 IP 直抓<br/>opencode 用量页"]
+        L4 --> L5["成功 200"]
+        L5 --> L6["parseOpenCodeGoWindows<br/>解析 3 个窗口"]
+        L6 --> L7["POST /api/ingest/opencode-go<br/>X-Ingest-Key 鉴权"]
+        L7 --> L8["ingest handler 校验<br/>persistSnapshot 落库"]
+        L8 --> L9["新的 ready 快照<br/>fetchMethod=local_ingest"]
+        L9 --> L10["看板下次加载<br/>展示新快照"]
+    end
+
+    B7 -. "数据来源其实是本地脚本推送" .-> L9
+`
+
+### 供应商对比
+
+| 供应商 | 数据来源 | 点同步 | 刷新方式 |
+| --- | --- | --- | --- |
+| 讯飞 MaaS / OpenRouter | Worker 云端直抓 | ✅ 实时刷新 | 前端点同步 |
+| OpenCode Go | 本地脚本抓取 + 推送 | ❌ 无效（云端 IP 被封） | 手动跑 efresh-opencode-usage.ts |
+
+### 注意事项
+
+- **点同步刷不了 OpenCode Go 是架构限制，不是 bug**：opencode.ai 屏蔽数据中心 IP，Worker 云端抓取必然被 302 到登录页；看板展示时 pplyFallback 会回退到最近一次成功的 eady 快照（即本地脚本上次推送的），所以无论点多少次同步，数据都不会变新。
+- **自定义域名只解决网络封锁，不解决 IP 封锁**：*.workers.dev 在国内受 DNS 污染 + SNI 阻断，绑定 pimonitor.bondtoolbox.asia 后前端看板与本地脚本推送均可国内直连；但 Worker 出口 IP 仍是数据中心 IP，opencode 照样封，点同步仍无效。
+- **本地脚本依赖浏览器登录态**：需先在 Edge 或 Chrome 中登录 opencode.ai，运行前关闭所有浏览器窗口（含后台进程）避免 Profile 锁定。
+- **cookie 过期后需重新登录浏览器**：脚本从浏览器 Profile 提取 uth cookie，cookie 过期则抓取会被重定向到登录页。
+
+### 刷新 OpenCode Go 用量
+
+cookie 过期或想刷新数据时，关闭所有 Edge/Chrome 进程后运行：
+
+`powershell
+node --experimental-strip-types scripts/refresh-opencode-usage.ts
+`
+
+脚本会自动从 .env 读取 INGEST_API_KEY、APIMONITOR_INGEST_URL、OPENCODE_GO_WORKSPACE_ID，启动浏览器提取 cookie、抓取用量页、解析并推送到 Worker ingest 端点。推送目标为自定义域名，国内可直连，无需设置代理。
 
 ## 目录结构
 
@@ -168,6 +241,8 @@ not_found_handling = "single-page-application"
 | `ALIYUN_BAILIAN_SEC_TOKEN` | 可选，实验性云端抓取需要的阿里云 token |
 | `ALIYUN_BAILIAN_CLOUD_FETCH` | 可选，设为 `1` 才启用百炼云端抓取实验 |
 | `CLOUDFLARE_API_TOKEN` | 本地 Wrangler 部署使用 |
+| `INGEST_API_KEY` | 本地脚本推送 opencode 快照的共享密钥（Worker 端需配置同名 secret） |
+| `APIMONITOR_INGEST_URL` | 本地脚本推送目标（Worker 线上地址，已配置为自定义域名） |
 
 ## 安全说明
 

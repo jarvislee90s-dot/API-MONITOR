@@ -1,4 +1,4 @@
-name = "apimonitor"
+﻿name = "apimonitor"
 main = "./worker/index.ts"
 compatibility_date = "2026-06-11"
 compatibility_flags = [ "nodejs_compat" ]
@@ -22,3 +22,8 @@ not_found_handling = "single-page-application"
 
 [browser]
 binding = "OPENCODE_BROWSER"
+
+# 自定义域名：绕开 *.workers.dev 的 DNS 污染与 SNI 阻断，国内可直连
+[[routes]]
+pattern = "apimonitor.bondtoolbox.asia"
+custom_domain = true
