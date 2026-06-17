@@ -1,7 +1,22 @@
-// scripts/refresh-opencode-cookie.ts
-// 从浏览器 Profile 提取 OpenCode Go auth cookie，加密写入 Supabase
-//
-// 支持 Edge（默认）和 Chrome。Edge 没有 Chrome 的 DevTools 远程调试限制。
+/**
+ * OpenCode Go Cookie 自动刷新脚本
+ *
+ * 功能：从本地浏览器 Profile 提取 OpenCode Go 的 auth cookie，
+ *       验证有效性后，通过 Cloudflare API 更新 Worker 的 OPENCODE_GO_AUTH_COOKIE secret。
+ *       Worker 下次刷新立即使用新 cookie。
+ *
+ * 前置条件：
+ *   1. Edge 或 Chrome 浏览器中已登录 https://opencode.ai
+ *   2. 运行前关闭所有浏览器窗口（含后台进程），避免 Profile 锁定
+ *   3. 项目 .env 中已配置 CLOUDFLARE_API_TOKEN
+ *   4. （可选）.env 中配置 OPENCODE_GO_WORKSPACE_ID 用于验证 cookie
+ *
+ * 使用：
+ *   node --experimental-strip-types scripts/refresh-opencode-cookie.ts
+ *
+ * 原理：生产 Worker 用 env OPENCODE_GO_AUTH_COOKIE 明文 secret（未配置 CREDENTIAL_ENCRYPTION_KEY，
+ *       Supabase 加密凭据解密为空，回退到 env）。因此直接更新该 secret 即可让 Worker 生效。
+ */
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -27,7 +42,7 @@ function loadEnv(): Record<string, string> {
 
 const localAppData = process.env.LOCALAPPDATA ?? resolve(process.env.HOME ?? "", "AppData/Local");
 
-// 支持的浏览器列表，按优先级排序：Edge 优先（无 DevTools 限制）
+// 支持的浏览器列表，按优先级排序：Edge 优先（无 DevTools 远程调试限制）
 const BROWSER_TARGETS = [
   {
     name: "Edge",
@@ -75,19 +90,57 @@ async function validateCookie(
   }
 }
 
+// 通过 Cloudflare REST API 更新 Worker secret，避免 wrangler CLI 交互
+async function updateWorkerSecret(env: Record<string, string>, cookieValue: string): Promise<void> {
+  const token = env.CLOUDFLARE_API_TOKEN;
+  const scriptName = env.CLOUDFLARE_WORKER_NAME ?? "apimonitor";
+  const baseHeaders = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+
+  // 1. 获取 account_id（token 关联的账号）
+  const acctResp = await fetch("https://api.cloudflare.com/client/v4/accounts", { headers: baseHeaders });
+  const acctJson = (await acctResp.json()) as {
+    success: boolean;
+    result?: Array<{ id: string; name: string }>;
+    errors?: Array<{ message: string }>;
+  };
+  if (!acctJson.success || !acctJson.result?.length) {
+    throw new Error(`获取 Cloudflare account 失败: ${JSON.stringify(acctJson.errors)}`);
+  }
+  const accountId = acctJson.result[0].id;
+  console.log(`   Cloudflare account: ${acctJson.result[0].name} (${accountId})`);
+
+  // 2. 更新 secret
+  const secretResp = await fetch(
+    `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/${scriptName}/secrets`,
+    {
+      method: "PUT",
+      headers: baseHeaders,
+      body: JSON.stringify({
+        name: "OPENCODE_GO_AUTH_COOKIE",
+        text: cookieValue,
+        type: "secret_text",
+      }),
+    },
+  );
+  const secretJson = (await secretResp.json()) as {
+    success: boolean;
+    errors?: Array<{ message: string }>;
+  };
+  if (!secretJson.success) {
+    throw new Error(`更新 Worker secret 失败: ${JSON.stringify(secretJson.errors)}`);
+  }
+
+  console.log("✅ Worker secret OPENCODE_GO_AUTH_COOKIE 已更新");
+}
+
 async function main(): Promise<void> {
   const env = loadEnv();
 
-  const missing: string[] = [];
-
   console.log("✅ 环境变量加载成功");
 
-  function requireEnv(key: string): string {
-    const value = env[key];
-    if (!value) {
-      missing.push(key);
-    }
-    return value ?? "";
+  if (!env.CLOUDFLARE_API_TOKEN) {
+    console.error("❌ .env 中缺少 CLOUDFLARE_API_TOKEN，无法更新 Worker secret。");
+    process.exit(1);
   }
 
   // 动态 import playwright
@@ -110,8 +163,8 @@ async function main(): Promise<void> {
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes("lock") || msg.includes("singleton")) {
-        console.error(`   ⚠️ ${target.name} 正在运行，跳过。请关闭所有 ${target.name} 窗口后重试。`);
+      if (msg.includes("lock") || msg.includes("singleton") || msg.includes("closed")) {
+        console.error(`   ⚠️ ${target.name} 启动失败（可能仍在运行或 Profile 被占用）。请完全关闭所有 ${target.name} 进程后重试。`);
         continue;
       }
       console.error(`   ⚠️ ${target.name} 启动失败:`, msg.substring(0, 120));
@@ -159,6 +212,12 @@ async function main(): Promise<void> {
     console.error("   请确认已在 Edge 或 Chrome 中登录 https://opencode.ai。");
     process.exit(1);
   }
+
+  // 更新 Worker secret
+  console.log("🔐 通过 Cloudflare API 更新 Worker secret...");
+  await updateWorkerSecret(env, authCookieValue);
+
+  console.log("🎉 完成！Worker 下次刷新（2 分钟内）将自动使用新 cookie。");
 }
 
 main().catch((err) => {
