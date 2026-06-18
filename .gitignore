@@ -16,3 +16,6 @@ dashboard-*.png
 .claude/
 .playwright-mcp/
 .playwright-cli/
+
+frontend-v3/dist/
+frontend-v2/dist/
