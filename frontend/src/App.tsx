@@ -84,6 +84,26 @@ const platformBases: Array<Omit<PlatformSnapshot, "lastRefreshedAt" | "quotaWind
           },
         ],
       },
+      {
+        id: "opencode-go:account2",
+        label: "lijiawei_jarvis",
+        summary: "把 rolling、weekly、monthly 三个窗口统一折算成可比的 quota window，便于跨周期观察。",
+        status: "healthy",
+        loginState: "等待同步",
+        sourceUrl: "https://opencode.ai/workspace/wrk_01KVYWV3HMBZCXFPQJAYEG88KF/go",
+        sourceLabel: "wrk_01KVYWV3HMBZCXFPQJAYEG88KF/go",
+        primaryMetricValue: "等待同步",
+        lastRefreshedAt: new Date().toISOString(),
+        quotaWindows: [],
+        trend: [],
+        links: [
+          {
+            label: "打开看板",
+            href: "https://opencode.ai/workspace/wrk_01KVYWV3HMBZCXFPQJAYEG88KF/go",
+            tone: "brand",
+          },
+        ],
+      },
     ],
   },
   {
@@ -178,7 +198,7 @@ export function App() {
   const requestLockRef = useRef<Promise<void> | null>(null);
 
   const runSync = useCallback(
-    async (phase: "initial" | "refresh") => {
+    async (phase: "initial" | "refresh" | "reload") => {
       if (requestLockRef.current) {
         return requestLockRef.current;
       }
@@ -186,7 +206,13 @@ export function App() {
       const task = (async () => {
         setIsRefreshing(true);
         setSyncState("loading");
-        setSyncMessage(phase === "initial" ? "正在拉取云端数据。" : "正在刷新云端数据。");
+        setSyncMessage(
+          phase === "initial"
+            ? "正在拉取云端数据。"
+            : phase === "reload"
+              ? "正在同步配置变更。"
+              : "正在刷新云端数据。",
+        );
 
         try {
           if (phase === "refresh") {
@@ -196,7 +222,13 @@ export function App() {
           const snapshot = await api.getUsageDashboard();
           setDashboard(snapshot);
           setSyncState("ready");
-          setSyncMessage(phase === "initial" ? "云端数据已连接。" : "云端数据已更新。");
+          setSyncMessage(
+            phase === "initial"
+              ? "云端数据已连接。"
+              : phase === "reload"
+                ? "配置已生效。"
+                : "云端数据已更新。",
+          );
         } catch (error) {
           setSyncState("error");
           setSyncMessage(`云端请求失败，当前显示空态视图。${getErrorMessage(error)}`);
@@ -300,6 +332,7 @@ export function App() {
         dashboard={dashboard}
         onBack={() => {
           window.location.hash = "#/";
+          void runSync("reload");
         }}
       />
     );

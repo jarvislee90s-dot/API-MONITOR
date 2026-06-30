@@ -149,15 +149,14 @@ async function buildProviderConfigs(
     const enabledPreferences = providerPreferences
       .filter((preference) => preference.enabled && isProviderId(preference.providerKey))
       .sort((left, right) => left.displayOrder - right.displayOrder);
-
     const configs: ProviderRuntimeConfig[] = [];
     for (const preference of enabledPreferences) {
-      const homepageAccounts = settings.accounts
+      const enabledAccounts = settings.accounts
         .filter((account) => account.providerKey === preference.providerKey && account.homepageEnabled)
         .sort((left, right) => left.homepageOrder - right.homepageOrder);
 
-      if (homepageAccounts.length > 0) {
-        for (const account of homepageAccounts) {
+      if (enabledAccounts.length > 0) {
+        for (const account of enabledAccounts) {
           const accountConfig = await getProviderAccountConfigById(env, userId, account.id, fetchImpl);
           configs.push({
             providerId: preference.providerKey,
@@ -168,6 +167,20 @@ async function buildProviderConfigs(
         }
         continue;
       }
+
+      // 没有首页启用的真实账号：区分"有真实账号但全部停用"与"无真实账号的入口型"
+      // 按规范：可用=0 → 供应商卡片消失；可用=1 → 普通卡；可用>1 → 账号切换卡
+      const hasAnyRealAccount = settings.accounts.some(
+        (account) => account.providerKey === preference.providerKey,
+      );
+      if (!hasAnyRealAccount) {
+        // 入口型供应商（无真实账号）：默认显示
+        configs.push({
+          providerId: preference.providerKey,
+          config: buildProviderConfig(env, preference.providerKey),
+        });
+      }
+      // else：有真实账号但全部停用 → 跳过，该供应商不出现在看板
     }
     return configs;
   } catch {
@@ -310,7 +323,7 @@ async function fetchLatestReadySnapshots(env: WorkerEnv, userId: string | null):
   }
 
   const url = new URL("/rest/v1/usage_snapshots", env.SUPABASE_URL);
-  url.searchParams.set("select", "provider_key,payload,created_at");
+  url.searchParams.set("select", "source_url,payload,created_at");
   url.searchParams.set("user_id", `eq.${userId}`);
   url.searchParams.set("status", "eq.ready");
   url.searchParams.set("order", "created_at.desc");
@@ -328,13 +341,14 @@ async function fetchLatestReadySnapshots(env: WorkerEnv, userId: string | null):
   }
 
   const rows = (await response.json().catch(() => [])) as Array<{
-    provider_key?: string;
+    source_url?: string;
     payload?: ProviderSnapshot;
   }>;
   for (const row of rows) {
-    if (!row.provider_key || snapshots.has(row.provider_key)) continue;
+    const key = row.source_url ?? row.payload?.sourceUrl ?? "";
+    if (!key || snapshots.has(key)) continue;
     if (row.payload?.status === "ready") {
-      snapshots.set(row.provider_key, row.payload);
+      snapshots.set(key, row.payload);
     }
   }
 
@@ -352,7 +366,7 @@ async function applyLatestReadyFallback(env: WorkerEnv, userId: string | null, s
   }
 
   return snapshots.map((snapshot) => {
-    const fallback = latestReadySnapshots.get(snapshot.providerId);
+    const fallback = latestReadySnapshots.get(snapshot.sourceUrl);
     if (!fallback) return snapshot;
     if (snapshot.status === "ready" && snapshot.windows.length > 0) return snapshot;
     return {
@@ -360,6 +374,8 @@ async function applyLatestReadyFallback(env: WorkerEnv, userId: string | null, s
       summary: withFallbackSummary(fallback.summary),
       meta: {
         ...fallback.meta,
+        accountId: snapshot.meta?.accountId ?? fallback.meta?.accountId,
+        accountLabel: snapshot.meta?.accountLabel ?? fallback.meta?.accountLabel,
         fallbackFrom: snapshot.summary,
         isFallback: true,
         liveStatus: snapshot.status,

@@ -17,7 +17,8 @@
  *       过期后看板会显示 login_required。本脚本一次性抓取最新 cookie 并同步到云端与本地。
  */
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { resolve } from "node:path";
 
 function loadEnv(): Record<string, string> {
@@ -55,6 +56,34 @@ const BROWSER_TARGETS = [
   },
 ];
 
+
+// 终止浏览器进程，释放 Profile 锁
+function killBrowserProcesses(): void {
+  const processNames = ["msedge.exe", "chrome.exe"];
+  for (const name of processNames) {
+    try {
+      execSync(`taskkill /F /IM ${name} /T 2>nul`, { stdio: "ignore" });
+    } catch {
+      // 进程不存在或无法终止，静默继续
+    }
+  }
+  // 等待进程完全退出
+  try { execSync("timeout /T 2 /NOBREAK 2>nul", { stdio: "ignore" }); } catch { /* ignore */ }
+}
+// 清理残留的浏览器锁文件（浏览器已关闭但 SingletonLock/Socket/Cookie 残留会导致 launchPersistentContext 误报"被占用"）
+function cleanStaleLocks(userDataDir: string): void {
+  const lockNames = ["SingletonLock", "SingletonSocket", "SingletonCookie"];
+  for (const name of lockNames) {
+    const lockPath = resolve(userDataDir, name);
+    try {
+      if (existsSync(lockPath)) {
+        unlinkSync(lockPath);
+      }
+    } catch {
+      // 删除失败也不阻塞（文件可能正被占用或权限不足）
+    }
+  }
+}
 const SUBSCRIBE_URL =
   "https://console.volcengine.com/ark/region:ark+cn-beijing/openManagement?LLM=%7B%7D&advancedActiveKey=subscribe";
 const USAGE_API_URL =
@@ -190,7 +219,159 @@ function updateEnvFile(cookieValue: string): void {
   console.log("✅ 本地 .env 的 VOLC_ARK_AUTH_COOKIE 已更新");
 }
 
-// 从已建立的浏览器上下文提取火山方舟 cookie（persistent 与临时模式共用）
+// AES-GCM 加密，与 Worker security/credentials.ts 保持一致
+async function encryptPayload(
+  payload: Record<string, string>,
+  rawKey: string,
+): Promise<{ encryptedPayload: string; nonce: string; keyVersion: string }> {
+  const encoder = new TextEncoder();
+  const keyBytes = encoder.encode(rawKey);
+  if (keyBytes.byteLength !== 32) {
+    throw new Error("CREDENTIAL_ENCRYPTION_KEY must be 32 UTF-8 bytes");
+  }
+  const key = await crypto.subtle.importKey(
+    "raw",
+    keyBytes,
+    { name: "AES-GCM" },
+    false,
+    ["encrypt"],
+  );
+  const nonce = crypto.getRandomValues(new Uint8Array(12));
+  const plaintext = encoder.encode(JSON.stringify(payload));
+  const encrypted = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv: nonce },
+    key,
+    plaintext,
+  );
+  const bytesToB64 = (bytes: Uint8Array): string =>
+    btoa(String.fromCharCode(...bytes));
+  return {
+    encryptedPayload: bytesToB64(new Uint8Array(encrypted)),
+    nonce: bytesToB64(nonce),
+    keyVersion: "v1",
+  };
+}
+
+// 向 Supabase 写入加密凭据，确保前端配置页和 Worker 都能读取最新 cookie
+async function updateSupabaseCredentials(
+  env: Record<string, string>,
+  providerKey: string,
+  credentials: Record<string, string>,
+): Promise<void> {
+  const supabaseUrl = env.SUPABASE_URL;
+  const serviceRoleKey = env.SUPABASE_SERVICE_ROLE_KEY;
+  const encryptionKey = env.CREDENTIAL_ENCRYPTION_KEY;
+  const userId = env.SUPABASE_USER_ID;
+
+  if (!supabaseUrl || !serviceRoleKey || !encryptionKey || !userId) {
+    console.warn(
+      "⚠️ 缺少 Supabase 配置，跳过数据库凭据更新。Worker env secret 已更新，无 Supabase 时仍可正常工作。",
+    );
+    return;
+  }
+
+  const headers = {
+    apikey: serviceRoleKey,
+    Authorization: `Bearer ${serviceRoleKey}`,
+    "Content-Type": "application/json",
+    Accept: "application/json",
+  };
+
+  // 1. 查找该 provider 的已有账号
+  let accountId: string | null = null;
+  let existingRows: Array<{ id: string; config?: Record<string, unknown> }> = [];
+  const accountUrl = new URL("/rest/v1/provider_accounts", supabaseUrl);
+  accountUrl.searchParams.set("select", "id,config");
+  accountUrl.searchParams.set("user_id", `eq.${userId}`);
+  accountUrl.searchParams.set("provider_key", `eq.${providerKey}`);
+  accountUrl.searchParams.set("order", "created_at.asc");
+  accountUrl.searchParams.set("limit", "1");
+
+  try {
+    const accountResp = await fetch(accountUrl, { headers });
+    if (accountResp.ok) {
+      existingRows = (await accountResp.json()) as Array<{ id: string; config?: Record<string, unknown> }>;
+      accountId = existingRows[0]?.id ?? null;
+    }
+  } catch {
+    console.warn("⚠️ 查询 Supabase 账号失败，跳过凭据写入");
+    return;
+  }
+
+  // 2. 若无账号则创建一个
+  if (!accountId) {
+    const label = providerKey === "volc-ark" ? "火山方舟" : providerKey;
+    const sourceUrl =
+      providerKey === "volc-ark"
+        ? "https://console.volcengine.com/ark/region:ark+cn-beijing/openManagement"
+        : "";
+    try {
+      const createResp = await fetch(
+        new URL("/rest/v1/provider_accounts", supabaseUrl),
+        {
+          method: "POST",
+          headers: {
+            ...headers,
+            Prefer: "return=representation",
+          },
+          body: JSON.stringify({
+            user_id: userId,
+            provider_key: providerKey,
+            display_name: label,
+            source_url: sourceUrl,
+            status: "unknown",
+          }),
+        },
+      );
+      if (createResp.ok) {
+        const createRows = (await createResp.json()) as Array<{ id: string }>;
+        accountId = createRows[0]?.id ?? null;
+        if (accountId) {
+          console.log(`   ✅ 已创建 ${label} Supabase 账号`);
+        }
+      } else {
+        console.warn("⚠️ 创建 Supabase 账号失败，跳过凭据写入");
+        return;
+      }
+    } catch {
+      console.warn("⚠️ 创建 Supabase 账号异常，跳过凭据写入");
+      return;
+    }
+  }
+
+  if (!accountId) {
+    console.warn("⚠️ 无法确定 Supabase 账号 ID，跳过凭据写入");
+    return;
+  }
+
+  // 3. 更新账号的 config（当前数据库使用 config JSONB 列存储凭据）
+  try {
+    const existingConfig = (existingRows[0]?.config ?? {}) as Record<string, unknown>;
+    const mergedConfig = { ...existingConfig, ...credentials };
+    const patchResp = await fetch(
+      new URL(`/rest/v1/provider_accounts?id=eq.${accountId}`, supabaseUrl),
+      {
+        method: "PATCH",
+        headers: {
+          ...headers,
+          Prefer: "return=minimal",
+        },
+        body: JSON.stringify({
+          config: mergedConfig,
+          status: "ready",
+        }),
+      },
+    );
+    if (patchResp.ok) {
+      console.log("✅ Supabase 凭据已更新（config.authCookie）");
+    } else {
+      console.warn(`⚠️ Supabase 凭据更新失败: HTTP ${patchResp.status}`);
+    }
+  } catch {
+    console.warn("⚠️ Supabase 凭据写入网络异常");
+  }
+}
+
 async function extractFromContext(
   context: import("playwright").BrowserContext,
   label: string,
@@ -236,6 +417,9 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+    // 终止残留浏览器进程，释放 Profile 锁
+  killBrowserProcesses();
+
   const { chromium } = await import("playwright");
 
   let cookieString: string | undefined;
@@ -244,7 +428,8 @@ async function main(): Promise<void> {
   // 1. 优先尝试复用本地浏览器 Profile（已登录则免登录）
   for (const target of BROWSER_TARGETS) {
     const userDataDir = process.env.BROWSER_USER_DATA_DIR ?? target.userDataDir;
-    console.log(`🔧 尝试 ${target.name}（${userDataDir}）...`);
+        console.log(`🔧 尝试 ${target.name}（${userDataDir}）...`);
+    cleanStaleLocks(userDataDir);
 
     let context: import("playwright").BrowserContext | null = null;
     try {
@@ -320,7 +505,11 @@ async function main(): Promise<void> {
 
   // 更新 Worker secret
   console.log("🔄 通过 Cloudflare API 更新 Worker secret...");
-  await updateWorkerSecret(env, finalCookie);
+    await updateWorkerSecret(env, finalCookie);
+
+  // 写入 Supabase，使前端配置页和数据库账号直接生效
+  console.log("🗄️ 同步凭据到 Supabase...");
+  await updateSupabaseCredentials(env, "volc-ark", { authCookie: finalCookie });
 
   console.log(`🎉 完成！（来源: ${usedBrowser ?? "未知"}）Worker 下次刷新即使用新 cookie。`);
   console.log("   提示：火山方舟 cookie 约 2 天过期，过期后看板显示 login_required，重新执行本脚本即可。");

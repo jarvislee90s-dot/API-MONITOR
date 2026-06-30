@@ -144,7 +144,7 @@ function mapProviderAccount(row: ProviderAccountRow): SafeProviderAccount | null
   return {
     id: row.id,
     providerKey: row.provider_key,
-    accountLabel: row.account_label ?? row.display_name ?? "",
+    accountLabel: row.display_name ?? row.account_label ?? "",
     sourceUrl: row.source_url ?? "",
     status: row.status ?? "disabled",
     statusMessage: row.status_message ?? null,
