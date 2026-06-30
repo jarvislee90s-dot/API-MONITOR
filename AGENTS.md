@@ -27,7 +27,7 @@
 - Supabase Auth 与 Postgres 数据存储。
 - Durable Object 或等价机制实现刷新节流。
 - OpenRouter API 接入。
-- OpenCode Go `workspaceId + auth cookie` 云端抓取。
+- OpenCode Go 双账号 `workspaceId + auth cookie`，Edge 双 Profile 本地抓取 + ingest 推送（绕开 IP 封锁）。
 - 讯飞 MaaS 原网页入口和登录状态提示。
 - 前端原网页打开按钮。
 - 秘钥只保存在云端，不暴露给前端。

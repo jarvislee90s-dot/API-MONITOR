@@ -5,7 +5,7 @@
 - API 入口：`worker/index.ts`
 - 前端源码：`frontend/src`
 - 前端构建产物：`frontend/dist`
-- 线上域名示例：`https://apimonitor.jarvislee90s.workers.dev`
+- 线上域名示例：`https://apimonitor.bondtoolbox.asia`
 
 ## 1. 构建和测试
 
@@ -81,13 +81,13 @@ npm run deploy:worker
 部署后访问：
 
 ```text
-https://apimonitor.jarvislee90s.workers.dev
+https://apimonitor.bondtoolbox.asia
 ```
 
 API 验证：
 
 ```powershell
-Invoke-RestMethod -Method Get -Uri "https://apimonitor.jarvislee90s.workers.dev/api/usage"
+Invoke-RestMethod -Method Get -Uri "https://apimonitor.bondtoolbox.asia/api/usage"
 ```
 
 期望返回 `ok = true`，并且包含四个 provider：
@@ -100,7 +100,7 @@ Invoke-RestMethod -Method Get -Uri "https://apimonitor.jarvislee90s.workers.dev/
 配置页入口：
 
 ```text
-https://apimonitor.jarvislee90s.workers.dev/#/settings
+https://apimonitor.bondtoolbox.asia/#/settings
 ```
 
 配置页采用单页多层展开：
@@ -111,6 +111,24 @@ https://apimonitor.jarvislee90s.workers.dev/#/settings
 4. 首页显示：控制账号是否作为该供应商首页大卡片内的子卡片展示。
 
 阿里云百炼当前推荐作为“原网页入口型 provider”使用。点击卡片里的“打开看板”会进入阿里云百炼原页面；如果浏览器登录态仍有效，会直接看到 Coding Plan 页面，否则按阿里云页面要求重新扫码或登录。
+
+## 7. OpenCode Go 双账号刷新
+
+OpenCode Go 支持两个账号，分别登录在 Edge 浏览器的不同 Profile 中：
+
+- **jarvislee90s**：Edge Profile 1，对应 `OPENCODE_GO_WORKSPACE_ID`
+- **lijiawei_jarvis**：Edge Default，对应 `OPENCODE_GO_WORKSPACE2_ID`
+
+刷新脚本通过本地抓取用量页并推送到 Worker ingest 端点，绕开 Worker 数据中心 IP 封锁：
+
+```powershell
+node --experimental-strip-types scripts/refresh-opencode-usage.ts
+```
+
+前置条件：关闭所有 Edge 窗口（含后台进程），两个 Profile 都已登录 opencode.ai。
+
+> **注意**：Chrome 149+ 的 App-Bound Encryption (ABE) 会阻止 CDP 读取 cookie，
+> 因此不能用 Chrome 提取 opencode.ai 登录态。两个账号都必须用 Edge。
 
 ## 6. 不要提交
 

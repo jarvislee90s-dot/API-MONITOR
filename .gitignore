@@ -22,3 +22,8 @@ frontend-v2/dist/
 
 frontend-v3/
 frontend-v2/
+
+# 临时文件和备份
+.tmp-*/
+*.bak
+output/screenshots/.tmp-*
