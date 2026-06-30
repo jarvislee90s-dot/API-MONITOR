@@ -6,11 +6,11 @@ API 与 Coding Plan 用量聚合看板。它把 OpenRouter、OpenCode Go、讯�
 
 线上示例：
 
-[https://apimonitor.jarvislee90s.workers.dev](https://apimonitor.jarvislee90s.workers.dev)
+https://apimonitor.bondtoolbox.asia
 
 自定义域名（国内可直连，不受 *.workers.dev SNI 阻断影响）：
 
-[https://apimonitor.bondtoolbox.asia](https://apimonitor.bondtoolbox.asia)
+https://apimonitor.bondtoolbox.asia
 
 ![ApiMonitor dashboard](docs/assets/dashboard.png)
 
@@ -25,6 +25,7 @@ API 与 Coding Plan 用量聚合看板。它把 OpenRouter、OpenCode Go、讯�
 - Cloudflare Durable Object 做刷新节流。
 - Supabase Postgres 保存用量快照、窗口数据和刷新事件。
 - Supabase 保存配置，Worker 使用 AES-GCM 加密第三方凭据。
+- OpenCode Go 支持双账号，分别登录在 Edge 不同 Profile，本地脚本串行刷新推送。
 - OpenCode Go 支持“最近成功快照”回退，降低云端抓取不稳定时的页面空窗。
 
 ## 当前状态
@@ -116,7 +117,7 @@ flowchart TB
 
 - **点同步刷不了 OpenCode Go 是架构限制，不是 bug**：opencode.ai 屏蔽数据中心 IP，Worker 云端抓取必然被 302 到登录页；看板展示时 pplyFallback 会回退到最近一次成功的 eady 快照（即本地脚本上次推送的），所以无论点多少次同步，数据都不会变新。
 - **自定义域名只解决网络封锁，不解决 IP 封锁**：*.workers.dev 在国内受 DNS 污染 + SNI 阻断，绑定 pimonitor.bondtoolbox.asia 后前端看板与本地脚本推送均可国内直连；但 Worker 出口 IP 仍是数据中心 IP，opencode 照样封，点同步仍无效。
-- **本地脚本依赖浏览器登录态**：需先在 Edge 或 Chrome 中登录 opencode.ai，运行前关闭所有浏览器窗口（含后台进程）避免 Profile 锁定。
+- **本地脚本依赖浏览器登录态**：需先在 Edge 的 Default 和 Profile 1 中分别登录两个 opencode.ai 账号，运行前关闭所有 Edge 窗口（含后台进程）避免 Profile 锁定。
 - **cookie 过期后需重新登录浏览器**：脚本从浏览器 Profile 提取 uth cookie，cookie 过期则抓取会被重定向到登录页。
 
 ### 刷新 Cookie 与用量（本地脚本）
@@ -141,7 +142,9 @@ opencode.ai 屏蔽数据中心 IP，Worker 云端点同步无效，需本地脚�
 node --experimental-strip-types scripts/refresh-opencode-usage.ts
 ```
 
-脚本从 .env 读取 `INGEST_API_KEY`、`APIMONITOR_INGEST_URL`、`OPENCODE_GO_WORKSPACE_ID`，提取 auth cookie、抓取用量页、解析 3 个窗口后推送到 Worker `/api/ingest/opencode-go` 端点。推送目标为自定义域名，国内可直连。
+脚本从 .env 读取两个账号的 workspaceId（`OPENCODE_GO_WORKSPACE_ID` 和 `OPENCODE_GO_WORKSPACE2_ID`），分别从 Edge Profile 1 和 Default 提取 auth cookie、抓取各自用量页、解析 3 个窗口后推送到 Worker `/api/ingest/opencode-go` 端点。两个账号串行刷新，互不阻塞。推送目标为自定义域名，国内可直连。
+
+> **注意**：Chrome 149+ 的 App-Bound Encryption (ABE) 会阻止 CDP 读取 cookie，两个账号都必须用 Edge 浏览器登录。
 
 #### OpenCode Go Cookie 刷新
 
@@ -257,7 +260,8 @@ not_found_handling = "single-page-application"
 | `SUPABASE_SERVICE_ROLE_KEY` | Worker 写入 Supabase 使用 |
 | `CREDENTIAL_ENCRYPTION_KEY` | 32 字节 AES-GCM 加密 key，用于云端账号凭据 |
 | `OPENROUTER_API_KEY` | OpenRouter key endpoint |
-| `OPENCODE_GO_WORKSPACE_ID` | OpenCode Go workspace id |
+| `OPENCODE_GO_WORKSPACE_ID` | OpenCode Go 账号1 workspace id |
+| `OPENCODE_GO_WORKSPACE2_ID` | OpenCode Go 账号2 workspace id |
 | `OPENCODE_GO_AUTH_COOKIE` | OpenCode Go 登录 cookie |
 | `XFYUN_MAAS_API_URL` | 讯飞 `coding-plan/list` 用量接口 |
 | `XFYUN_MAAS_AUTH_COOKIE` | 讯飞登录 cookie |
