@@ -1,147 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { createApiClient, type DashboardSnapshot, type PlatformSnapshot } from "./api/client";
+import { createApiClient, type DashboardSnapshot } from "./api/client";
 import { createSupabaseBrowserAuthClient, type AppAuthSession } from "./auth/auth-client";
 import { LoginPage } from "./auth/login-page";
 import { DashboardShell, type DashboardSyncState } from "./components";
 import { useActiveRefresh } from "./hooks/useActiveRefresh";
 import { SettingsPage } from "./settings/settings-page";
 import type { AuthConfig } from "./api/client";
-
-const platformBases: Array<Omit<PlatformSnapshot, "lastRefreshedAt" | "quotaWindows" | "trend" | "modelSpends">> = [
-  {
-    id: "xfyun",
-    name: "讯飞 MaaS",
-    tagline: "原网页入口 / 登录状态",
-    summary: "保留原网页和登录态提示，便于后续接 Browser Run 登录修复与原网页抓取。",
-    status: "login_required",
-    loginState: "待云端校验",
-    sourceUrl: "https://maas.xfyun.cn/packageSubscription",
-    sourceLabel: "packageSubscription",
-    primaryMetricLabel: "当前套餐",
-    primaryMetricValue: "等待同步",
-    accent: "#2563eb",
-    links: [
-      { label: "打开看板", href: "https://maas.xfyun.cn/packageSubscription", tone: "brand" },
-    ],
-    selectedAccountId: "xfyun:default",
-    accounts: [
-      {
-        id: "xfyun:default",
-        label: "默认账号",
-        summary: "保留原网页和登录态提示，便于后续接 Browser Run 登录修复与原网页抓取。",
-        status: "login_required",
-        loginState: "待云端校验",
-        sourceUrl: "https://maas.xfyun.cn/packageSubscription",
-        sourceLabel: "packageSubscription",
-        primaryMetricValue: "等待同步",
-        lastRefreshedAt: new Date().toISOString(),
-        quotaWindows: [],
-        trend: [],
-        links: [
-          { label: "打开看板", href: "https://maas.xfyun.cn/packageSubscription", tone: "brand" },
-        ],
-      },
-    ],
-  },
-  {
-    id: "opencode-go",
-    name: "OpenCode Go",
-    tagline: "workspaceId + auth cookie",
-    summary: "把 rolling、weekly、monthly 三个窗口统一折算成可比的 quota window，便于跨周期观察。",
-    status: "healthy",
-    loginState: "等待同步",
-    sourceUrl: "https://opencode.ai/workspace/wrk_01KTNPYQAX7HWSC5B04H1NEBRG/go",
-    sourceLabel: "wrk_01KTNPYQAX7HWSC5B04H1NEBRG/go",
-    primaryMetricLabel: "活跃窗口",
-    primaryMetricValue: "等待同步",
-    accent: "#0f766e",
-    links: [
-      {
-        label: "打开看板",
-        href: "https://opencode.ai/workspace/wrk_01KTNPYQAX7HWSC5B04H1NEBRG/go",
-        tone: "brand",
-      },
-    ],
-    selectedAccountId: "opencode-go:default",
-    accounts: [
-      {
-        id: "opencode-go:default",
-        label: "默认账号",
-        summary: "把 rolling、weekly、monthly 三个窗口统一折算成可比的 quota window，便于跨周期观察。",
-        status: "healthy",
-        loginState: "等待同步",
-        sourceUrl: "https://opencode.ai/workspace/wrk_01KTNPYQAX7HWSC5B04H1NEBRG/go",
-        sourceLabel: "wrk_01KTNPYQAX7HWSC5B04H1NEBRG/go",
-        primaryMetricValue: "等待同步",
-        lastRefreshedAt: new Date().toISOString(),
-        quotaWindows: [],
-        trend: [],
-        links: [
-          {
-            label: "打开看板",
-            href: "https://opencode.ai/workspace/wrk_01KTNPYQAX7HWSC5B04H1NEBRG/go",
-            tone: "brand",
-          },
-        ],
-      },
-      {
-        id: "opencode-go:account2",
-        label: "lijiawei_jarvis",
-        summary: "把 rolling、weekly、monthly 三个窗口统一折算成可比的 quota window，便于跨周期观察。",
-        status: "healthy",
-        loginState: "等待同步",
-        sourceUrl: "https://opencode.ai/workspace/wrk_01KVYWV3HMBZCXFPQJAYEG88KF/go",
-        sourceLabel: "wrk_01KVYWV3HMBZCXFPQJAYEG88KF/go",
-        primaryMetricValue: "等待同步",
-        lastRefreshedAt: new Date().toISOString(),
-        quotaWindows: [],
-        trend: [],
-        links: [
-          {
-            label: "打开看板",
-            href: "https://opencode.ai/workspace/wrk_01KVYWV3HMBZCXFPQJAYEG88KF/go",
-            tone: "brand",
-          },
-        ],
-      },
-    ],
-  },
-  {
-    id: "openrouter",
-    name: "OpenRouter",
-    tagline: "Activity 聚合 / 花费拆分",
-    summary: "聚合模型花费与调用量，保留活动页、API 快照和渠道健康状态。",
-    status: "partial",
-    loginState: "等待同步",
-    sourceUrl: "https://openrouter.ai/activity",
-    sourceLabel: "activity",
-    primaryMetricLabel: "本周期花费",
-    primaryMetricValue: "等待同步",
-    accent: "#b45309",
-    links: [
-      { label: "打开看板", href: "https://openrouter.ai/activity", tone: "brand" },
-    ],
-    selectedAccountId: "openrouter:default",
-    accounts: [
-      {
-        id: "openrouter:default",
-        label: "默认账号",
-        summary: "聚合模型花费与调用量，保留活动页、API 快照和渠道健康状态。",
-        status: "partial",
-        loginState: "等待同步",
-        sourceUrl: "https://openrouter.ai/activity",
-        sourceLabel: "activity",
-        primaryMetricValue: "等待同步",
-        lastRefreshedAt: new Date().toISOString(),
-        quotaWindows: [],
-        trend: [],
-        links: [
-          { label: "打开看板", href: "https://openrouter.ai/activity", tone: "brand" },
-        ],
-      },
-    ],
-  },
-];
 
 function createBootstrapDashboard(): DashboardSnapshot {
   const now = new Date().toISOString();
@@ -150,13 +14,7 @@ function createBootstrapDashboard(): DashboardSnapshot {
     status: "partial",
     generatedAt: now,
     refreshedAt: now,
-    platforms: platformBases.map((base) => ({
-      ...base,
-      lastRefreshedAt: now,
-      quotaWindows: [],
-      trend: [],
-      modelSpends: [],
-    })),
+    platforms: [],
   };
 }
 

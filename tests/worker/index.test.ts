@@ -1372,7 +1372,6 @@ describe("worker api", () => {
       expect(payload.data.cards.map((card: { providerId: string }) => card.providerId)).toEqual([
         "opencode-go",
         "openrouter",
-        "xfyun-maas",
       ]);
     } finally {
       vi.unstubAllGlobals();

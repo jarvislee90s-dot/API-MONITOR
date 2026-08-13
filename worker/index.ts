@@ -177,29 +177,19 @@ async function buildProviderConfigs(
         continue;
       }
 
-      // 供应商级已启用但没有首页显示账号：回退展示该供应商的真实账号，
-      // 避免账号因 homepage_enabled 默认未启用导致供应商在看板上消失
-      const anyAccount = settings.accounts
-        .filter((account) => account.providerKey === preference.providerKey)
-        .sort((left, right) => left.homepageOrder - right.homepageOrder);
-      if (anyAccount.length > 0) {
-        for (const account of anyAccount) {
-          const accountConfig = await getProviderAccountConfigById(env, userId, account.id, fetchImpl);
-          configs.push({
-            providerId: preference.providerKey,
-            config: mergeProviderConfig(env, preference.providerKey, accountConfig?.config ?? null),
-            accountId: account.id,
-            accountLabel: account.accountLabel,
-          });
-        }
-        continue;
+      // 没有首页启用的真实账号：区分有真实账号但全部停用 与 无真实账号的入口型
+      // 按规范：可用=0 → 供应商卡片消失；可用=1 → 普通卡；可用>1 → 账号切换卡
+      const hasAnyRealAccount = settings.accounts.some(
+        (account) => account.providerKey === preference.providerKey,
+      );
+      if (!hasAnyRealAccount) {
+        // 入口型供应商（无真实账号）：默认显示
+        configs.push({
+          providerId: preference.providerKey,
+          config: buildProviderConfig(env, preference.providerKey),
+        });
       }
-
-      // 入口型供应商（无真实账号）：默认显示
-      configs.push({
-        providerId: preference.providerKey,
-        config: buildProviderConfig(env, preference.providerKey),
-      });
+      // else：有真实账号但全部停用 → 跳过，该供应商不出现在看板
     }
     return configs;
   } catch {
