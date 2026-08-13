@@ -263,12 +263,12 @@ describe("SettingsPage", () => {
     expect(api.updateProviderAccountDisplay).toHaveBeenNthCalledWith(
       1,
       "acc-backup",
-      { homepageEnabled: true, homepageOrder: 1 },
+      { homepageEnabled: true, homepageOrder: 100 },
     );
     expect(api.updateProviderAccountDisplay).toHaveBeenNthCalledWith(
       2,
       "acc-main",
-      { homepageEnabled: true, homepageOrder: 2 },
+      { homepageEnabled: true, homepageOrder: 200 },
     );
   });
 

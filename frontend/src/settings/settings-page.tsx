@@ -258,33 +258,36 @@ export function SettingsPage({ api, dashboard, onBack }: SettingsPageProps) {
     const targetAccount = homepageAccounts.find((account) => account.id === targetAccountId);
     if (!draggedAccount || !targetAccount) return;
 
-    const updatedDraggedAccount = await api.updateProviderAccountDisplay(draggedAccount.id, {
-      homepageEnabled: true,
-      homepageOrder: targetAccount.homepageOrder,
-    });
-    const updatedTargetAccount = await api.updateProviderAccountDisplay(targetAccount.id, {
-      homepageEnabled: true,
-      homepageOrder: draggedAccount.homepageOrder,
-    });
+    // 把被拖账号移动到目标位置，其余账号保持原顺序
+    const next = homepageAccounts.filter((account) => account.id !== draggedAccountId);
+    const targetIndex = next.findIndex((account) => account.id === targetAccountId);
+    next.splice(targetIndex, 0, draggedAccount);
 
+    // 重新分配连续且唯一的顺序号，避免相同 homepageOrder 导致排序不生效
+    const ordered = next.map((account, index) => ({
+      account,
+      homepageOrder: (index + 1) * 100,
+    }));
+
+    // 逐个持久化顺序变化，全部成功后再更新本地状态，保证与数据库一致
+    const updatedIds = new Set<string>();
+    for (const entry of ordered) {
+      const nextOrder = entry.homepageOrder;
+      if (entry.account.homepageOrder === nextOrder) continue;
+      await api.updateProviderAccountDisplay(entry.account.id, {
+        homepageEnabled: true,
+        homepageOrder: nextOrder,
+      });
+      updatedIds.add(entry.account.id);
+    }
+    if (updatedIds.size === 0) return;
+    const orderById = new Map(ordered.map((entry) => [entry.account.id, entry.homepageOrder]));
     setAccounts((current) =>
-      current.map((item) => {
-        if (item.id === updatedDraggedAccount.id) {
-          return {
-            ...item,
-            homepageEnabled: updatedDraggedAccount.homepageEnabled,
-            homepageOrder: updatedDraggedAccount.homepageOrder,
-          };
-        }
-        if (item.id === updatedTargetAccount.id) {
-          return {
-            ...item,
-            homepageEnabled: updatedTargetAccount.homepageEnabled,
-            homepageOrder: updatedTargetAccount.homepageOrder,
-          };
-        }
-        return item;
-      }),
+      current.map((item) =>
+        orderById.has(item.id)
+          ? { ...item, homepageEnabled: true, homepageOrder: orderById.get(item.id)! }
+          : item,
+      ),
     );
   }
 
