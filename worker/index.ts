@@ -323,7 +323,7 @@ async function fetchLatestReadySnapshots(env: WorkerEnv, userId: string | null):
   }
 
   const url = new URL("/rest/v1/usage_snapshots", env.SUPABASE_URL);
-  url.searchParams.set("select", "source_url,payload,created_at");
+  url.searchParams.set("select", "provider_account_id,source_url,payload,created_at");
   url.searchParams.set("user_id", `eq.${userId}`);
   url.searchParams.set("status", "eq.ready");
   url.searchParams.set("order", "created_at.desc");
@@ -341,11 +341,13 @@ async function fetchLatestReadySnapshots(env: WorkerEnv, userId: string | null):
   }
 
   const rows = (await response.json().catch(() => [])) as Array<{
+    provider_account_id?: string | null;
     source_url?: string;
     payload?: ProviderSnapshot;
   }>;
   for (const row of rows) {
-    const key = row.source_url ?? row.payload?.sourceUrl ?? "";
+    // 优先按账号 id 区分回退快照,避免同 source_url 多账号互相覆盖
+    const key = row.provider_account_id ?? row.source_url ?? row.payload?.sourceUrl ?? "";
     if (!key || snapshots.has(key)) continue;
     if (row.payload?.status === "ready") {
       snapshots.set(key, row.payload);
@@ -366,7 +368,9 @@ async function applyLatestReadyFallback(env: WorkerEnv, userId: string | null, s
   }
 
   return snapshots.map((snapshot) => {
-    const fallback = latestReadySnapshots.get(snapshot.sourceUrl);
+    // 与 fetchLatestReadySnapshots 的 key 口径一致:有 accountId 按账号,否则按 source_url
+    const accountId = typeof snapshot.meta?.accountId === "string" ? snapshot.meta.accountId : null;
+    const fallback = latestReadySnapshots.get(accountId ?? "") ?? latestReadySnapshots.get(snapshot.sourceUrl);
     if (!fallback) return snapshot;
     if (snapshot.status === "ready" && snapshot.windows.length > 0) return snapshot;
     return {
@@ -399,21 +403,13 @@ export async function persistSnapshot(env: WorkerEnv, userId: string | null, sna
     Prefer: "resolution=merge-duplicates,return=minimal",
   };
 
-  const providerAccountsRow = {
-    user_id: userId,
-    provider_key: snapshot.providerId,
-    display_name: snapshot.providerName,
-    source_url: snapshot.sourceUrl,
-    auth_mode: snapshot.status,
-    status: snapshot.status,
-    status_message: snapshot.summary,
-    config: snapshot.meta,
-    last_refresh_at: snapshot.capturedAt,
-  };
+  // 已知 accountId 时按 id 定位账号行;否则为入口型/单账号兜底,按 source_url upsert
+  const accountId = typeof snapshot.meta?.accountId === "string" ? snapshot.meta.accountId : null;
 
   const usageSnapshotsRow = {
     user_id: userId,
     provider_key: snapshot.providerId,
+    provider_account_id: accountId,
     captured_at: snapshot.capturedAt,
     status: snapshot.status,
     summary: snapshot.summary,
@@ -424,6 +420,7 @@ export async function persistSnapshot(env: WorkerEnv, userId: string | null, sna
   const quotaWindowRows = snapshot.windows.map((window) => ({
     user_id: userId,
     provider_key: snapshot.providerId,
+    provider_account_id: accountId,
     window_key: window.key,
     window_label: window.label,
     used_value: window.used ?? null,
@@ -438,6 +435,7 @@ export async function persistSnapshot(env: WorkerEnv, userId: string | null, sna
     const refreshEventsRow = {
       user_id: userId,
       provider_key: snapshot.providerId,
+      provider_account_id: accountId,
       session_key: decision.session.sessionKey,
       event_type: decision.allowed ? "refresh_allowed" : "refresh_blocked",
       status: decision.reason,
@@ -457,18 +455,46 @@ export async function persistSnapshot(env: WorkerEnv, userId: string | null, sna
     });
   }
 
+  // provider_accounts:已知账号时按 id PATCH 展示状态,保留用户设置的 source_url/account_label
+  // 及 config 中的凭据(由 cookie 脚本/前端写入);避免同 provider 多账号因 source_url 相同
+  // 而在 source_url upsert 时互相覆盖。无 accountId 时保持原 source_url upsert。
+  const accountPersist = accountId
+    ? fetch(
+        new URL(`/rest/v1/provider_accounts?id=eq.${accountId}&user_id=eq.${userId}`, env.SUPABASE_URL),
+        {
+          method: "PATCH",
+          headers,
+          body: JSON.stringify({
+            status: snapshot.status,
+            status_message: snapshot.summary,
+            last_refresh_at: snapshot.capturedAt,
+          }),
+        },
+      )
+    : fetch(
+        new URL(
+          "/rest/v1/provider_accounts?on_conflict=user_id%2Cprovider_key%2Csource_url",
+          env.SUPABASE_URL,
+        ),
+        {
+          method: "POST",
+          headers: upsertHeaders,
+          body: JSON.stringify({
+            user_id: userId,
+            provider_key: snapshot.providerId,
+            display_name: snapshot.providerName,
+            source_url: snapshot.sourceUrl,
+            auth_mode: snapshot.status,
+            status: snapshot.status,
+            status_message: snapshot.summary,
+            config: snapshot.meta,
+            last_refresh_at: snapshot.capturedAt,
+          }),
+        },
+      );
+
   await Promise.all([
-    fetch(
-      new URL(
-        "/rest/v1/provider_accounts?on_conflict=user_id%2Cprovider_key%2Csource_url",
-        env.SUPABASE_URL,
-      ),
-      {
-      method: "POST",
-      headers: upsertHeaders,
-      body: JSON.stringify(providerAccountsRow),
-      },
-    ),
+    accountPersist,
     fetch(new URL("/rest/v1/usage_snapshots", env.SUPABASE_URL), {
       method: "POST",
       headers,

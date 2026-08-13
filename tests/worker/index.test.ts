@@ -450,6 +450,85 @@ describe("worker api", () => {
     }
   });
 
+  it("falls back to ingest-pushed ready snapshot by source_url when the live account snapshot is not ready", async () => {
+    // 复现：opencode 走本地抓取+ingest 推送（绕开 Cloudflare IP 封锁），推送的 ready 快照
+    // 不带 provider_account_id；而看板实时抓取用的是真实 Supabase 账号（live 快照带 accountId）。
+    // 回退查找必须先按 accountId 查不到时再按 source_url 兜底，否则会显示实时抓取的登录失败。
+    const encryptionKey = "0123456789abcdef0123456789abcdef";
+    const encrypted = await encryptCredentialPayload(
+      { workspaceId: "wrk_123", authCookie: "auth=abc" },
+      encryptionKey,
+    );
+    const workspaceUrl = "https://opencode.ai/workspace/wrk_123/go";
+    const readySnapshot: ProviderSnapshot = {
+      providerId: "opencode-go",
+      providerName: "OpenCode Go",
+      sourceUrl: workspaceUrl,
+      status: "ready",
+      capturedAt: "2026-07-09T01:28:09.000Z",
+      summary: "OpenCode Go usage windows parsed",
+      windows: [
+        { key: "rolling", label: "5h", used: 0, limit: 100, remaining: 100, percentUsed: 0, percentRemaining: 100, resetAt: null },
+        { key: "weekly", label: "Weekly", used: 3, limit: 100, remaining: 97, percentUsed: 3, percentRemaining: 97, resetAt: null },
+        { key: "monthly", label: "Monthly", used: 97, limit: 100, remaining: 3, percentUsed: 97, percentRemaining: 3, resetAt: null },
+      ],
+      metrics: {},
+      meta: { fetchMethod: "local_ingest", accountLabel: "jarvislee90s" },
+    };
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+
+      // 实时抓取 opencode 用量页（Cloudflare 出口 IP 被封）：返回无用量标记的 HTML -> partial
+      if (url.includes("opencode.ai/workspace")) {
+        return new Response("<html>no usage markers in cloud response</html>", {
+          status: 200,
+          headers: { "content-type": "text/html; charset=utf-8" },
+        });
+      }
+
+      if (url.startsWith("https://supabase.test/rest/v1/provider_preferences")) {
+        return Response.json([{ provider_key: "opencode-go", enabled: true, display_order: 1, active_provider_account_id: "opencode-acct-1" }]);
+      }
+      if (url.startsWith("https://supabase.test/rest/v1/provider_account_credentials")) {
+        return Response.json([{ encrypted_payload: encrypted.encryptedPayload, nonce: encrypted.nonce, key_version: "v1" }]);
+      }
+      if (url.startsWith("https://supabase.test/rest/v1/provider_accounts")) {
+        const parsed = new URL(url);
+        if (parsed.searchParams.get("id") === "eq.opencode-acct-1") {
+          return Response.json([{ id: "opencode-acct-1", provider_key: "opencode-go", account_label: "jarvislee90s", source_url: workspaceUrl, config: {} }]);
+        }
+        return Response.json([{ id: "opencode-acct-1", provider_key: "opencode-go", account_label: "jarvislee90s", source_url: workspaceUrl, homepage_enabled: true, homepage_order: 1 }]);
+      }
+      // ingest 推送的回退快照：无 provider_account_id，仅 source_url（与本地脚本推送一致）
+      if (url.startsWith("https://supabase.test/rest/v1/usage_snapshots")) {
+        return Response.json([{ provider_key: "opencode-go", source_url: workspaceUrl, payload: readySnapshot }]);
+      }
+
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    vi.stubGlobal("fetch", fetchImpl as unknown as typeof fetch);
+    try {
+      const env = {
+        ...createEnv(fetchImpl as typeof fetch),
+        SUPABASE_URL: "https://supabase.test",
+        SUPABASE_SERVICE_ROLE_KEY: "service-role-test",
+        SUPABASE_USER_ID: "00000000-0000-0000-0000-000000000001",
+        CREDENTIAL_ENCRYPTION_KEY: encryptionKey,
+      };
+      const response = await handleApiRequest(new Request("https://api.monitor.local/api/usage"), env);
+      const payload = (await response.json()) as any;
+      const openCodeCard = payload.data.cards.find((card: { providerId: string }) => card.providerId === "opencode-go");
+
+      expect(response.status).toBe(200);
+      // 实时抓取失败时应回退到 ingest 推送的 ready 快照，而非显示登录失败
+      expect(openCodeCard.status).toBe("ready");
+      expect(openCodeCard.meta.isFallback).toBe(true);
+      expect(openCodeCard.windows).toHaveLength(3);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
   it("persists live refresh snapshots before applying dashboard fallback", async () => {
     const readyOpenCodeSnapshot: ProviderSnapshot = {
       providerId: "opencode-go",
@@ -704,6 +783,98 @@ describe("worker api", () => {
     }
   });
 
+  it("persists account-bearing snapshots by account id (PATCH) instead of source_url upsert", async () => {
+    const encryptionKey = "0123456789abcdef0123456789abcdef";
+    const encrypted = await encryptCredentialPayload({ apiKey: "sk-acct" }, encryptionKey);
+    const restWrites: Array<{ path: string; search: string; method: string; body: unknown }> = [];
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = input instanceof Request ? input : null;
+      const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+      const method = ((init?.method ?? request?.method) ?? "GET").toUpperCase();
+
+      if (url.includes("/api/v1/auth/key")) {
+        return Response.json({ data: { usage: 7, limit: 100, limit_remaining: 93 } });
+      }
+
+      if (!url.startsWith("https://supabase.test/rest/v1/")) {
+        throw new Error(`unexpected fetch ${url}`);
+      }
+
+      // 写操作(POST/PATCH/PUT):捕获后返回 201
+      if (method !== "GET") {
+        const parsedUrl = new URL(url);
+        const bodyText = request ? await request.clone().text() : String(init?.body ?? "");
+        restWrites.push({
+          path: parsedUrl.pathname,
+          search: parsedUrl.search,
+          method,
+          body: bodyText ? JSON.parse(bodyText) : null,
+        });
+        return new Response("", { status: 201 });
+      }
+
+      // 读操作:返回模拟账号/凭据/偏好
+      if (url.includes("provider_preferences")) {
+        return Response.json([{ provider_key: "openrouter", enabled: true, display_order: 1, active_provider_account_id: "acct-1" }]);
+      }
+      if (url.includes("provider_account_credentials")) {
+        return Response.json([{ encrypted_payload: encrypted.encryptedPayload, nonce: encrypted.nonce, key_version: "v1" }]);
+      }
+      if (url.includes("provider_accounts")) {
+        const parsed = new URL(url);
+        if (parsed.searchParams.get("id") === "eq.acct-1") {
+          return Response.json([{ id: "acct-1", provider_key: "openrouter", account_label: "主账号", source_url: "https://openrouter.ai/activity", config: {} }]);
+        }
+        return Response.json([{ id: "acct-1", provider_key: "openrouter", account_label: "主账号", source_url: "https://openrouter.ai/activity", homepage_enabled: true, homepage_order: 1 }]);
+      }
+      return Response.json([]);
+    });
+
+    vi.stubGlobal("fetch", fetchImpl as unknown as typeof fetch);
+    try {
+      const env = {
+        ...createEnv(fetchImpl as typeof fetch),
+        SUPABASE_URL: "https://supabase.test",
+        SUPABASE_SERVICE_ROLE_KEY: "service-role-test",
+        SUPABASE_USER_ID: "00000000-0000-0000-0000-000000000001",
+        CREDENTIAL_ENCRYPTION_KEY: encryptionKey,
+      };
+      const response = await handleApiRequest(
+        new Request("https://api.monitor.local/api/refresh", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ providerId: "openrouter", sessionKey: "openrouter:account-persist" }),
+        }),
+        env,
+      );
+      const payload = (await response.json()) as any;
+
+      expect(response.status).toBe(200);
+      expect(payload.ok).toBe(true);
+
+      // provider_accounts 应按 id PATCH(无 on_conflict),而非 source_url upsert
+      const accountWrites = restWrites.filter((w) => w.path === "/rest/v1/provider_accounts");
+      const patchWrite = accountWrites.find((w) => w.method === "PATCH" && w.search.includes("id=eq.acct-1"));
+      expect(patchWrite).toBeDefined();
+      expect(patchWrite?.search).not.toContain("on_conflict");
+      expect(accountWrites.every((w) => !w.search.includes("on_conflict"))).toBe(true);
+      expect(patchWrite?.body).toMatchObject({
+        status: expect.any(String),
+        status_message: expect.any(String),
+        last_refresh_at: expect.any(String),
+      });
+
+      // usage_snapshots / quota_windows 应携带 provider_account_id,使同 source_url 多账号回退快照不互相覆盖
+      const usageWrite = restWrites.find((w) => w.path === "/rest/v1/usage_snapshots");
+      expect(usageWrite?.body).toMatchObject({ provider_account_id: "acct-1", provider_key: "openrouter" });
+
+      const quotaWrite = restWrites.find((w) => w.path === "/rest/v1/quota_windows");
+      expect(Array.isArray(quotaWrite?.body)).toBe(true);
+      expect((quotaWrite?.body as Array<Record<string, unknown>>)?.[0]).toMatchObject({ provider_account_id: "acct-1" });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
   it("creates a live login session placeholder", async () => {
     const env = createEnv(fetch);
     const response = await handleApiRequest(
