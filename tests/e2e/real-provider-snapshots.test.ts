@@ -32,11 +32,16 @@ function createDirectEnv(): WorkerEnv {
     VOLC_ARK_PAGE_URL: readEnv("VOLC_ARK_PAGE_URL"),
     VOLC_ARK_API_URL: readEnv("VOLC_ARK_API_URL"),
     VOLC_ARK_AUTH_COOKIE: readEnv("VOLC_ARK_AUTH_COOKIE"),
+    DEEPSEEK_API_KEY: readEnv("DEEPSEEK_API_KEY"),
+    DEEPSEEK_PAGE_URL: readEnv("DEEPSEEK_PAGE_URL"),
+    DEEPSEEK_USER_TOKEN: readEnv("DEEPSEEK_USER_TOKEN"),
+    DEEPSEEK_AUTH_COOKIE: readEnv("DEEPSEEK_AUTH_COOKIE"),
   };
 }
 
 const requiredEnvByProvider: Record<ProviderId, string[]> = {
   openrouter: ["OPENROUTER_API_KEY"],
+  "deepseek": ["DEEPSEEK_API_KEY", "DEEPSEEK_USER_TOKEN", "DEEPSEEK_AUTH_COOKIE"],
   "opencode-go": ["OPENCODE_GO_WORKSPACE_ID", "OPENCODE_GO_AUTH_COOKIE"],
   "xfyun-maas": ["XFYUN_MAAS_API_URL", "XFYUN_MAAS_AUTH_COOKIE"],
   "aliyun-bailian": ["ALIYUN_BAILIAN_API_URL", "ALIYUN_BAILIAN_AUTH_COOKIE"],

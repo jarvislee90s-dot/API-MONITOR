@@ -1,4 +1,10 @@
-export type ProviderId = "openrouter" | "opencode-go" | "xfyun-maas" | "aliyun-bailian" | "volc-ark";
+export type ProviderId =
+  | "openrouter"
+  | "opencode-go"
+  | "xfyun-maas"
+  | "aliyun-bailian"
+  | "volc-ark"
+  | "deepseek";
 
 export type ProviderStatus = "ready" | "partial" | "login_required" | "disabled" | "error";
 
@@ -195,6 +201,10 @@ export interface WorkerEnv extends RefreshSessionEnv {
   VOLC_ARK_PAGE_URL?: string;
   VOLC_ARK_API_URL?: string;
   VOLC_ARK_AUTH_COOKIE?: string;
+  DEEPSEEK_API_KEY?: string;
+  DEEPSEEK_PAGE_URL?: string;
+  DEEPSEEK_USER_TOKEN?: string;
+  DEEPSEEK_AUTH_COOKIE?: string;
   REFRESH_SESSION: DurableObjectNamespaceLike;
 }
 

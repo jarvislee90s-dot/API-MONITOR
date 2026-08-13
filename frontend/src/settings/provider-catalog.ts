@@ -31,4 +31,10 @@ export const PUBLIC_PROVIDER_CATALOG: ProviderCatalogItem[] = [
     sourceUrl: "https://console.volcengine.com/ark/region:ark+cn-beijing/openManagement?LLM=%7B%7D&advancedActiveKey=subscribe",
     description: "Coding Plan 用量 / 5小时周月百分比",
   },
+  {
+    providerKey: "deepseek",
+    providerName: "DeepSeek",
+    sourceUrl: "https://platform.deepseek.com/usage",
+    description: "API 余额 / 近30天用量（请求数 / Tokens / 消费）",
+  },
 ];

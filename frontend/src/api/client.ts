@@ -343,6 +343,7 @@ function resolveAccent(providerId: string): string {
   if (providerId === "opencode-go") return "#0f766e";
   if (providerId === "aliyun-bailian") return "#7c3aed";
   if (providerId === "volc-ark") return "#dc2626";
+  if (providerId === "deepseek") return "#0369a1";
   return "#b45309";
 }
 
@@ -351,6 +352,7 @@ function resolveTagline(providerId: string): string {
   if (providerId === "opencode-go") return "workspaceId + auth cookie";
   if (providerId === "aliyun-bailian") return "Coding Plan / 百炼控制台";
   if (providerId === "volc-ark") return "Coding Plan 用量 / 5小时周月";
+  if (providerId === "deepseek") return "API 余额 / 近30天用量";
   return "Activity 聚合 / 花费拆分";
 }
 
@@ -359,6 +361,7 @@ function resolvePrimaryMetricLabel(providerId: string, windows: ServerProviderWi
   if (providerId === "opencode-go") return "活跃窗口";
   if (providerId === "openrouter") return "本周期花费";
   if (providerId === "aliyun-bailian") return "当前套餐";
+  if (providerId === "deepseek") return "充值余额";
   return windows[0]?.label ?? "当前状态";
 }
 

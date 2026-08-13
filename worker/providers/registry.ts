@@ -3,9 +3,17 @@ import { opencodeGo } from "./opencode-go";
 import { xfyunMaaS } from "./xfyun-maas";
 import { aliyunBailian } from "./aliyun-bailian";
 import { volcArk } from "./volc-ark";
+import { deepseek } from "./deepseek";
 import type { ProviderDefinition, ProviderId } from "../types";
 
-const PROVIDERS: ProviderDefinition[] = [openrouter, opencodeGo, xfyunMaaS, aliyunBailian, volcArk];
+const PROVIDERS: ProviderDefinition[] = [
+  openrouter,
+  opencodeGo,
+  xfyunMaaS,
+  aliyunBailian,
+  volcArk,
+  deepseek,
+];
 
 export function listProviders(): ProviderDefinition[] {
   return [...PROVIDERS];

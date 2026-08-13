@@ -216,6 +216,7 @@ describe("worker api", () => {
       "xfyun-maas",
       "aliyun-bailian",
       "volc-ark",
+      "deepseek",
     ]);
   });
 
@@ -324,13 +325,13 @@ describe("worker api", () => {
       expect(response.status).toBe(200);
       expect(payload.ok).toBe(true);
       expect(payload.data.kind).toBe("usage_dashboard");
-      expect(payload.data.cards).toHaveLength(5);
+      expect(payload.data.cards).toHaveLength(6);
       expect(payload.data.modelSpends).toEqual([]);
       expect(payload.data.totals).toMatchObject({
-        providers: 5,
+        providers: 6,
         ready: 3,
         partial: 1,
-        loginRequired: 1,
+        loginRequired: 2,
         error: 0,
       });
       expect(payload.data.cards[0]).toMatchObject({
@@ -679,7 +680,7 @@ describe("worker api", () => {
         sessionKey: "dashboard",
         refreshed: true,
       });
-      expect(payload.data.cards).toHaveLength(5);
+      expect(payload.data.cards).toHaveLength(6);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -1371,6 +1372,7 @@ describe("worker api", () => {
       expect(payload.data.cards.map((card: { providerId: string }) => card.providerId)).toEqual([
         "opencode-go",
         "openrouter",
+        "xfyun-maas",
       ]);
     } finally {
       vi.unstubAllGlobals();

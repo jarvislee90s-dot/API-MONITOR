@@ -7,6 +7,7 @@ import { parseOpenCodeGoWindows } from "../../worker/providers/opencode-go-parse
 import { fetchXfyunMaaSSnapshot } from "../../worker/providers/xfyun-maas";
 import { fetchAliyunBailianSnapshot } from "../../worker/providers/aliyun-bailian";
 import { fetchVolcArkSnapshot } from "../../worker/providers/volc-ark";
+import { fetchDeepSeekSnapshot } from "../../worker/providers/deepseek";
 
 describe("provider registry", () => {
   it("exposes the cloud adapters", () => {
@@ -16,15 +17,18 @@ describe("provider registry", () => {
       "xfyun-maas",
       "aliyun-bailian",
       "volc-ark",
+      "deepseek",
     ]);
     expect(getProvider("openrouter")?.name).toBe("OpenRouter");
     expect(getProvider("opencode-go")?.name).toBe("OpenCode Go");
     expect(getProvider("xfyun-maas")?.name).toBe("讯飞 MaaS");
     expect(getProvider("aliyun-bailian")?.name).toBe("阿里云百炼");
     expect(getProvider("volc-ark")?.name).toBe("火山方舟");
+    expect(getProvider("deepseek")?.name).toBe("DeepSeek");
     expect(isProviderId("openrouter")).toBe(true);
     expect(isProviderId("aliyun-bailian")).toBe(true);
     expect(isProviderId("volc-ark")).toBe(true);
+    expect(isProviderId("deepseek")).toBe(true);
     expect(isProviderId("unknown")).toBe(false);
   });
 });
@@ -845,3 +849,172 @@ describe("volc-ark adapter", () => {
   });
 });
 
+describe("deepseek adapter", () => {
+  it("returns login_required when API key and token are missing", async () => {
+    const result = await fetchDeepSeekSnapshot({
+      now: new Date("2026-08-13T00:00:00.000Z"),
+      config: {},
+    });
+
+    expect(result.snapshot.status).toBe("login_required");
+    expect(result.snapshot.summary).toContain("DeepSeek");
+    expect(result.snapshot.meta).toMatchObject({ entryUrl: "https://platform.deepseek.com/usage" });
+  });
+
+  it("parses platform usage into a ready snapshot", async () => {
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const s = String(url);
+      if (s.includes("get_user_summary")) {
+        return new Response(
+          JSON.stringify({
+            code: 0,
+            data: {
+              biz_code: 0,
+              biz_data: {
+                normal_wallets: [{ currency: "CNY", balance: "48.8835618400000000" }],
+                bonus_wallets: [{ currency: "CNY", balance: "0" }],
+                total_costs: [{ currency: "CNY", amount: "1.1164381600000000" }],
+              },
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (s.includes("by_api_key/amount")) {
+        return new Response(
+          JSON.stringify({
+            code: 0,
+            data: {
+              biz_code: 0,
+              biz_data: {
+                series: [
+                  {
+                    model: "deepseek-v4-pro",
+                    buckets: [
+                      { time: 1786550400, usage: { RESPONSE_TOKEN: 41541, REQUEST: 15, PROMPT_CACHE_HIT_TOKEN: 3344384, PROMPT_CACHE_MISS_TOKEN: 240948 } },
+                    ],
+                  },
+                  {
+                    model: "deepseek-v4-flash",
+                    buckets: [
+                      { time: 1786550400, usage: { RESPONSE_TOKEN: 446, REQUEST: 3, PROMPT_CACHE_HIT_TOKEN: 99328, PROMPT_CACHE_MISS_TOKEN: 57860 } },
+                    ],
+                  },
+                ],
+              },
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (s.includes("by_api_key/cost")) {
+        return new Response(
+          JSON.stringify({
+            code: 0,
+            data: {
+              biz_code: 0,
+              biz_data: {
+                data: [
+                  {
+                    currency: "CNY",
+                    series: [
+                      { model: "deepseek-v4-pro", buckets: [{ time: 1786550400, cost: "1.0556996000000000" }] },
+                      { model: "deepseek-v4-flash", buckets: [{ time: 1786550400, cost: "0.0607385600000000" }] },
+                    ],
+                  },
+                ],
+              },
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      throw new Error(`unexpected fetch ${s}`);
+    });
+
+    const result = await fetchDeepSeekSnapshot({
+      now: new Date("2026-08-13T02:00:00.000Z"),
+      fetchImpl: fetchImpl as typeof fetch,
+      config: { userToken: "platform-token", authCookie: "HWWAFSESID=abc; smidV2=def" },
+    });
+
+    expect(result.snapshot.status).toBe("ready");
+    expect(result.snapshot.windows.map((w) => w.key)).toEqual([
+      "balance",
+      "cost30d",
+      "tokens30d",
+      "requests30d",
+    ]);
+    expect(result.snapshot.metrics).toMatchObject({
+      balance: 48.88356184,
+      totalCost: 1.11643816,
+      cost30d: 1.11643816,
+      requests30d: 18,
+      tokens30d: 3784507,
+      promptCacheHitTokens30d: 3443712,
+      promptCacheMissTokens30d: 298808,
+      outputTokens30d: 41987,
+    });
+    expect(result.snapshot.meta.fetchMethod).toBe("platform_usage");
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  it("falls back to the official balance API when only apiKey is configured", async () => {
+    const fetchImpl = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          is_available: true,
+          balance_infos: [{ currency: "CNY", total_balance: "49.01", granted_balance: "0.00", topped_up_balance: "49.01" }],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+
+    const result = await fetchDeepSeekSnapshot({
+      now: new Date("2026-08-13T02:00:00.000Z"),
+      fetchImpl: fetchImpl as typeof fetch,
+      config: { apiKey: "sk-test" },
+    });
+
+    expect(result.snapshot.status).toBe("ready");
+    expect(result.snapshot.meta.fetchMethod).toBe("balance_api");
+    expect(result.snapshot.windows.map((w) => w.key)).toEqual(["balance"]);
+    expect(result.snapshot.metrics).toMatchObject({ balance: 49.01, currency: "CNY" });
+  });
+
+  it("returns partial when platform usage fails and no apiKey is configured", async () => {
+    const fetchImpl = vi.fn(async () => new Response("{}", { status: 500 }));
+
+    const result = await fetchDeepSeekSnapshot({
+      now: new Date("2026-08-13T02:00:00.000Z"),
+      fetchImpl: fetchImpl as typeof fetch,
+      config: { userToken: "platform-token", authCookie: "HWWAFSESID=abc" },
+    });
+
+    expect(result.snapshot.status).toBe("partial");
+    expect(result.snapshot.summary).toContain("DeepSeek");
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  it("always requests the trusted platform origin regardless of pageUrl", async () => {
+    const fetchedUrls: string[] = [];
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      fetchedUrls.push(String(url));
+      return new Response("{}", { status: 500 });
+    });
+
+    const result = await fetchDeepSeekSnapshot({
+      now: new Date("2026-08-13T02:00:00.000Z"),
+      fetchImpl: fetchImpl as typeof fetch,
+      config: {
+        userToken: "platform-token",
+        authCookie: "HWWAFSESID=abc",
+        pageUrl: "https://evil.example.com/usage",
+      },
+    });
+
+    expect(fetchedUrls.length).toBe(3);
+    expect(fetchedUrls.every((url) => url.includes("platform.deepseek.com"))).toBe(true);
+    expect(result.snapshot.status).toBe("partial");
+  });
+});

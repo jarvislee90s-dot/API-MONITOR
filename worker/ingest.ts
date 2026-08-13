@@ -8,6 +8,11 @@ type IngestBody = {
   snapshot?: Partial<ProviderSnapshot>;
 };
 
+type IngestDefaults = {
+  providerName: string;
+  summary: string;
+};
+
 function timingSafeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
   let diff = 0;
@@ -17,7 +22,12 @@ function timingSafeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
-export async function handleIngestOpenCodeGo(request: Request, env: WorkerEnv): Promise<Response> {
+async function handleProviderIngest(
+  request: Request,
+  env: WorkerEnv,
+  providerId: ProviderId,
+  defaults: IngestDefaults,
+): Promise<Response> {
   const expectedKey = env.INGEST_API_KEY;
   if (!expectedKey) {
     return errorResponse(503, "ingest_disabled", "Ingest endpoint is not configured");
@@ -38,8 +48,8 @@ export async function handleIngestOpenCodeGo(request: Request, env: WorkerEnv): 
   if (!snapshot || typeof snapshot !== "object") {
     return errorResponse(400, "invalid_request", "Missing snapshot in body");
   }
-  if (snapshot.providerId !== "opencode-go") {
-    return errorResponse(400, "invalid_provider", "Ingest only accepts opencode-go snapshots");
+  if (snapshot.providerId !== providerId) {
+    return errorResponse(400, "invalid_provider", `Ingest only accepts ${providerId} snapshots`);
   }
   if (!snapshot.status || !VALID_STATUSES.includes(snapshot.status)) {
     return errorResponse(400, "invalid_request", "Invalid snapshot status");
@@ -52,12 +62,12 @@ export async function handleIngestOpenCodeGo(request: Request, env: WorkerEnv): 
   }
 
   const normalized: ProviderSnapshot = {
-    providerId: "opencode-go" as ProviderId,
-    providerName: snapshot.providerName ?? "OpenCode Go",
+    providerId,
+    providerName: snapshot.providerName ?? defaults.providerName,
     sourceUrl: snapshot.sourceUrl ?? "",
     status: snapshot.status,
     capturedAt: snapshot.capturedAt,
-    summary: snapshot.summary ?? "OpenCode Go usage windows parsed",
+    summary: snapshot.summary ?? defaults.summary,
     windows: snapshot.windows,
     metrics: snapshot.metrics ?? {},
     meta: { ...(snapshot.meta ?? {}), fetchMethod: "local_ingest" },
@@ -67,4 +77,18 @@ export async function handleIngestOpenCodeGo(request: Request, env: WorkerEnv): 
   await persistSnapshot(env, userId, normalized, null);
 
   return successResponse({ capturedAt: normalized.capturedAt, providerId: normalized.providerId });
+}
+
+export async function handleIngestOpenCodeGo(request: Request, env: WorkerEnv): Promise<Response> {
+  return handleProviderIngest(request, env, "opencode-go", {
+    providerName: "OpenCode Go",
+    summary: "OpenCode Go usage windows parsed",
+  });
+}
+
+export async function handleIngestDeepSeek(request: Request, env: WorkerEnv): Promise<Response> {
+  return handleProviderIngest(request, env, "deepseek", {
+    providerName: "DeepSeek",
+    summary: "DeepSeek usage windows parsed",
+  });
 }
