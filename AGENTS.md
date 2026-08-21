@@ -53,6 +53,9 @@
 - 不把真实密钥写入源码、文档、测试快照或日志。
 - 不修改系统配置。
 - 不在项目目录外写文件。
+- 禁止把浏览器 Profile、`userdata`、cookie/会话缓存等临时敏感目录纳入 git 跟踪或对象库；抓取/刷新脚本生成的临时 Profile 用完即删。
+- 只推送 `refs/heads` 下的分支（`git push origin <分支>`），禁止 `git push --mirror`、`--all` 或显式推送 `refs/codex/*` 本地检查点引用。
+- 每次涉及登录态、cookie、token 的会话结束后，检查 `git status`、`git ls-files` 和 `git fsck`，确认没有敏感对象混入 git 对象库。
 
 ## 文件操作规则
 
