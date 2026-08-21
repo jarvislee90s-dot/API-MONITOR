@@ -4,7 +4,8 @@ export type ProviderId =
   | "xfyun-maas"
   | "aliyun-bailian"
   | "volc-ark"
-  | "deepseek";
+  | "deepseek"
+  | "zhipu";
 
 export type ProviderStatus = "ready" | "partial" | "login_required" | "disabled" | "error";
 
@@ -205,6 +206,10 @@ export interface WorkerEnv extends RefreshSessionEnv {
   DEEPSEEK_PAGE_URL?: string;
   DEEPSEEK_USER_TOKEN?: string;
   DEEPSEEK_AUTH_COOKIE?: string;
+  ZHIPU_PAGE_URL?: string;
+  ZHIPU_API_BASE?: string;
+  ZHIPU_AUTH_COOKIE?: string;
+  ZHIPU_AUTH_TOKEN?: string;
   REFRESH_SESSION: DurableObjectNamespaceLike;
 }
 

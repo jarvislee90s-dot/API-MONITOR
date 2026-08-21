@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-const styles = readFileSync(resolve(process.cwd(), "frontend-v3/src/styles.css"), "utf8");
+const styles = readFileSync(resolve(process.cwd(), "frontend/src/styles.css"), "utf8");
 
 function blockFor(selector: string): string {
   const match = styles.match(new RegExp(`${selector.replace(".", "\\.")}\\s*\\{([^}]*)\\}`));

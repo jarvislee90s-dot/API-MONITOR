@@ -105,20 +105,31 @@ export function PlatformCard({ platform }: PlatformCardProps) {
         </div>
       ) : null}
 
-      <section className="platform-card__metrics">
-        <div className="metric-box">
-          <span className="section-label">{display.primaryMetricLabel}</span>
-          <strong>{display.primaryMetricValue}</strong>
-        </div>
-        <div className="metric-box">
-          <span className="section-label">登录状态</span>
-          <strong>{display.loginState}</strong>
-        </div>
-        <div className="metric-box">
-          <span className="section-label">最近同步</span>
-          <strong>{formatTimestamp(display.lastRefreshedAt)}</strong>
-        </div>
-      </section>
+      {(display.detailMetrics?.length ?? 0) > 0 ? (
+        <section className="platform-card__metrics platform-card__metrics--grid">
+          {display.detailMetrics.map((metric) => (
+            <div className="metric-box" key={metric.label}>
+              <span className="section-label">{metric.label}</span>
+              <strong>{metric.value}</strong>
+            </div>
+          ))}
+        </section>
+      ) : (
+        <section className="platform-card__metrics">
+          <div className="metric-box">
+            <span className="section-label">{display.primaryMetricLabel}</span>
+            <strong>{display.primaryMetricValue}</strong>
+          </div>
+          <div className="metric-box">
+            <span className="section-label">登录状态</span>
+            <strong>{display.loginState}</strong>
+          </div>
+          <div className="metric-box">
+            <span className="section-label">最近同步</span>
+            <strong>{formatTimestamp(display.lastRefreshedAt)}</strong>
+          </div>
+        </section>
+      )}
 
       <div className="platform-card__grid">
         <QuotaWindowList windows={display.quotaWindows} />

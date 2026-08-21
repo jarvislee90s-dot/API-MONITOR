@@ -27,12 +27,14 @@ function mediaBlockFor(query: string): string {
 
 describe("frontend responsive dashboard styles", () => {
   it("keeps provider cards responsive from desktop to mobile", () => {
-    expect(blockFor(".dashboard-grid")).toContain("grid-template-columns: repeat(3, minmax(0, 1fr))");
-    expect(mediaBlockFor("max-width: 1100px")).toContain(
-      ".dashboard-grid {\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n  }",
+    expect(blockFor(".dashboard-grid")).toContain(
+      "grid-template-columns: repeat(auto-fit, minmax(min(100%, 620px), 1fr))",
+    );
+    expect(mediaBlockFor("max-width: 1320px")).toContain(
+      ".dashboard-grid { grid-template-columns: 1fr; }",
     );
     expect(mediaBlockFor("max-width: 720px")).toContain(
-      ".dashboard-grid {\n    grid-template-columns: 1fr;\n  }",
+      ".dashboard-grid { grid-template-columns: 1fr; }",
     );
   });
 });

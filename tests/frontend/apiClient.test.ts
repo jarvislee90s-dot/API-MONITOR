@@ -64,6 +64,84 @@ describe("api client mapping", () => {
     ]);
   });
 
+  it("maps zhipu cards with accent, tagline, and primary metric label", async () => {
+    const fetcher = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          data: {
+            kind: "usage_dashboard",
+            generatedAt: "2026-08-21T04:00:00.000Z",
+            status: "ready",
+            summary: "ready",
+            totals: {
+              providers: 1,
+              ready: 1,
+              partial: 0,
+              loginRequired: 0,
+              error: 0,
+            },
+            cards: [
+              {
+                providerId: "zhipu",
+                providerName: "智谱 BigModel",
+                sourceUrl: "https://bigmodel.cn/coding-plan/personal/usage",
+                status: "ready",
+                summary: "智谱 Coding Plan 用量已解析",
+                capturedAt: "2026-08-21T04:00:00.000Z",
+                trend: [],
+                windows: [
+                  {
+                    key: "rp5h",
+                    label: "5小时",
+                    used: 2024,
+                    limit: 12000,
+                    resetAt: "2026-08-21T07:39:20.000Z",
+                  },
+                  { key: "weekly", label: "每周", used: 2024, limit: 60000 },
+                ],
+                metrics: {
+                  quotaLevel: "pro",
+                  cacheHitRate7d: 0.9552,
+                  totalCredits7d: 4427.2874,
+                  totalTokens7d: 44865163,
+                  cacheHitRate30d: 0.92,
+                  totalCredits30d: 6536.3966,
+                  totalTokens30d: 90000000,
+                },
+                meta: {},
+              },
+            ],
+            modelSpends: [],
+          },
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      );
+    });
+
+    const dashboard = await createApiClient({ fetcher: fetcher as typeof fetch }).getUsageDashboard();
+    const platform = dashboard.platforms[0]!;
+
+    expect(platform.name).toBe("智谱 BigModel");
+    expect(platform.accent).toBe("#0ea5e9");
+    expect(platform.tagline).toBe("Coding Plan 用量 / 5小时周配额");
+    expect(platform.quotaWindows.map((w) => w.label)).toEqual(["5小时", "每周"]);
+    expect(platform.detailMetrics).toEqual([
+      { label: "5小时", value: "2,024 / 1.2万" },
+      { label: "登录状态", value: "已连接" },
+      { label: "最近同步", value: "8月21日 12:00" },
+      { label: "7天 Cache 命中率", value: "95.5%" },
+      { label: "7天积分消耗", value: "4,427.29" },
+      { label: "7天 Tokens", value: "0.45亿" },
+      { label: "30天 Cache 命中率", value: "92%" },
+      { label: "30天积分总数", value: "6,536.4" },
+      { label: "30天 Tokens", value: "0.90亿" },
+    ]);
+  });
+
   it("loads public auth config from the worker", async () => {
     const fetcher = vi.fn(async () =>
       new Response(

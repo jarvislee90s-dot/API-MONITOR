@@ -36,6 +36,10 @@ function createDirectEnv(): WorkerEnv {
     DEEPSEEK_PAGE_URL: readEnv("DEEPSEEK_PAGE_URL"),
     DEEPSEEK_USER_TOKEN: readEnv("DEEPSEEK_USER_TOKEN"),
     DEEPSEEK_AUTH_COOKIE: readEnv("DEEPSEEK_AUTH_COOKIE"),
+    ZHIPU_PAGE_URL: readEnv("ZHIPU_PAGE_URL"),
+    ZHIPU_API_BASE: readEnv("ZHIPU_API_BASE"),
+    ZHIPU_AUTH_COOKIE: readEnv("ZHIPU_AUTH_COOKIE"),
+    ZHIPU_AUTH_TOKEN: readEnv("ZHIPU_AUTH_TOKEN"),
   };
 }
 
@@ -46,6 +50,7 @@ const requiredEnvByProvider: Record<ProviderId, string[]> = {
   "xfyun-maas": ["XFYUN_MAAS_API_URL", "XFYUN_MAAS_AUTH_COOKIE"],
   "aliyun-bailian": ["ALIYUN_BAILIAN_API_URL", "ALIYUN_BAILIAN_AUTH_COOKIE"],
   "volc-ark": ["VOLC_ARK_AUTH_COOKIE"],
+  "zhipu": ["ZHIPU_AUTH_COOKIE"],
 };
 
 describe.skipIf(process.env.RUN_REAL_E2E !== "1")("real provider snapshot e2e", () => {

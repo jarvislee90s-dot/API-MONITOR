@@ -37,4 +37,10 @@ export const PUBLIC_PROVIDER_CATALOG: ProviderCatalogItem[] = [
     sourceUrl: "https://platform.deepseek.com/usage",
     description: "API 余额 / 近30天用量（请求数 / Tokens / 消费）",
   },
+  {
+    providerKey: "zhipu",
+    providerName: "智谱 BigModel",
+    sourceUrl: "https://bigmodel.cn/coding-plan/personal/usage",
+    description: "Coding Plan 用量 / 5小时周配额 / Cache 命中率 / 积分",
+  },
 ];

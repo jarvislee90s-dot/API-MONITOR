@@ -1,4 +1,4 @@
-﻿/* ===== ApiMonitor 玻璃极光深色主题 ===== */
+/* ===== ApiMonitor 玻璃极光深色主题 ===== */
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 :root {
@@ -194,6 +194,9 @@ button { border: 0; }
 .platform-card__status { display: grid; gap: 6px; justify-items: end; }
 .platform-card__updated { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; }
 .platform-card__metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+/* 智谱 3×3 九宫格指标：格子更紧凑 */
+.platform-card__metrics--grid { gap: 8px; }
+.platform-card__metrics--grid .metric-box { padding: 8px 10px; }
 .metric-box { display: grid; gap: 4px; padding: 10px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface-soft); }
 .metric-box strong { font-family: "JetBrains Mono", monospace; font-size: 16px; font-weight: 600; }
 .platform-card__grid { display: grid; grid-template-columns: 1fr 1.4fr; gap: 12px; min-height: 0; }

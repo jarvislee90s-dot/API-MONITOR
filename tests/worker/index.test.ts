@@ -217,6 +217,7 @@ describe("worker api", () => {
       "aliyun-bailian",
       "volc-ark",
       "deepseek",
+      "zhipu",
     ]);
   });
 
@@ -325,13 +326,13 @@ describe("worker api", () => {
       expect(response.status).toBe(200);
       expect(payload.ok).toBe(true);
       expect(payload.data.kind).toBe("usage_dashboard");
-      expect(payload.data.cards).toHaveLength(6);
+      expect(payload.data.cards).toHaveLength(7);
       expect(payload.data.modelSpends).toEqual([]);
       expect(payload.data.totals).toMatchObject({
-        providers: 6,
+        providers: 7,
         ready: 3,
         partial: 1,
-        loginRequired: 2,
+        loginRequired: 3,
         error: 0,
       });
       expect(payload.data.cards[0]).toMatchObject({
@@ -680,7 +681,7 @@ describe("worker api", () => {
         sessionKey: "dashboard",
         refreshed: true,
       });
-      expect(payload.data.cards).toHaveLength(6);
+      expect(payload.data.cards).toHaveLength(7);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -1787,6 +1788,96 @@ describe("worker api", () => {
       const request = bailianCall as unknown as [RequestInfo | URL, RequestInit];
       const body = request[1].body?.toString() ?? "";
       expect(new URLSearchParams(body).get("sec_token")).toBe("sec-test");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("maps ZHIPU env config into the provider fetch with authorization headers", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+
+      if (url.includes("bigmodel.cn/api/monitor/usage/quota/limit")) {
+        return new Response(
+          JSON.stringify({
+            code: 200,
+            data: {
+              level: "pro",
+              limits: [
+                { type: "CREDIT_LIMIT", usage: 12000, currentValue: 2024, percentage: 16, nextResetTime: "2026-08-21 15:39:20" },
+              ],
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.includes("bigmodel.cn/api/monitor/credit-usage/usage-detail")) {
+        return new Response(
+          JSON.stringify({
+            code: 200,
+            data: {
+              summary: { cacheHitRate: { value: "0.9552" } },
+              modelUsage: { totalUsage: { totalTokens: 44865163, totalCredits: "4427.2874" } },
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.startsWith("https://supabase.test/rest/v1/provider_preferences")) {
+        return new Response(JSON.stringify([]), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (url.startsWith("https://supabase.test/rest/v1/refresh_events")) {
+        return new Response("", { status: 201 });
+      }
+      if (url.startsWith("https://supabase.test/rest/v1/usage_snapshots")) {
+        return new Response("", { status: 201 });
+      }
+      if (url.startsWith("https://supabase.test/rest/v1/provider_accounts")) {
+        return new Response("", { status: 201 });
+      }
+      if (url.startsWith("https://supabase.test/rest/v1/quota_windows")) {
+        return new Response("", { status: 201 });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    vi.stubGlobal("fetch", fetchImpl as unknown as typeof fetch);
+    try {
+      const env = {
+        ...createEnv(fetchImpl as typeof fetch),
+        SUPABASE_URL: "https://supabase.test",
+        SUPABASE_SERVICE_ROLE_KEY: "service-role-test",
+        SUPABASE_USER_ID: "00000000-0000-0000-0000-000000000001",
+        CREDENTIAL_ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef",
+        ZHIPU_AUTH_COOKIE: "bigmodel_token_production=env-token; acw_tc=waf",
+        ZHIPU_AUTH_TOKEN: "env-token",
+      };
+
+      const response = await handleApiRequest(
+        new Request("https://api.monitor.local/api/refresh", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ providerId: "zhipu", sessionKey: "zhipu:env-test" }),
+        }),
+        env,
+      );
+      const payload = (await response.json()) as any;
+
+      expect(response.status).toBe(200);
+      expect(payload.ok).toBe(true);
+      expect(payload.data.refreshed).toBe(true);
+      expect(payload.data.snapshot.snapshot.status).toBe("ready");
+      expect(payload.data.snapshot.snapshot.providerId).toBe("zhipu");
+
+      // 校验请求发往 bigmodel.cn 且携带 Authorization + Cookie
+      const bigmodelCalls = fetchImpl.mock.calls.filter((call) => String(call[0]).includes("bigmodel.cn"));
+      expect(bigmodelCalls.length).toBeGreaterThanOrEqual(2);
+      const quotaCall = bigmodelCalls.find((call) => String(call[0]).includes("/monitor/usage/quota/limit"));
+      expect(quotaCall).toBeDefined();
+      const init = (quotaCall as unknown as [RequestInfo | URL, RequestInit])[1];
+      const headers = new Headers(init?.headers);
+      expect(headers.get("authorization")).toBe("env-token");
+      expect(headers.get("cookie")).toContain("bigmodel_token_production=env-token");
     } finally {
       vi.unstubAllGlobals();
     }

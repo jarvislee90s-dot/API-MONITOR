@@ -1,8 +1,8 @@
-﻿# ApiMonitor
+# ApiMonitor
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-API 与 Coding Plan 用量聚合看板。它把 OpenRouter、OpenCode Go、讯飞 MaaS Coding Plan、阿里云百炼 Coding Plan、火山方舟 Coding Plan 的用量状态聚合到一个响应式网页里，并用 Supabase 保存刷新快照和云端配置。
+API 与 Coding Plan 用量聚合看板。它把 OpenRouter、OpenCode Go、讯飞 MaaS Coding Plan、阿里云百炼 Coding Plan、火山方舟 Coding Plan、智谱 BigModel Coding Plan 的用量状态聚合到一个响应式网页里，并用 Supabase 保存刷新快照和云端配置。
 
 线上示例：
 
@@ -16,7 +16,7 @@ https://apimonitor.bondtoolbox.asia
 
 ## 功能亮点
 
-- 统一展示 OpenRouter、OpenCode Go、讯飞 MaaS、阿里云百炼、火山方舟五个平台状态。
+- 统一展示 OpenRouter、OpenCode Go、讯飞 MaaS、阿里云百炼、火山方舟、智谱 BigModel 六个平台状态。
 - 支持 5 小时、每周、套餐总量等不同 quota window。
 - 独立配置页支持"供应商 → 多账号 → 账号配置"的单页多层工作台。
 - 首页保持一个供应商一个大卡片；多账号通过卡片内账号子卡片切换显示。
@@ -40,6 +40,7 @@ https://apimonitor.bondtoolbox.asia
 | 讯飞 MaaS | 已接入 `coding-plan/list` 用量接口 |
 | 阿里云百炼 | 已接入原网页入口；云端抓取保留为实验选项 |
 | 火山方舟 | 已接入 `GetCodingPlanUsage` 用量接口（5小时/周/月百分比） |
+| 智谱 BigModel | 已接入 `monitor/usage/quota/limit` + `credit-usage/usage-detail` 用量接口（5小时/周配额、Cache 命中率、积分） |
 | 配置页 | 已接入 `#/settings` |
 
 ## 架构
@@ -111,18 +112,29 @@ flowchart TB
 | 供应商 | 数据来源 | 点同步 | 刷新方式 |
 | --- | --- | --- | --- |
 | 讯飞 MaaS / OpenRouter | Worker 云端直抓 | ✅ 实时刷新 | 前端点同步 |
-| OpenCode Go | 本地脚本抓取 + 推送 | ❌ 无效（云端 IP 被封） | 手动跑 efresh-opencode-usage.ts |
+| OpenCode Go | 本地脚本抓取 + 推送 | ❌ 无效（云端 IP 被封） | 手动跑 `refresh-opencode-usage.ts` |
+| 智谱 BigModel | Worker 云端直抓（持久化 cookie/token） | ✅ 实时刷新 | 本地脚本刷新 cookie 后点同步 |
 
 ### 注意事项
 
-- **点同步刷不了 OpenCode Go 是架构限制，不是 bug**：opencode.ai 屏蔽数据中心 IP，Worker 云端抓取必然被 302 到登录页；看板展示时 pplyFallback 会回退到最近一次成功的 eady 快照（即本地脚本上次推送的），所以无论点多少次同步，数据都不会变新。
-- **自定义域名只解决网络封锁，不解决 IP 封锁**：*.workers.dev 在国内受 DNS 污染 + SNI 阻断，绑定 pimonitor.bondtoolbox.asia 后前端看板与本地脚本推送均可国内直连；但 Worker 出口 IP 仍是数据中心 IP，opencode 照样封，点同步仍无效。
+- **点同步刷不了 OpenCode Go 是架构限制，不是 bug**：opencode.ai 屏蔽数据中心 IP，Worker 云端抓取必然被 302 到登录页；看板展示时 `applyFallback` 会回退到最近一次成功的 `ready` 快照（即本地脚本上次推送的），所以无论点多少次同步，数据都不会变新。
+- **自定义域名只解决网络封锁，不解决 IP 封锁**：*.workers.dev 在国内受 DNS 污染 + SNI 阻断，绑定 `apimonitor.bondtoolbox.asia` 后前端看板与本地脚本推送均可国内直连；但 Worker 出口 IP 仍是数据中心 IP，opencode 照样封，点同步仍无效。
 - **本地脚本依赖浏览器登录态**：需先在 Edge 的 Default 和 Profile 1 中分别登录两个 opencode.ai 账号，运行前关闭所有 Edge 窗口（含后台进程）避免 Profile 锁定。
-- **cookie 过期后需重新登录浏览器**：脚本从浏览器 Profile 提取 uth cookie，cookie 过期则抓取会被重定向到登录页。
+- **cookie 过期后需重新登录浏览器**：脚本从浏览器 Profile 提取 `auth cookie`，cookie 过期则抓取会被重定向到登录页。
 
 ### 刷新 Cookie 与用量（本地脚本）
 
-部分供应商的登录态 cookie 会过期，或其用量页屏蔽数据中心 IP，需要本地脚本辅助刷新。三个脚本均复用本地浏览器 Profile 提取登录态，运行前需关闭对应浏览器（含后台进程）避免 Profile 锁定；`.env` 中需配置 `CLOUDFLARE_API_TOKEN`。
+部分供应商的登录态 cookie 会过期，或其用量页屏蔽数据中心 IP，需要本地脚本辅助刷新。火山/OpenCode 脚本复用本地浏览器 Profile 提取登录态，运行前需关闭对应浏览器（含后台进程）避免 Profile 锁定；DeepSeek/智谱脚本用账号密码在临时浏览器登录。`.env` 中需配置 `CLOUDFLARE_API_TOKEN`。
+
+#### 智谱 BigModel Cookie 刷新
+
+智谱登录态 token 约 7 天过期，过期后看板会显示 `login_required`。用账号密码登录并刷新 cookie：
+
+```powershell
+node --experimental-strip-types scripts/refresh-zhipu-cookie.ts
+```
+
+脚本读取 `.env` 中的 `Zai_account` / `Zai_password` 打开可见浏览器登录 `open.bigmodel.cn`，提取 `bigmodel_token_production` 与 `acw_tc` / `ssxmod_itna` 等 WAF cookie，调 `/monitor/usage/quota/limit` 验证后，写入 Supabase（provider_key=`zhipu`、label=`默认账号`，AES-GCM 加密 `{authCookie, authToken}`），并同步更新本地 `.env` 的 `ZHIPU_AUTH_COOKIE` / `ZHIPU_AUTH_TOKEN` 与 Cloudflare Worker 的 `ZHIPU_AUTH_COOKIE` secret。若遇腾讯点选验证码（点击图中文字，非滑块），脚本会提示并在浏览器中等待人工完成（最长 180 秒），不自动绕过。
 
 #### 火山方舟 Cookie 刷新
 
@@ -273,6 +285,11 @@ not_found_handling = "single-page-application"
 | `VOLC_ARK_PAGE_URL` | 火山方舟 Coding Plan 订阅页入口 |
 | `VOLC_ARK_API_URL` | 可选，留空则用默认 `GetCodingPlanUsage` 端点 |
 | `VOLC_ARK_AUTH_COOKIE` | 火山方舟登录态 cookie（csrfToken / digest / AccountID / userInfo） |
+| `ZHIPU_PAGE_URL` | 智谱 Coding Plan 用量页入口 |
+| `ZHIPU_API_BASE` | 智谱用量接口前缀（默认 `https://bigmodel.cn/api`） |
+| `ZHIPU_AUTH_COOKIE` | 智谱登录态 cookie（`bigmodel_token_production` + `acw_tc` 等 WAF cookie） |
+| `ZHIPU_AUTH_TOKEN` | 智谱登录 token（即 `bigmodel_token_production` 的值） |
+| `Zai_account` / `Zai_password` | 智谱登录脚本专用账号密码（不写入 Worker） |
 | `CLOUDFLARE_API_TOKEN` | 本地 Wrangler 部署使用 |
 | `INGEST_API_KEY` | 本地脚本推送 opencode 快照的共享密钥（Worker 端需配置同名 secret） |
 | `APIMONITOR_INGEST_URL` | 本地脚本推送目标（Worker 线上地址，已配置为自定义域名） |

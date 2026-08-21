@@ -92,3 +92,10 @@ export async function handleIngestDeepSeek(request: Request, env: WorkerEnv): Pr
     summary: "DeepSeek usage windows parsed",
   });
 }
+
+export async function handleIngestZhipu(request: Request, env: WorkerEnv): Promise<Response> {
+  return handleProviderIngest(request, env, "zhipu", {
+    providerName: "智谱 BigModel",
+    summary: "智谱 Coding Plan 用量已解析",
+  });
+}

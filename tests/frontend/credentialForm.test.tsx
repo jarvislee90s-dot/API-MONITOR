@@ -50,4 +50,35 @@ describe("CredentialForm", () => {
     const savedAccount = onSave.mock.calls.at(0)?.at(0);
     expect(JSON.stringify(savedAccount)).not.toContain("sk-hidden");
   });
+
+  it("shows authCookie and authToken fields for the zhipu provider", async () => {
+    const onSave = vi.fn(async () => undefined);
+    render(
+      <CredentialForm
+        provider={{
+          providerKey: "zhipu",
+          providerName: "智谱 BigModel",
+          sourceUrl: "https://bigmodel.cn/coding-plan/personal/usage",
+          description: "Coding Plan 用量 / 5小时周配额",
+        }}
+        onSave={onSave}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("authCookie"), { target: { value: "bigmodel_token_production=abc" } });
+    fireEvent.change(screen.getByLabelText("登录 Token"), { target: { value: "token-abc" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存账号" }));
+
+    await waitFor(() =>
+      expect(onSave).toHaveBeenCalledWith(
+        expect.objectContaining({
+          providerKey: "zhipu",
+          credentials: {
+            authCookie: "bigmodel_token_production=abc",
+            authToken: "token-abc",
+          },
+        }),
+      ),
+    );
+  });
 });

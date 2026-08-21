@@ -56,6 +56,7 @@ describe("SettingsPage", () => {
           lastRefreshedAt: "2026-06-13T00:00:00.000Z",
           accent: "#b45309",
           quotaWindows: [],
+          detailMetrics: [],
           trend: [],
           modelSpends: [],
           links: [],

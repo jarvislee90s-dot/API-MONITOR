@@ -6,7 +6,7 @@ import { RefreshSessionDurableObject } from "./durable-object/refresh-session";
 import { handleSettingsRequest } from "./settings/routes";
 import { getActiveProviderAccountConfig, getProviderAccountConfigById, listProviderSettings } from "./settings/repository";
 import { requireUser } from "./auth";
-import { handleIngestDeepSeek, handleIngestOpenCodeGo } from "./ingest";
+import { handleIngestDeepSeek, handleIngestOpenCodeGo, handleIngestZhipu } from "./ingest";
 import type {
   ProviderFetchInput,
   ProviderDefinition,
@@ -81,6 +81,15 @@ function buildProviderConfig(env: WorkerEnv, providerId: string): Record<string,
       apiKey: env.DEEPSEEK_API_KEY,
       userToken: env.DEEPSEEK_USER_TOKEN,
       authCookie: env.DEEPSEEK_AUTH_COOKIE,
+    };
+  }
+
+  if (providerId === "zhipu") {
+    return {
+      pageUrl: env.ZHIPU_PAGE_URL,
+      apiBase: env.ZHIPU_API_BASE,
+      authCookie: env.ZHIPU_AUTH_COOKIE,
+      authToken: env.ZHIPU_AUTH_TOKEN,
     };
   }
 
@@ -791,6 +800,9 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
   }
   if (request.method === "POST" && url.pathname === "/api/ingest/deepseek") {
     return handleIngestDeepSeek(request, env);
+  }
+  if (request.method === "POST" && url.pathname === "/api/ingest/zhipu") {
+    return handleIngestZhipu(request, env);
   }
 
   if (request.method === "POST" && url.pathname === "/api/refresh") {

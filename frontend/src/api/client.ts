@@ -31,9 +31,15 @@ export interface QuotaWindow {
   scope: string;
   used: number;
   limit: number;
+  percentUsed?: number | null;
   resetAt: string;
   status: PlatformStatus;
 }
+
+export type DetailMetric = {
+  label: string;
+  value: string;
+};
 
 export interface TrendPoint {
   label: string;
@@ -63,6 +69,7 @@ export interface PlatformSnapshot {
   lastRefreshedAt: string;
   accent: string;
   quotaWindows: QuotaWindow[];
+  detailMetrics: DetailMetric[];
   trend: TrendPoint[];
   modelSpends: ModelSpendRow[];
   links: RawLinkItem[];
@@ -344,6 +351,7 @@ function resolveAccent(providerId: string): string {
   if (providerId === "aliyun-bailian") return "#7c3aed";
   if (providerId === "volc-ark") return "#dc2626";
   if (providerId === "deepseek") return "#0369a1";
+  if (providerId === "zhipu") return "#0ea5e9";
   return "#b45309";
 }
 
@@ -353,6 +361,7 @@ function resolveTagline(providerId: string): string {
   if (providerId === "aliyun-bailian") return "Coding Plan / 百炼控制台";
   if (providerId === "volc-ark") return "Coding Plan 用量 / 5小时周月";
   if (providerId === "deepseek") return "API 余额 / 近30天用量";
+  if (providerId === "zhipu") return "Coding Plan 用量 / 5小时周配额";
   return "Activity 聚合 / 花费拆分";
 }
 
@@ -362,6 +371,7 @@ function resolvePrimaryMetricLabel(providerId: string, windows: ServerProviderWi
   if (providerId === "openrouter") return "本周期花费";
   if (providerId === "aliyun-bailian") return "当前套餐";
   if (providerId === "deepseek") return "充值余额";
+  if (providerId === "zhipu") return "5小时配额";
   return windows[0]?.label ?? "当前状态";
 }
 
@@ -398,9 +408,78 @@ function toQuotaWindow(status: PlatformStatus, window: ServerProviderWindow): Qu
     scope: window.label,
     used: window.used ?? 0,
     limit: window.limit ?? 0,
+    percentUsed: window.percentUsed ?? null,
     resetAt: formatResetAt(window.resetAt),
     status,
   };
+}
+
+// 数值转"万"单位（>=1 万时），如 12000 -> 1.2万
+function formatWan(value: number): string {
+  if (value >= 10000) {
+    return `${(value / 10000).toFixed(1)}万`;
+  }
+  return new Intl.NumberFormat("zh-CN").format(value);
+}
+
+// 30 天 Token 数转"亿"（两位小数）
+function formatYi(value: number): string {
+  return `${(value / 1e8).toFixed(2)}亿`;
+}
+
+function formatPercent(value: number): string {
+  return `${Math.round(value * 10) / 10}%`;
+}
+
+// 智谱卡 3×3 九宫格指标：
+// 第1行 [5小时窗口(已用/额度), 登录状态, 最近同步]
+// 第2行 [7天 Cache 命中率, 7天积分消耗, 7天 Tokens]
+// 第3行 [30天 Cache 命中率, 30天积分总数, 30天 Tokens]
+function buildDetailMetrics(
+  providerId: string,
+  card: ServerUsageCard,
+  loginState: string,
+  capturedAt: string,
+): DetailMetric[] {
+  if (providerId !== "zhipu") return [];
+  const metrics = card.metrics;
+  const items: DetailMetric[] = [];
+  const push = (label: string, value: unknown, formatter?: (n: number) => string) => {
+    if (typeof value !== "number" || !Number.isFinite(value)) return;
+    items.push({
+      label,
+      value: formatter
+        ? formatter(value)
+        : new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(value),
+    });
+  };
+
+  // 5小时窗口：已用 / 额度（万单位）
+  const rp5h = card.windows.find((w) => w.key === "rp5h") ?? card.windows[0];
+  if (rp5h && typeof rp5h.used === "number" && typeof rp5h.limit === "number" && rp5h.limit > 0) {
+    items.push({ label: "5小时", value: `${formatWan(rp5h.used)} / ${formatWan(rp5h.limit)}` });
+  }
+  items.push({ label: "登录状态", value: loginState || "待登录" });
+  items.push({
+    label: "最近同步",
+    value: capturedAt
+      ? new Intl.DateTimeFormat("zh-CN", {
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+        }).format(new Date(capturedAt))
+      : "待同步",
+  });
+
+  push("7天 Cache 命中率", typeof metrics.cacheHitRate7d === "number" ? metrics.cacheHitRate7d * 100 : null, formatPercent);
+  push("7天积分消耗", metrics.totalCredits7d);
+  push("7天 Tokens", metrics.totalTokens7d, formatYi);
+  push("30天 Cache 命中率", typeof metrics.cacheHitRate30d === "number" ? metrics.cacheHitRate30d * 100 : null, formatPercent);
+  push("30天积分总数", metrics.totalCredits30d);
+  push("30天 Tokens", metrics.totalTokens30d, formatYi);
+  return items;
 }
 
 function toTrendPoint(window: ServerProviderWindow): TrendPoint {
@@ -484,6 +563,12 @@ function mapServerDashboard(server: ServerUsageDashboard): DashboardSnapshot {
       lastRefreshedAt: card.capturedAt,
       accent: resolveAccent(card.providerId),
       quotaWindows: windows,
+      detailMetrics: buildDetailMetrics(
+        card.providerId,
+        card,
+        resolveLoginState(card.status, card.meta),
+        card.capturedAt,
+      ),
       trend,
       modelSpends: [],
       links: toLinks(card.providerId, card.sourceUrl),

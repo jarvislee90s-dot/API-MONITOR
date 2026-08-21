@@ -8,6 +8,7 @@ import { fetchXfyunMaaSSnapshot } from "../../worker/providers/xfyun-maas";
 import { fetchAliyunBailianSnapshot } from "../../worker/providers/aliyun-bailian";
 import { fetchVolcArkSnapshot } from "../../worker/providers/volc-ark";
 import { fetchDeepSeekSnapshot } from "../../worker/providers/deepseek";
+import { fetchZhipuSnapshot } from "../../worker/providers/zhipu";
 
 describe("provider registry", () => {
   it("exposes the cloud adapters", () => {
@@ -18,6 +19,7 @@ describe("provider registry", () => {
       "aliyun-bailian",
       "volc-ark",
       "deepseek",
+      "zhipu",
     ]);
     expect(getProvider("openrouter")?.name).toBe("OpenRouter");
     expect(getProvider("opencode-go")?.name).toBe("OpenCode Go");
@@ -25,10 +27,12 @@ describe("provider registry", () => {
     expect(getProvider("aliyun-bailian")?.name).toBe("阿里云百炼");
     expect(getProvider("volc-ark")?.name).toBe("火山方舟");
     expect(getProvider("deepseek")?.name).toBe("DeepSeek");
+    expect(getProvider("zhipu")?.name).toBe("智谱 BigModel");
     expect(isProviderId("openrouter")).toBe(true);
     expect(isProviderId("aliyun-bailian")).toBe(true);
     expect(isProviderId("volc-ark")).toBe(true);
     expect(isProviderId("deepseek")).toBe(true);
+    expect(isProviderId("zhipu")).toBe(true);
     expect(isProviderId("unknown")).toBe(false);
   });
 });
@@ -1016,5 +1020,161 @@ describe("deepseek adapter", () => {
     expect(fetchedUrls.length).toBe(3);
     expect(fetchedUrls.every((url) => url.includes("platform.deepseek.com"))).toBe(true);
     expect(result.snapshot.status).toBe("partial");
+  });
+});
+
+describe("zhipu adapter", () => {
+  it("returns login_required when auth cookie and token are missing", async () => {
+    const result = await fetchZhipuSnapshot({
+      now: new Date("2026-08-21T02:00:00.000Z"),
+      config: {},
+    });
+
+    expect(result.snapshot.status).toBe("login_required");
+    expect(result.snapshot.summary).toContain("智谱");
+    expect(result.snapshot.meta).toMatchObject({ entryUrl: "https://bigmodel.cn/coding-plan/personal/usage" });
+  });
+
+  it("parses quota limits and 7d/30d credit usage into a ready snapshot", async () => {
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const s = String(url);
+      if (s.includes("/monitor/usage/quota/limit")) {
+        return new Response(
+          JSON.stringify({
+            code: 200,
+            data: {
+              level: "pro",
+              limits: [
+                {
+                  type: "CREDIT_LIMIT",
+                  usage: 12000,
+                  currentValue: 2024,
+                  percentage: 16,
+                  nextResetTime: "2026-08-21 15:39:20",
+                },
+                {
+                  type: "CREDIT_LIMIT",
+                  usage: 60000,
+                  currentValue: 2024,
+                  percentage: 3,
+                  nextResetTime: "2026-08-28 09:58:00",
+                },
+              ],
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (s.includes("/monitor/credit-usage/usage-detail")) {
+        const decoded = decodeURIComponent(s);
+        const is7d = decoded.includes("startTime=2026-08-15");
+        return new Response(
+          JSON.stringify({
+            code: 200,
+            data: {
+              summary: { cacheHitRate: { value: is7d ? "0.9552" : "0.92" } },
+              modelUsage: {
+                xTime: [],
+                totalUsage: {
+                  totalTokens: is7d ? 44865163 : 90000000,
+                  totalCredits: is7d ? "4427.2874" : "6536.3966",
+                },
+              },
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      throw new Error(`unexpected fetch ${s}`);
+    });
+
+    const result = await fetchZhipuSnapshot({
+      now: new Date("2026-08-21T02:00:00.000Z"),
+      fetchImpl: fetchImpl as typeof fetch,
+      config: {
+        authCookie: "bigmodel_token_production=token-abc; acw_tc=waf; ssxmod_itna=itna",
+        authToken: "token-abc",
+      },
+    });
+
+    expect(result.snapshot.status).toBe("ready");
+    expect(result.snapshot.windows.map((w) => w.key)).toEqual(["rp5h", "weekly"]);
+    expect(result.snapshot.windows.map((w) => w.label)).toEqual(["5小时", "每周"]);
+    expect(result.snapshot.windows[0]).toMatchObject({
+      used: 2024,
+      limit: 12000,
+      percentUsed: 16,
+      percentRemaining: 84,
+      resetAt: "2026-08-21T07:39:20.000Z",
+    });
+    expect(result.snapshot.windows[1]).toMatchObject({
+      used: 2024,
+      limit: 60000,
+      percentUsed: 3,
+      resetAt: "2026-08-28T01:58:00.000Z",
+    });
+    expect(result.snapshot.metrics).toMatchObject({
+      quotaLevel: "pro",
+      cacheHitRate7d: 0.9552,
+      totalCredits7d: 4427.2874,
+      totalTokens7d: 44865163,
+      cacheHitRate30d: 0.92,
+      totalCredits30d: 6536.3966,
+      totalTokens30d: 90000000,
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  it("rejects a non-bigmodel api base and never sends the request", async () => {
+    const fetchImpl = vi.fn();
+
+    const result = await fetchZhipuSnapshot({
+      now: new Date("2026-08-21T02:00:00.000Z"),
+      fetchImpl: fetchImpl as typeof fetch,
+      config: {
+        authCookie: "bigmodel_token_production=token-abc",
+        apiBase: "https://evil.example.com",
+      },
+    });
+
+    expect(result.snapshot.status).toBe("error");
+    expect(result.snapshot.summary).toContain("不安全");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("returns login_required when the quota endpoint responds 401", async () => {
+    const fetchImpl = vi.fn(async () => new Response("{}", { status: 401 }));
+
+    const result = await fetchZhipuSnapshot({
+      now: new Date("2026-08-21T02:00:00.000Z"),
+      fetchImpl: fetchImpl as typeof fetch,
+      config: {
+        authCookie: "bigmodel_token_production=token-abc; acw_tc=waf",
+        authToken: "token-abc",
+      },
+    });
+
+    expect(result.snapshot.status).toBe("login_required");
+    expect(result.snapshot.summary).toContain("登录态可能已过期");
+    expect(result.snapshot.metrics).toMatchObject({ httpStatus: 401 });
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  it("returns partial when endpoints return no usable data", async () => {
+    const fetchImpl = vi.fn(async () => {
+      return new Response(JSON.stringify({ code: 200, data: {} }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    const result = await fetchZhipuSnapshot({
+      now: new Date("2026-08-21T02:00:00.000Z"),
+      fetchImpl: fetchImpl as typeof fetch,
+      config: { authToken: "token-abc" },
+    });
+
+    expect(result.snapshot.status).toBe("partial");
+    expect(result.snapshot.summary).toContain("未返回可用数据");
   });
 });

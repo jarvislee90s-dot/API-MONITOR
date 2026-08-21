@@ -19,6 +19,7 @@ function credentialFields(providerKey: string | undefined): string[] {
   if (providerKey === "xfyun-maas") return ["authCookie", "apiUrl"];
   if (providerKey === "aliyun-bailian") return ["authCookie", "apiUrl"];
   if (providerKey === "volc-ark") return ["authCookie", "apiUrl"];
+  if (providerKey === "zhipu") return ["authCookie", "authToken"];
   return ["authCookie"];
 }
 
@@ -28,6 +29,7 @@ function fieldLabel(field: string): string {
     endpoint: "endpoint / baseUrl",
     workspaceId: "workspaceId",
     authCookie: "authCookie",
+    authToken: "登录 Token",
     apiUrl: "endpoint / baseUrl",
   };
   return labels[field] ?? field;

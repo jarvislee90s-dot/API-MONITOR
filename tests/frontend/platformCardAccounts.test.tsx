@@ -19,6 +19,7 @@ function createPlatform(): PlatformSnapshot {
     lastRefreshedAt: "2026-06-12T00:00:00.000Z",
     accent: "#b45309",
     quotaWindows: [{ label: "Monthly", scope: "Monthly", used: 10, limit: 100, resetAt: "6月12日 08:00", status: "healthy" }],
+    detailMetrics: [],
     trend: [{ label: "Monthly", usage: 10, spendUsd: 0 }],
     modelSpends: [],
     links: [{ label: "打开看板", href: "https://openrouter.ai/activity", tone: "brand" }],

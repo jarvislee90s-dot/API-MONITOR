@@ -4,6 +4,7 @@ import { xfyunMaaS } from "./xfyun-maas";
 import { aliyunBailian } from "./aliyun-bailian";
 import { volcArk } from "./volc-ark";
 import { deepseek } from "./deepseek";
+import { zhipu } from "./zhipu";
 import type { ProviderDefinition, ProviderId } from "../types";
 
 const PROVIDERS: ProviderDefinition[] = [
@@ -13,6 +14,7 @@ const PROVIDERS: ProviderDefinition[] = [
   aliyunBailian,
   volcArk,
   deepseek,
+  zhipu,
 ];
 
 export function listProviders(): ProviderDefinition[] {
