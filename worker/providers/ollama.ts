@@ -52,7 +52,9 @@ function nextSessionReset(now: Date): string {
 }
 
 function nextWeeklyReset(now: Date): string {
-  const daysUntilMonday = (8 - now.getUTCDay()) % 7;
+  // 今天已是周一则指向下周一，保证返回时间在未来
+  let daysUntilMonday = (8 - now.getUTCDay()) % 7;
+  if (daysUntilMonday === 0) daysUntilMonday = 7;
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + daysUntilMonday, 0)).toISOString();
 }
 

@@ -1236,6 +1236,30 @@ describe("ollama adapter", () => {
     expect((init as RequestInit).headers).toMatchObject({ Authorization: "Bearer ollama-key" });
   });
 
+  it("computes weekly reset at next Monday even when today is Monday", async () => {
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) =>
+      new Response(
+        JSON.stringify({
+          limits: {
+            session: { usage: 0.05, models: [] },
+            weekly: { usage: 0.01, models: [] },
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const mondayNow = new Date("2026-08-24T02:00:00.000Z"); // 周一
+    const result = await fetchOllamaSnapshot({
+      now: mondayNow,
+      fetchImpl: fetchImpl as typeof fetch,
+      config: { apiKey: "ollama-key", apiUrl: "https://ollama.com/v1" },
+    });
+
+    expect(result.snapshot.windows[0].resetAt).toBe("2026-08-24T05:00:00.000Z");
+    expect(result.snapshot.windows[1].resetAt).toBe("2026-08-31T00:00:00.000Z");
+  });
+
   it("rejects a non-ollama api url and never sends the request", async () => {
     const fetchImpl = vi.fn();
     const result = await fetchOllamaSnapshot({
