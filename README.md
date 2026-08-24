@@ -16,7 +16,7 @@ https://apimonitor.bondtoolbox.asia
 
 ## 功能亮点
 
-- 统一展示 OpenRouter、OpenCode Go、讯飞 MaaS、阿里云百炼、火山方舟、智谱 BigModel 六个平台状态。
+- 统一展示 OpenRouter、OpenCode Go、讯飞 MaaS、阿里云百炼、火山方舟、智谱 BigModel、Ollama Pro 七个平台状态。
 - 支持 5 小时、每周、套餐总量等不同 quota window。
 - 独立配置页支持"供应商 → 多账号 → 账号配置"的单页多层工作台。
 - 首页保持一个供应商一个大卡片；多账号通过卡片内账号子卡片切换显示。
@@ -41,6 +41,7 @@ https://apimonitor.bondtoolbox.asia
 | 阿里云百炼 | 已接入原网页入口；云端抓取保留为实验选项 |
 | 火山方舟 | 已接入 `GetCodingPlanUsage` 用量接口（5小时/周/月百分比） |
 | 智谱 BigModel | 已接入 `monitor/usage/quota/limit` + `credit-usage/usage-detail` 用量接口（5小时/周配额、Cache 命中率、积分） |
+| Ollama Pro | 已接入 `/api/usage` 用量接口（5小时/周额度、模型请求数、预计总请求） |
 | 配置页 | 已接入 `#/settings` |
 
 ## 架构
