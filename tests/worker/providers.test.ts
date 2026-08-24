@@ -1221,8 +1221,8 @@ describe("ollama adapter", () => {
 
     expect(result.snapshot.status).toBe("ready");
     expect(result.snapshot.windows.map((w) => w.key)).toEqual(["rp5h", "weekly"]);
-    expect(result.snapshot.windows[0]).toMatchObject({ label: "5小时", used: 6.8, limit: 100, percentUsed: 6.8 });
-    expect(result.snapshot.windows[1]).toMatchObject({ label: "每周", used: 0.7, limit: 100, percentUsed: 0.7 });
+    expect(result.snapshot.windows[0]).toMatchObject({ label: "5小时", used: 6.8, limit: 100, percentUsed: 6.8, resetAt: "2026-08-23T10:00:00.000Z" });
+    expect(result.snapshot.windows[1]).toMatchObject({ label: "每周", used: 0.7, limit: 100, percentUsed: 0.7, resetAt: "2026-08-24T00:00:00.000Z" });
     expect(result.snapshot.metrics).toMatchObject({
       sessionUsagePercent: 6.8,
       weeklyUsagePercent: 0.7,

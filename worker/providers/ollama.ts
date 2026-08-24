@@ -45,6 +45,17 @@ function toPercent(value: unknown): number | null {
   return Math.round(number * 1000) / 10;
 }
 
+// Ollama 官方规则（pricing 页）：session 每 5 小时重置（对齐 UTC 5 的倍数整点），weekly 每 7 天重置（对齐周一 00:00 UTC）
+function nextSessionReset(now: Date): string {
+  const nextHour = (Math.floor(now.getUTCHours() / 5) + 1) * 5;
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), nextHour)).toISOString();
+}
+
+function nextWeeklyReset(now: Date): string {
+  const daysUntilMonday = (8 - now.getUTCDay()) % 7;
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + daysUntilMonday, 0)).toISOString();
+}
+
 // models 归一化为 {name, requests}，按请求数降序
 function normalizeModels(window?: OllamaLimitWindow): Array<{ name: string; requests: number }> {
   if (!window?.models?.length) return [];
@@ -168,7 +179,7 @@ export async function fetchOllamaSnapshot(input: ProviderFetchInput): Promise<Pr
       remaining: Math.max(0, 100 - sessionPercent),
       percentUsed: sessionPercent,
       percentRemaining: Math.max(0, 100 - sessionPercent),
-      resetAt: null, // Ollama API 未提供重置时间，前端显示"滚动窗口"
+      resetAt: nextSessionReset(input.now)
     });
   }
   if (weeklyPercent !== null) {
@@ -180,7 +191,7 @@ export async function fetchOllamaSnapshot(input: ProviderFetchInput): Promise<Pr
       remaining: Math.max(0, 100 - weeklyPercent),
       percentUsed: weeklyPercent,
       percentRemaining: Math.max(0, 100 - weeklyPercent),
-      resetAt: null,
+      resetAt: nextWeeklyReset(input.now)
     });
   }
 

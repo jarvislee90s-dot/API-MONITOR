@@ -393,6 +393,7 @@ describe("api client mapping", () => {
                 metrics: {
                   sessionUsagePercent: 6.8,
                   weeklyUsagePercent: 0.7,
+                  sessionRequestCount: 117,
                   weeklyRequestCount: 249,
                   weeklyModelCount: 2,
                   weeklyModels: JSON.stringify([
@@ -423,10 +424,9 @@ describe("api client mapping", () => {
       { model: "kimi-k2.6", requests: 10, tokens: 0, spendUsd: 0, share: 10 / 249 },
     ]);
     const detail = platform.detailMetrics.map((m) => m.label);
-    expect(detail).toContain("5小时用量");
-    expect(detail).toContain("本周用量");
-    expect(detail).toContain("本周请求数");
-    expect(detail).toContain("本周模型数");
+    expect(detail).toEqual(["5小时请求数", "本周请求数", "5小时预计总请求"]);
+    const estimated = platform.detailMetrics.find((m) => m.label === "5小时预计总请求");
+    expect(estimated?.value).toBe("1,721"); // 117 / (6.8/100) = 1720.6 -> 1721
   });
 
 });

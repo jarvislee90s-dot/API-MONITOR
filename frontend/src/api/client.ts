@@ -483,10 +483,16 @@ function buildDetailMetrics(
   };
 
   if (providerId === "ollama") {
-    push("5小时用量", metrics.sessionUsagePercent, formatPercent);
-    push("本周用量", metrics.weeklyUsagePercent, formatPercent);
+    // 5小时预计总请求 = 5小时总请求 / 已用百分比（usage 为小数时按 0~1，percent 为 0~100）
+    const requests5h = typeof metrics.sessionRequestCount === "number" ? metrics.sessionRequestCount : null;
+    const percent5h = typeof metrics.sessionUsagePercent === "number" ? metrics.sessionUsagePercent : null;
+    const estimated5h =
+      requests5h !== null && percent5h !== null && percent5h > 0
+        ? Math.round(requests5h / (percent5h / 100))
+        : null;
+    push("5小时请求数", requests5h, (n) => new Intl.NumberFormat("zh-CN").format(n));
     push("本周请求数", metrics.weeklyRequestCount, (n) => new Intl.NumberFormat("zh-CN").format(n));
-    push("本周模型数", metrics.weeklyModelCount, (n) => new Intl.NumberFormat("zh-CN").format(n));
+    push("5小时预计总请求", estimated5h, (n) => new Intl.NumberFormat("zh-CN").format(n));
     return items;
   }
   if (providerId !== "zhipu") return [];
