@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+﻿import { describe, expect, it, vi } from "vitest";
 
 import { handleApiRequest } from "../../worker/index";
 import { buildUsageDashboard } from "../../worker/dashboard";
@@ -218,6 +218,7 @@ describe("worker api", () => {
       "volc-ark",
       "deepseek",
       "zhipu",
+      "ollama",
     ]);
   });
 
@@ -326,13 +327,13 @@ describe("worker api", () => {
       expect(response.status).toBe(200);
       expect(payload.ok).toBe(true);
       expect(payload.data.kind).toBe("usage_dashboard");
-      expect(payload.data.cards).toHaveLength(7);
+      expect(payload.data.cards).toHaveLength(8);
       expect(payload.data.modelSpends).toEqual([]);
       expect(payload.data.totals).toMatchObject({
-        providers: 7,
+        providers: 8,
         ready: 3,
         partial: 1,
-        loginRequired: 3,
+        loginRequired: 4,
         error: 0,
       });
       expect(payload.data.cards[0]).toMatchObject({
@@ -681,7 +682,7 @@ describe("worker api", () => {
         sessionKey: "dashboard",
         refreshed: true,
       });
-      expect(payload.data.cards).toHaveLength(7);
+      expect(payload.data.cards).toHaveLength(8);
     } finally {
       vi.unstubAllGlobals();
     }

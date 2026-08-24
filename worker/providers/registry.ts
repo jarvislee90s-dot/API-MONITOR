@@ -5,6 +5,7 @@ import { aliyunBailian } from "./aliyun-bailian";
 import { volcArk } from "./volc-ark";
 import { deepseek } from "./deepseek";
 import { zhipu } from "./zhipu";
+import { ollama } from "./ollama";
 import type { ProviderDefinition, ProviderId } from "../types";
 
 const PROVIDERS: ProviderDefinition[] = [
@@ -15,6 +16,7 @@ const PROVIDERS: ProviderDefinition[] = [
   volcArk,
   deepseek,
   zhipu,
+  ollama,
 ];
 
 export function listProviders(): ProviderDefinition[] {

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+﻿import { describe, expect, it, vi } from "vitest";
 
 import { getProvider, isProviderId, listProviders } from "../../worker/providers/registry";
 import { fetchOpenRouterSnapshot } from "../../worker/providers/openrouter";
@@ -9,6 +9,7 @@ import { fetchAliyunBailianSnapshot } from "../../worker/providers/aliyun-bailia
 import { fetchVolcArkSnapshot } from "../../worker/providers/volc-ark";
 import { fetchDeepSeekSnapshot } from "../../worker/providers/deepseek";
 import { fetchZhipuSnapshot } from "../../worker/providers/zhipu";
+import { fetchOllamaSnapshot } from "../../worker/providers/ollama";
 
 describe("provider registry", () => {
   it("exposes the cloud adapters", () => {
@@ -20,6 +21,7 @@ describe("provider registry", () => {
       "volc-ark",
       "deepseek",
       "zhipu",
+      "ollama",
     ]);
     expect(getProvider("openrouter")?.name).toBe("OpenRouter");
     expect(getProvider("opencode-go")?.name).toBe("OpenCode Go");
@@ -28,11 +30,13 @@ describe("provider registry", () => {
     expect(getProvider("volc-ark")?.name).toBe("火山方舟");
     expect(getProvider("deepseek")?.name).toBe("DeepSeek");
     expect(getProvider("zhipu")?.name).toBe("智谱 BigModel");
+    expect(getProvider("ollama")?.name).toBe("Ollama Pro");
     expect(isProviderId("openrouter")).toBe(true);
     expect(isProviderId("aliyun-bailian")).toBe(true);
     expect(isProviderId("volc-ark")).toBe(true);
     expect(isProviderId("deepseek")).toBe(true);
     expect(isProviderId("zhipu")).toBe(true);
+    expect(isProviderId("ollama")).toBe(true);
     expect(isProviderId("unknown")).toBe(false);
   });
 });
@@ -1176,5 +1180,82 @@ describe("zhipu adapter", () => {
 
     expect(result.snapshot.status).toBe("partial");
     expect(result.snapshot.summary).toContain("未返回可用数据");
+  });
+});
+
+describe("ollama adapter", () => {
+  const NOW = new Date("2026-08-23T06:00:00.000Z");
+
+  it("returns login_required when api key is missing", async () => {
+    const result = await fetchOllamaSnapshot({ now: NOW, config: {} });
+    expect(result.snapshot.status).toBe("login_required");
+    expect(result.snapshot.metrics).toMatchObject({ hasApiKey: false });
+  });
+
+  it("parses session/weekly usage and model request counts", async () => {
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) =>
+      new Response(JSON.stringify({
+        activity: { cost: "0.00000", period: { type: "last_4_weeks" }, models: [] },
+        limits: {
+          session: {
+            usage: 0.068,
+            models: [
+              { name: "deepseek-v4-flash:0731", request_count: 239 },
+              { name: "kimi-k2.6", request_count: 10 },
+            ],
+          },
+          weekly: {
+            usage: 0.007,
+            models: [{ name: "deepseek-v4-flash:0731", request_count: 249 }],
+          },
+        },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    ));
+
+    const result = await fetchOllamaSnapshot({
+      now: NOW,
+      fetchImpl: fetchImpl as typeof fetch,
+      config: { apiKey: "ollama-key", apiUrl: "https://ollama.com/v1" },
+    });
+
+    expect(result.snapshot.status).toBe("ready");
+    expect(result.snapshot.windows.map((w) => w.key)).toEqual(["rp5h", "weekly"]);
+    expect(result.snapshot.windows[0]).toMatchObject({ label: "5小时", used: 6.8, limit: 100, percentUsed: 6.8 });
+    expect(result.snapshot.windows[1]).toMatchObject({ label: "每周", used: 0.7, limit: 100, percentUsed: 0.7 });
+    expect(result.snapshot.metrics).toMatchObject({
+      sessionUsagePercent: 6.8,
+      weeklyUsagePercent: 0.7,
+      weeklyRequestCount: 249,
+    });
+    const parsed = JSON.parse(String(result.snapshot.metrics.weeklyModels));
+    expect(parsed).toEqual([{ name: "deepseek-v4-flash:0731", requests: 249 }]);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(String(url)).toBe("https://ollama.com/api/usage");
+    expect((init as RequestInit).headers).toMatchObject({ Authorization: "Bearer ollama-key" });
+  });
+
+  it("rejects a non-ollama api url and never sends the request", async () => {
+    const fetchImpl = vi.fn();
+    const result = await fetchOllamaSnapshot({
+      now: NOW,
+      fetchImpl: fetchImpl as typeof fetch,
+      config: { apiKey: "ollama-key", apiUrl: "https://evil.example.com/v1" },
+    });
+    expect(result.snapshot.status).toBe("error");
+    expect(result.snapshot.summary).toContain("不安全");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("maps 401/403 to login_required", async () => {
+    const fetchImpl = vi.fn(async () => new Response("{}", { status: 401 }));
+    const result = await fetchOllamaSnapshot({
+      now: NOW,
+      fetchImpl: fetchImpl as typeof fetch,
+      config: { apiKey: "bad-key", apiUrl: "https://ollama.com/v1" },
+    });
+    expect(result.snapshot.status).toBe("login_required");
+    expect(result.snapshot.summary).toContain("API Key 可能已失效");
   });
 });

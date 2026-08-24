@@ -1,4 +1,4 @@
-import { errorResponse, jsonResponse, readJsonBody, successResponse, toIsoString } from "./http";
+﻿import { errorResponse, jsonResponse, readJsonBody, successResponse, toIsoString } from "./http";
 import { buildUsageDashboard } from "./dashboard";
 import { createLiveLoginSession } from "./browser/live-login";
 import { listProviders, getProvider, isProviderId } from "./providers/registry";
@@ -90,6 +90,14 @@ function buildProviderConfig(env: WorkerEnv, providerId: string): Record<string,
       apiBase: env.ZHIPU_API_BASE,
       authCookie: env.ZHIPU_AUTH_COOKIE,
       authToken: env.ZHIPU_AUTH_TOKEN,
+    };
+  }
+
+  if (providerId === "ollama") {
+    return {
+      pageUrl: env.OLLAMA_PAGE_URL,
+      apiUrl: env.OLLAMA_URL,
+      apiKey: env.OLLAMA_KEY,
     };
   }
 

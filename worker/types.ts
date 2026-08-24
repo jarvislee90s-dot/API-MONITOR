@@ -1,11 +1,12 @@
-export type ProviderId =
+﻿export type ProviderId =
   | "openrouter"
   | "opencode-go"
   | "xfyun-maas"
   | "aliyun-bailian"
   | "volc-ark"
   | "deepseek"
-  | "zhipu";
+  | "zhipu"
+  | "ollama";
 
 export type ProviderStatus = "ready" | "partial" | "login_required" | "disabled" | "error";
 
@@ -210,6 +211,9 @@ export interface WorkerEnv extends RefreshSessionEnv {
   ZHIPU_API_BASE?: string;
   ZHIPU_AUTH_COOKIE?: string;
   ZHIPU_AUTH_TOKEN?: string;
+  OLLAMA_KEY?: string;
+  OLLAMA_URL?: string;
+  OLLAMA_PAGE_URL?: string;
   REFRESH_SESSION: DurableObjectNamespaceLike;
 }
 

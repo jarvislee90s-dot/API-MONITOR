@@ -40,6 +40,8 @@ function createDirectEnv(): WorkerEnv {
     ZHIPU_API_BASE: readEnv("ZHIPU_API_BASE"),
     ZHIPU_AUTH_COOKIE: readEnv("ZHIPU_AUTH_COOKIE"),
     ZHIPU_AUTH_TOKEN: readEnv("ZHIPU_AUTH_TOKEN"),
+    OLLAMA_KEY: readEnv("OLLAMA_KEY"),
+    OLLAMA_URL: readEnv("OLLAMA_URL"),
   };
 }
 
@@ -51,6 +53,7 @@ const requiredEnvByProvider: Record<ProviderId, string[]> = {
   "aliyun-bailian": ["ALIYUN_BAILIAN_API_URL", "ALIYUN_BAILIAN_AUTH_COOKIE"],
   "volc-ark": ["VOLC_ARK_AUTH_COOKIE"],
   "zhipu": ["ZHIPU_AUTH_COOKIE"],
+  "ollama": ["OLLAMA_KEY"],
 };
 
 describe.skipIf(process.env.RUN_REAL_E2E !== "1")("real provider snapshot e2e", () => {
