@@ -51,8 +51,8 @@ export function ModelSpendTable({ rows }: ModelSpendTableProps) {
               <tr key={row.model}>
                 <td>{row.model}</td>
                 <td>{formatNumber(row.requests)}</td>
-                <td>{formatNumber(row.tokens)}</td>
-                <td>{formatCurrency(row.spendUsd)}</td>
+                <td>{row.tokens > 0 ? formatNumber(row.tokens) : "—"}</td>
+                <td>{row.spendUsd > 0 ? formatCurrency(row.spendUsd) : "—"}</td>
                 <td>{Math.round(row.share * 100)}%</td>
               </tr>
             ))}

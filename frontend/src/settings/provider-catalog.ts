@@ -43,4 +43,10 @@ export const PUBLIC_PROVIDER_CATALOG: ProviderCatalogItem[] = [
     sourceUrl: "https://bigmodel.cn/coding-plan/personal/usage",
     description: "Coding Plan 用量 / 5小时周配额 / Cache 命中率 / 积分",
   },
+  {
+    providerKey: "ollama",
+    providerName: "Ollama Pro",
+    sourceUrl: "https://ollama.com/settings",
+    description: "用量 / 5小时周额度 / 模型请求数",
+  },
 ];

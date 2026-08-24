@@ -365,4 +365,68 @@ describe("api client mapping", () => {
       loginState: "云端浏览器同步",
     });
   });
+
+  it("maps ollama card windows, detail metrics and model list", async () => {
+    const fetcher = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          data: {
+            kind: "usage_dashboard",
+            generatedAt: "2026-08-23T06:00:00.000Z",
+            status: "ready",
+            summary: "Ollama Pro: ready",
+            totals: { providers: 1, ready: 1, partial: 0, loginRequired: 0, error: 0 },
+            cards: [
+              {
+                providerId: "ollama",
+                providerName: "Ollama Pro",
+                sourceUrl: "https://ollama.com/settings",
+                status: "ready",
+                summary: "Ollama Pro 用量已解析",
+                capturedAt: "2026-08-23T06:00:00.000Z",
+                trend: [],
+                windows: [
+                  { key: "rp5h", label: "5小时", used: 6.8, limit: 100, percentUsed: 6.8, resetAt: null },
+                  { key: "weekly", label: "每周", used: 0.7, limit: 100, percentUsed: 0.7, resetAt: null },
+                ],
+                metrics: {
+                  sessionUsagePercent: 6.8,
+                  weeklyUsagePercent: 0.7,
+                  weeklyRequestCount: 249,
+                  weeklyModelCount: 2,
+                  weeklyModels: JSON.stringify([
+                    { name: "deepseek-v4-flash:0731", requests: 239 },
+                    { name: "kimi-k2.6", requests: 10 },
+                  ]),
+                },
+                meta: {},
+                selectedAccountId: "ollama:default",
+                accounts: [],
+              },
+            ],
+            modelSpends: [],
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+
+    const client = createApiClient({ fetcher: fetcher as unknown as typeof fetch });
+    const dashboard = await client.getUsageDashboard();
+    const platform = dashboard.platforms[0]!;
+
+    expect(platform.quotaWindows.map((w) => w.label)).toEqual(["5小时", "每周"]);
+    expect(platform.quotaWindows[0]?.resetAt).toBe("滚动窗口");
+    expect(platform.modelSpends).toEqual([
+      { model: "deepseek-v4-flash:0731", requests: 239, tokens: 0, spendUsd: 0, share: 239 / 249 },
+      { model: "kimi-k2.6", requests: 10, tokens: 0, spendUsd: 0, share: 10 / 249 },
+    ]);
+    const detail = platform.detailMetrics.map((m) => m.label);
+    expect(detail).toContain("5小时用量");
+    expect(detail).toContain("本周用量");
+    expect(detail).toContain("本周请求数");
+    expect(detail).toContain("本周模型数");
+  });
+
 });

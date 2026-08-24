@@ -352,6 +352,7 @@ function resolveAccent(providerId: string): string {
   if (providerId === "volc-ark") return "#dc2626";
   if (providerId === "deepseek") return "#0369a1";
   if (providerId === "zhipu") return "#0ea5e9";
+  if (providerId === "ollama") return "#7c3aed";
   return "#b45309";
 }
 
@@ -362,6 +363,7 @@ function resolveTagline(providerId: string): string {
   if (providerId === "volc-ark") return "Coding Plan 用量 / 5小时周月";
   if (providerId === "deepseek") return "API 余额 / 近30天用量";
   if (providerId === "zhipu") return "Coding Plan 用量 / 5小时周配额";
+  if (providerId === "ollama") return "Ollama Pro 用量 / 5小时周额度";
   return "Activity 聚合 / 花费拆分";
 }
 
@@ -372,6 +374,7 @@ function resolvePrimaryMetricLabel(providerId: string, windows: ServerProviderWi
   if (providerId === "aliyun-bailian") return "当前套餐";
   if (providerId === "deepseek") return "充值余额";
   if (providerId === "zhipu") return "5小时配额";
+  if (providerId === "ollama") return "5小时额度";
   return windows[0]?.label ?? "当前状态";
 }
 
@@ -385,6 +388,12 @@ function formatWindowValue(window: ServerProviderWindow): string {
   }
 
   return "待同步";
+}
+
+// Ollama 无重置时间字段，显示"滚动窗口"；其他 provider 走既有逻辑
+function formatOllamaResetAt(providerId: string, value: string | null | undefined): string {
+  if (providerId !== "ollama") return formatResetAt(value);
+  return value ? formatResetAt(value) : "滚动窗口";
 }
 
 function formatResetAt(value: string | null | undefined): string {
@@ -402,14 +411,14 @@ function formatResetAt(value: string | null | undefined): string {
   }).format(date);
 }
 
-function toQuotaWindow(status: PlatformStatus, window: ServerProviderWindow): QuotaWindow {
+function toQuotaWindow(providerId: string, status: PlatformStatus, window: ServerProviderWindow): QuotaWindow {
   return {
     label: window.label,
     scope: window.label,
     used: window.used ?? 0,
     limit: window.limit ?? 0,
     percentUsed: window.percentUsed ?? null,
-    resetAt: formatResetAt(window.resetAt),
+    resetAt: formatOllamaResetAt(providerId, window.resetAt),
     status,
   };
 }
@@ -435,13 +444,32 @@ function formatPercent(value: number): string {
 // 第1行 [5小时窗口(已用/额度), 登录状态, 最近同步]
 // 第2行 [7天 Cache 命中率, 7天积分消耗, 7天 Tokens]
 // 第3行 [30天 Cache 命中率, 30天积分总数, 30天 Tokens]
+// Ollama 模型请求数列表（由 metrics.weeklyModels JSON 推导，按请求数降序）
+function resolveModelSpends(providerId: string, metrics: Record<string, unknown>): ModelSpendRow[] {
+  if (providerId !== "ollama") return [];
+  const raw = typeof metrics.weeklyModels === "string" ? metrics.weeklyModels : "[]";
+  let models: Array<{ name: string; requests: number }> = [];
+  try {
+    models = JSON.parse(raw);
+  } catch {
+    models = [];
+  }
+  const total = models.reduce((sum, m) => sum + m.requests, 0);
+  return models.map((m) => ({
+    model: m.name,
+    requests: m.requests,
+    tokens: 0,
+    spendUsd: 0,
+    share: total > 0 ? m.requests / total : 0,
+  }));
+}
+
 function buildDetailMetrics(
   providerId: string,
   card: ServerUsageCard,
   loginState: string,
   capturedAt: string,
 ): DetailMetric[] {
-  if (providerId !== "zhipu") return [];
   const metrics = card.metrics;
   const items: DetailMetric[] = [];
   const push = (label: string, value: unknown, formatter?: (n: number) => string) => {
@@ -454,10 +482,19 @@ function buildDetailMetrics(
     });
   };
 
+  if (providerId === "ollama") {
+    push("5小时用量", metrics.sessionUsagePercent, formatPercent);
+    push("本周用量", metrics.weeklyUsagePercent, formatPercent);
+    push("本周请求数", metrics.weeklyRequestCount, (n) => new Intl.NumberFormat("zh-CN").format(n));
+    push("本周模型数", metrics.weeklyModelCount, (n) => new Intl.NumberFormat("zh-CN").format(n));
+    return items;
+  }
+  if (providerId !== "zhipu") return [];
+
   // 5小时窗口：已用 / 额度（万单位）
   const rp5h = card.windows.find((w) => w.key === "rp5h") ?? card.windows[0];
   if (rp5h && typeof rp5h.used === "number" && typeof rp5h.limit === "number" && rp5h.limit > 0) {
-    items.push({ label: "5小时", value: `${formatWan(rp5h.used)} / ${formatWan(rp5h.limit)}` });
+    items.push({ label: "5小时", value: formatWan(rp5h.used) + " / " + formatWan(rp5h.limit) });
   }
   items.push({ label: "登录状态", value: loginState || "待登录" });
   items.push({
@@ -481,6 +518,7 @@ function buildDetailMetrics(
   push("30天 Tokens", metrics.totalTokens30d, formatYi);
   return items;
 }
+
 
 function toTrendPoint(window: ServerProviderWindow): TrendPoint {
   return {
@@ -515,7 +553,7 @@ function mapServerDashboard(server: ServerUsageDashboard): DashboardSnapshot {
   const platforms = server.cards.map((card) => {
     const status = mapStatus(card.status, card.meta);
     const sourceLabel = toSourceLabel(card.sourceUrl);
-    const windows = card.windows.map((window) => toQuotaWindow(status, window));
+    const windows = card.windows.map((window) => toQuotaWindow(card.providerId, status, window));
     const trend =
       card.trend.length > 0
         ? card.trend.map(toTrendPoint)
@@ -524,7 +562,7 @@ function mapServerDashboard(server: ServerUsageDashboard): DashboardSnapshot {
 
     const accounts = (card.accounts ?? []).map((account) => {
       const accountStatus = mapStatus(account.status, account.meta);
-      const accountWindows = account.windows.map((window) => toQuotaWindow(accountStatus, window));
+      const accountWindows = account.windows.map((window) => toQuotaWindow(card.providerId, accountStatus, window));
       const isFallback = account.meta?.isFallback === true;
       const liveStatus = typeof account.meta?.liveStatus === "string" ? account.meta.liveStatus : null;
       return {
@@ -570,7 +608,7 @@ function mapServerDashboard(server: ServerUsageDashboard): DashboardSnapshot {
         card.capturedAt,
       ),
       trend,
-      modelSpends: [],
+      modelSpends: resolveModelSpends(card.providerId, card.metrics),
       links: toLinks(card.providerId, card.sourceUrl),
       selectedAccountId: card.selectedAccountId ?? accounts[0]?.id ?? null,
       accounts,
