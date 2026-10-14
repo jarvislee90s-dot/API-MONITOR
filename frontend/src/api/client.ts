@@ -516,7 +516,12 @@ function buildDetailMetrics(
     items.push({ label: "Token 刷新", value: metrics.codexTokenRefreshed === true ? "本轮已刷新" : "未刷新" });
     items.push({
       label: "抓取方式",
-      value: metrics.webFetchMethod === "snapshot_fallback" ? "快照回退" : "云端直连",
+      value:
+        metrics.webFetchMethod === "snapshot_fallback"
+          ? "快照回退"
+          : metrics.webFetchMethod === "unconfigured"
+            ? "未配置"
+            : "云端直连",
     });
     return items;
   }
