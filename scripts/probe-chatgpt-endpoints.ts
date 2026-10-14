@@ -72,11 +72,13 @@ async function probe(name: string, url: string, init: RequestInit): Promise<void
   try {
     const response = await fetch(url, init);
     const text = await response.text();
-    let body: unknown = text.slice(0, 2000);
+    let body: unknown;
     try {
       body = maskValue(JSON.parse(text));
     } catch {
-      // 非 JSON 原样截断展示
+      // 非 JSON 响应只打印长度与前 200 字符：异常路径（如 Cloudflare 拦截页、网关错误页）的
+      // 文本未经脱敏处理，可能携带 token、cookie 等敏感片段，不能像 JSON 那样大段输出
+      body = `(non-JSON, ${text.length} chars) ${text.slice(0, 200)}`;
     }
     console.log(`\n=== ${name} → HTTP ${response.status} (cf-mitigated: ${response.headers.get("cf-mitigated") ?? "(none)"}) ===`);
     console.log(JSON.stringify(body, null, 2));
