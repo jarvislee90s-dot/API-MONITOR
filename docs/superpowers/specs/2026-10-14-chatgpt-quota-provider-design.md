@@ -140,6 +140,13 @@ Edge Profile cookie ┴→ import-chatgpt-   POST /api/refresh ──→ DO 节�
 
 ## 风险与未验证点
 
+**2026-10-14 真实环境实测结论（导入验收时回填，替代此前的未验证标注）**：
+- Codex 用量端点实测为 `GET chatgpt.com/backend-api/codex/usage`（`rate_limits` 路径 404）；结构为 `rate_limit`（单数）包裹 `primary_window`/`secondary_window`，`used_percent` 为 0-100，`reset_at` 为 Unix 秒时间戳；`plan_type` 在响应顶层（订阅档位无需单独端点）；免费档主窗口为 30 天（`limit_window_seconds=2592000`），label 按窗口时长动态命名。
+- NextAuth session token 超过单 cookie 上限会分片存储（`.0/.1`），导入脚本收集分片按浏览器原样形态入库，Worker 原样回发。
+- 用户本地代理出口 IP 被 Cloudflare 质询（403 + `cf-mitigated: challenge`）：纯 Node fetch 全被拦，浏览器页面内同源 fetch 可通过——导入脚本的登录判定与 codex 校验均改为页面内执行；脚本自动检测系统代理并以 `NODE_USE_ENV_PROXY=1` 重启自身。
+- `accounts/check` 对 GET 返回 405（与 404 一并按免费档处理）；续费日期在免费档下无可获取来源，保持「订阅前无数据」，Plus 后需复核。
+- Worker（Cloudflare 出口）对 `codex/usage` 的可达性仍属未知，部署后验证；被质询时按既有设计降级（partial + 桶级补齐）。
+
 | 风险/未验证点 | 应对 |
 | --- | --- |
 | `chatgpt.com/backend-api/codex/rate_limits` 响应结构未验证 | 实现期先跑 `scripts/probe-chatgpt-endpoints.ts` 探测（输出脱敏结构）；解析器按多形态宽容提取 |
