@@ -9,6 +9,7 @@
  *   node --experimental-strip-types scripts/probe-chatgpt-endpoints.ts --refresh          # 额外探测刷新端点（会轮换 token）
  *   CHATGPT_SESSION_TOKEN=xxx node --experimental-strip-types scripts/probe-chatgpt-endpoints.ts  # 额外探测网页/订阅端点
  *   CODEX_AUTH_JSON=D:\path\auth.json node --experimental-strip-types scripts/probe-chatgpt-endpoints.ts
+ *   node --experimental-strip-types scripts/probe-chatgpt-endpoints.ts --browser          # 用本机浏览器会话在页面内探测候选端点（网页额度数据源排查）
  *
  * 说明：检测到 Windows 系统代理（或 HTTPS_PROXY）时自动以 NODE_USE_ENV_PROXY=1 重启自身使 fetch 走代理；
  *       CHATGPT_SESSION_TOKEN 支持纯 token 值或完整分片 cookie 串（含 "=" 时原样回发）。
@@ -166,6 +167,63 @@ async function ensureProxyOrRespawn(): Promise<boolean> {
   return true;
 }
 
+// ── --browser：用项目专用 Profile 的登录态在页面内探测候选端点 ──────────────────
+// 背景：免费档 /backend-api/rate_limits 返回 404，但网页聊天仍可用——需要确认「网页对话额度」
+// 是否在其它端点暴露（含正确的 web 端请求头）。chatgpt.com 拒绝 Cloudflare 出口，
+// 这些探测必须在真实浏览器页面内执行（同源 fetch），不能用云端或纯 Node fetch。
+const BROWSER_CANDIDATES: Array<{ label: string; url: string; withWebToken: boolean }> = [
+  { label: "rate_limits", url: WEB_RATE_LIMITS_URL, withWebToken: true },
+  { label: "accounts/check/v4-2023-04-27", url: "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27", withWebToken: true },
+  { label: "models", url: "https://chatgpt.com/backend-api/models?history_and_training_disabled=false", withWebToken: true },
+  { label: "me", url: "https://chatgpt.com/backend-api/me", withWebToken: true },
+  { label: "settings/user", url: "https://chatgpt.com/backend-api/settings/user", withWebToken: true },
+  { label: "conversation/limit", url: "https://chatgpt.com/backend-api/conversation/limit", withWebToken: true },
+  { label: "usage_limits", url: "https://chatgpt.com/backend-api/usage_limits", withWebToken: true },
+  { label: "codex/usage", url: CODEX_USAGE_URL, withWebToken: false },
+];
+
+async function probeInBrowser(): Promise<void> {
+  const { AUTH_SESSION_URL, extractSessionToken, fetchInPage } = await import("./chatgpt-browser.ts");
+  console.log("");
+  console.log("[INFO] --browser：打开项目专用 Profile 探测候选端点（需已登录 chatgpt.com）...");
+  const session = await extractSessionToken(false);
+  if (!session) {
+    console.error("[FAIL] 浏览器会话创建失败");
+    process.exitCode = 1;
+    return;
+  }
+  try {
+    const sessionResult = await fetchInPage(session.page, AUTH_SESSION_URL, { Accept: "application/json" });
+    const webToken =
+      sessionResult && typeof (sessionResult.body as { accessToken?: unknown } | null)?.accessToken === "string"
+        ? (sessionResult.body as { accessToken: string }).accessToken
+        : null;
+    console.log("");
+    console.log(
+      `=== auth/session → HTTP ${sessionResult?.status ?? "(failed)"}，网页 accessToken: ${webToken ? "已获取" : "未获取"} ===`,
+    );
+
+    for (const candidate of BROWSER_CANDIDATES) {
+      const headers: Record<string, string> = { Accept: "application/json" };
+      if (candidate.withWebToken && webToken) headers.Authorization = `Bearer ${webToken}`;
+      const result = await fetchInPage(session.page, candidate.url, headers);
+      if (!result) {
+        console.log("");
+        console.log(`=== ${candidate.label} → 页面内请求未完成 ===`);
+        continue;
+      }
+      const mitigated = result.cfMitigated ? `, cf-mitigated: ${result.cfMitigated}` : "";
+      console.log("");
+      console.log(`=== ${candidate.label} → HTTP ${result.status}${mitigated} ===`);
+      console.log(JSON.stringify(maskValue(result.body), null, 2));
+    }
+    console.log("");
+    console.log("[DONE] 若发现承载「网页对话额度」的端点，请补进 worker/providers/chatgpt.ts 的 web 桶链路并同步测试。");
+  } finally {
+    await session.context.close();
+  }
+}
+
 async function main(): Promise<void> {
   const auth = loadAuthJson();
   if (!auth) {
@@ -195,6 +253,11 @@ async function main(): Promise<void> {
     });
   } else {
     console.log("\n[SKIP] 未传 --refresh 或无 refresh token，跳过刷新端点探测（避免轮换）");
+  }
+
+  if (process.argv.includes("--browser")) {
+    await probeInBrowser();
+    return;
   }
 
   const sessionToken = process.env.CHATGPT_SESSION_TOKEN;

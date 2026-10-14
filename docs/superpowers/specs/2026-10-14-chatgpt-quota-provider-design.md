@@ -134,6 +134,11 @@ Edge Profile cookie ┴→ import-chatgpt-   POST /api/refresh ──→ DO 节�
 - 附带修复的真实缺陷：provider 内 `input.fetchImpl(...)` 以**方法形式**调用全局 fetch，在 workerd 下抛 `TypeError: Illegal invocation`（fetch 做 receiver 校验），三链路请求实际从未发出；已改为其它 provider 的本地绑定写法。此前该缺陷被通用错误文案（"（含 Cloudflare 拦截）"）掩盖，误导首轮排查——通用文案现按桶级分类替换（质询 / 封锁 / 凭据失效分开措辞）。
 - 403 封锁页（403 + HTML + 无 cf-mitigated）单独分类为 `egressBlocked`：不按 `login_required` 误报凭据失效、**不消耗 token 刷新**（避免 refresh token 轮换后无法写回），summary 指向 `scripts/refresh-chatgpt-usage.ts`。
 
+**2026-10-15 分桶展示补遗（用户反馈：Codex 免费月额度用尽但网页仍可聊天）**：
+- 分桶从数据层延伸到展示层：窗口新增 `meta.bucket`（`codex` 编码额度 / `web` 网页对话额度），前端窗口 `scope` 改用桶名（「Codex 编码额度」「网页对话额度」），不再等于 label 造成重复且看不出归属。
+- 网页桶无窗口时（免费档 `rate_limits` 返回 404）卡片追加**占位说明行**：「与 Codex 编码额度独立计量，Codex 用尽不影响网页聊天；本档位接口暂未提供该额度数据（返回 404）」，避免把 Codex 用尽误读成「ChatGPT 没额度了」。占位行不参与 trend、不画进度条；完全没有窗口时保持通用空态文案。
+- 免费档「网页对话额度」是否存在其它数据源仍未确认：候选端点（`accounts/check/v4-2023-04-27`、`models`、`me`、`settings/user`、`conversation/limit`、`usage_limits` 等）探测已加入 `scripts/probe-chatgpt-endpoints.ts --browser`（需本机代理与已登录 Profile 页面内执行），查到后按同一分桶链路接入。
+
 **第一期终审沉淀的技术债（二期候选，按优先级）**：
 1. chatgpt partial 但无缺失窗口（窗口全在、仅订阅降级）时不满足 staleWindowKeys 豁免条件，会被整卡回退用旧 ready 卡替换、遮蔽实取新值——豁免条件可放宽为「chatgpt 且 partial 且 windows 非空」（`worker/index.ts` applyLatestReadyFallback）。
 2. handleRefresh 无账号分支（入口型 env 配置）绕过 postProcessSnapshots，不享受桶级补齐。

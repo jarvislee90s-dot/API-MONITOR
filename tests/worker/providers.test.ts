@@ -1620,6 +1620,24 @@ describe("chatgpt adapter (codex 链路)", () => {
     expect(windows[1]).toMatchObject({ percentUsed: 3 });
   });
 
+  it("codex 窗口带 meta.bucket=codex 桶标记（实测 rate_limit.primary/secondary_window 结构）", () => {
+    // 前端据 meta.bucket 区分「Codex 编码额度」与「网页对话额度」两个独立计量桶
+    const windows = parseCodexWindows(
+      {
+        rate_limit: {
+          allowed: true,
+          limit_reached: false,
+          primary_window: { used_percent: 42.5, limit_window_seconds: 18000, reset_after_seconds: 3600 },
+          secondary_window: { used_percent: 25, limit_window_seconds: 604800, reset_at: 1794844800 },
+        },
+      },
+      NOW,
+    );
+
+    expect(windows.map((w) => w.key)).toEqual(["codex_5h", "codex_weekly"]);
+    expect(windows.map((w) => w.meta)).toEqual([{ bucket: "codex" }, { bucket: "codex" }]);
+  });
+
   it("refreshes the codex token on 401 and carries credentialUpdate", async () => {
     let rateLimitsCalls = 0;
     const fetchImpl = vi.fn(async (input: string | URL | Request) => {
@@ -2181,6 +2199,33 @@ describe("chatgpt adapter (网页/订阅链路)", () => {
     expect(objectWindows.map((w) => w.key)).toEqual(["web_5h_gpt_5_high"]);
     expect(arrayWindows.map((w) => w.key)).toEqual(["web_5h_gpt_5_high"]);
     expect(objectWindows[0].label).toBe("对话 5小时·gpt_5_high");
+  });
+
+  it("旧 message_cap 形态窗口带 meta.bucket=web 桶标记", () => {
+    const windows = parseWebRateLimitWindows(
+      {
+        message_cap: { max_cap: 10, remaining_cap: 7, reset_at: "2026-10-14T03:00:00Z" },
+        gpt_5x_message_cap: { max_cap: 40, remaining_cap: 30, reset_at: "2026-10-14T03:00:00Z" },
+      },
+      NOW,
+    );
+
+    expect(windows.map((w) => w.key)).toEqual(["web_5h_default", "web_5h_gpt_5x"]);
+    expect(windows.map((w) => w.meta)).toEqual([{ bucket: "web" }, { bucket: "web" }]);
+  });
+
+  it("新分组形态（数组与对象）窗口带 meta.bucket=web 桶标记", () => {
+    const arrayWindows = parseWebRateLimitWindows(
+      [{ slug: "gpt_5_high", used_percent: 0.4, resets_in_seconds: 900 }],
+      NOW,
+    );
+    const objectWindows = parseWebRateLimitWindows(
+      { gpt_5_high: { used_percent: 0.4, resets_in_seconds: 900 } },
+      NOW,
+    );
+
+    expect(arrayWindows.map((w) => w.meta)).toEqual([{ bucket: "web" }]);
+    expect(objectWindows.map((w) => w.meta)).toEqual([{ bucket: "web" }]);
   });
 
   it("maps a 401 on the web session link to login_required with session wording", async () => {

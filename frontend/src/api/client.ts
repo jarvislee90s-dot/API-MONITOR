@@ -34,6 +34,10 @@ export interface QuotaWindow {
   percentUsed?: number | null;
   resetAt: string;
   status: PlatformStatus;
+  // 额度桶归属（ChatGPT：codex 编码额度 / web 网页对话额度，两桶独立计量）
+  bucket?: string | null;
+  // 无数据桶的占位说明：渲染为灰色说明行，不画进度条
+  note?: string;
 }
 
 export type DetailMetric = {
@@ -383,7 +387,7 @@ function resolvePrimaryMetricLabel(providerId: string, windows: ServerProviderWi
   if (providerId === "deepseek") return "充值余额";
   if (providerId === "zhipu") return "5小时配额";
   if (providerId === "ollama") return "5小时额度";
-  if (providerId === "chatgpt") return "Codex 5小时";
+  if (providerId === "chatgpt") return windows[0]?.label ?? "Codex 编码额度";
   return windows[0]?.label ?? "当前状态";
 }
 
@@ -426,18 +430,65 @@ function formatChatgptPlanRenewAt(value: unknown): string {
   return formatResetAt(value);
 }
 
+// 额度桶标题：ChatGPT 两个桶独立计量（spec §2），窗口上带 meta.bucket 时用它做 scope 标注
+function bucketTitle(bucket: string | null): string | null {
+  if (bucket === "codex") return "Codex 编码额度";
+  if (bucket === "web") return "网页对话额度";
+  return null;
+}
+
 function toQuotaWindow(providerId: string, status: PlatformStatus, window: ServerProviderWindow): QuotaWindow {
   // worker 桶级补齐的历史窗口打 stale 标记，label 加后缀提示
   const stale = window.meta?.stale === true;
+  // 桶归属优先取 worker 写入的 meta.bucket；旧快照无该字段时按既定 key 前缀兜底
+  // （codex_5h / codex_weekly / web_5h_<slug>，见 spec §2 映射表）
+  const bucket =
+    typeof window.meta?.bucket === "string"
+      ? window.meta.bucket
+      : window.key.startsWith("codex_")
+        ? "codex"
+        : window.key.startsWith("web_")
+          ? "web"
+          : null;
+  const title = bucketTitle(bucket);
   return {
     label: stale ? `${window.label}（历史）` : window.label,
-    scope: window.label,
+    // 分桶窗口用桶名作 scope（原来等于 label，重复且看不出归属）；其它供应商维持原样
+    scope: title ?? window.label,
+    bucket,
     used: window.used ?? 0,
     limit: window.limit ?? 0,
     percentUsed: window.percentUsed ?? null,
     resetAt: formatOllamaResetAt(providerId, window.resetAt),
     status,
   };
+}
+
+// ChatGPT 两个额度桶独立计量：网页对话额度在免费档没有数据源（rate_limits 返回 404），
+// 显式占位说明，避免把「Codex 编码额度用尽」误读成「ChatGPT 整体没额度、不能聊天了」
+function withChatgptBucketNote(
+  providerId: string,
+  windows: QuotaWindow[],
+  status: PlatformStatus,
+): QuotaWindow[] {
+  if (providerId !== "chatgpt") return windows;
+  // 完全没有窗口时（未配置凭据 / 全链路失败）保持通用空态文案，不叠加桶说明
+  if (windows.length === 0) return windows;
+  if (windows.some((window) => window.bucket === "web")) return windows;
+  return [
+    ...windows,
+    {
+      label: "网页对话额度",
+      scope: "网页对话额度",
+      bucket: "web",
+      note: "与 Codex 编码额度独立计量，Codex 用尽不影响网页聊天；本档位接口暂未提供该额度数据（返回 404）",
+      used: 0,
+      limit: 0,
+      percentUsed: null,
+      resetAt: "",
+      status,
+    },
+  ];
 }
 
 // 数值转"万"单位（>=1 万时），如 12000 -> 1.2万
@@ -636,7 +687,7 @@ function mapServerDashboard(server: ServerUsageDashboard): DashboardSnapshot {
           ? formatWindowValue(account.windows[0])
           : account.summary,
         lastRefreshedAt: account.capturedAt,
-        quotaWindows: accountWindows,
+        quotaWindows: withChatgptBucketNote(card.providerId, accountWindows, accountStatus),
         trend:
           account.trend.length > 0
             ? account.trend.map(toTrendPoint)
@@ -658,7 +709,8 @@ function mapServerDashboard(server: ServerUsageDashboard): DashboardSnapshot {
       primaryMetricValue: primaryWindow ? formatWindowValue(primaryWindow) : card.summary,
       lastRefreshedAt: card.capturedAt,
       accent: resolveAccent(card.providerId),
-      quotaWindows: windows,
+      // 占位说明行加在 trend 计算之后（trend 只取真实窗口，不受占位行影响）
+      quotaWindows: withChatgptBucketNote(card.providerId, windows, status),
       detailMetrics: buildDetailMetrics(
         card.providerId,
         card,

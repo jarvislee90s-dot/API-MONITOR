@@ -34,6 +34,16 @@ export function QuotaWindowList({ windows }: QuotaWindowListProps) {
   return (
     <div className="quota-list">
       {windows.map((window) => {
+        // 无数据桶的占位说明：只解释归属与原因，不画进度条、不显示数值
+        if (window.note) {
+          return (
+            <section key={`${window.label}-note`} className="quota-row quota-row--note">
+              <p className="section-label">{window.scope}</p>
+              <p className="quota-row__note">{window.note}</p>
+            </section>
+          );
+        }
+
         const ratio = getRatio(window);
         const hasLimit = window.limit > 0;
         const hasPercent = typeof window.percentUsed === "number" && Number.isFinite(window.percentUsed);
