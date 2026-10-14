@@ -4,7 +4,7 @@ import { createLiveLoginSession } from "./browser/live-login";
 import { listProviders, getProvider, isProviderId } from "./providers/registry";
 import { RefreshSessionDurableObject } from "./durable-object/refresh-session";
 import { handleSettingsRequest } from "./settings/routes";
-import { getActiveProviderAccountConfig, getProviderAccountConfigById, listProviderSettings } from "./settings/repository";
+import { getActiveProviderAccountConfig, getProviderAccountConfigById, listProviderSettings, updateProviderAccountCredentials } from "./settings/repository";
 import { requireUser } from "./auth";
 import { handleIngestDeepSeek, handleIngestOpenCodeGo, handleIngestZhipu } from "./ingest";
 import type {
@@ -99,6 +99,15 @@ function buildProviderConfig(env: WorkerEnv, providerId: string): Record<string,
       apiUrl: env.OLLAMA_URL,
       apiKey: env.OLLAMA_KEY,
       authCookie: env.OLLAMA_AUTH_COOKIE,
+    };
+  }
+
+  if (providerId === "chatgpt") {
+    return {
+      accessToken: env.CHATGPT_ACCESS_TOKEN,
+      refreshToken: env.CHATGPT_REFRESH_TOKEN,
+      accountId: env.CHATGPT_ACCOUNT_ID,
+      sessionToken: env.CHATGPT_SESSION_TOKEN,
     };
   }
 
@@ -273,13 +282,38 @@ async function fetchProviderSnapshot(
     fetchImpl: fetch,
     config: configOverride ?? buildProviderConfig(env, providerId),
   };
-  if (providerId === "opencode-go") {
+  if (providerId === "opencode-go" || providerId === "chatgpt") {
     fetchInput.requestTimeoutMs = 15_000;
-    fetchInput.browser = env.OPENCODE_BROWSER;
+    if (providerId === "opencode-go") {
+      fetchInput.browser = env.OPENCODE_BROWSER;
+    }
   }
 
   try {
     const result = await provider.fetchSnapshot(fetchInput);
+    // chatgpt token 轮换写回：失败仅 warning，不阻塞快照（spec §4）；
+    // 仅带 accountId 的账号刷新链路写回，调试路径（handleProviderSnapshot）无账号上下文不写回
+    if (
+      result.credentialUpdate &&
+      account?.accountId &&
+      env.SUPABASE_URL &&
+      env.SUPABASE_SERVICE_ROLE_KEY &&
+      env.SUPABASE_USER_ID
+    ) {
+      try {
+        await updateProviderAccountCredentials(
+          env,
+          env.SUPABASE_USER_ID,
+          account.accountId,
+          result.credentialUpdate,
+          fetch,
+        );
+      } catch (error) {
+        console.warn(
+          `[chatgpt] token 写回失败: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
     if (!account?.accountId) {
       return result.snapshot;
     }
@@ -384,20 +418,25 @@ async function fetchLatestReadySnapshots(env: WorkerEnv, userId: string | null):
   return snapshots;
 }
 
-async function applyLatestReadyFallback(env: WorkerEnv, userId: string | null, snapshots: ProviderSnapshot[]): Promise<ProviderSnapshot[]> {
+async function applyLatestReadyFallback(
+  env: WorkerEnv,
+  userId: string | null,
+  snapshots: ProviderSnapshot[],
+  latestReadySnapshots?: Map<string, ProviderSnapshot>,
+): Promise<ProviderSnapshot[]> {
   if (snapshots.every((snapshot) => snapshot.status === "ready" && snapshot.windows.length > 0)) {
     return snapshots;
   }
 
-  const latestReadySnapshots = await fetchLatestReadySnapshots(env, userId);
-  if (latestReadySnapshots.size === 0) {
+  const fallbacks = latestReadySnapshots ?? (await fetchLatestReadySnapshots(env, userId));
+  if (fallbacks.size === 0) {
     return snapshots;
   }
 
   return snapshots.map((snapshot) => {
-    // 与 fetchLatestReadySnapshots 的 key 口径一致:有 accountId 按账号,否则按 source_url
+    // 与 fetchLatestReadySnapshots 的 key 口径一致,有 accountId 按账号,否则按 source_url
     const accountId = typeof snapshot.meta?.accountId === "string" ? snapshot.meta.accountId : null;
-    const fallback = latestReadySnapshots.get(accountId ?? "") ?? latestReadySnapshots.get(snapshot.sourceUrl);
+    const fallback = fallbacks.get(accountId ?? "") ?? fallbacks.get(snapshot.sourceUrl);
     if (!fallback) return snapshot;
     if (snapshot.status === "ready" && snapshot.windows.length > 0) return snapshot;
     return {
@@ -411,6 +450,35 @@ async function applyLatestReadyFallback(env: WorkerEnv, userId: string | null, s
         isFallback: true,
         liveStatus: snapshot.status,
         liveSummary: snapshot.summary,
+      },
+    };
+  });
+}
+
+// chatgpt 桶级窗口补齐（spec §6）：partial 快照缺失的窗口用上一份 ready 快照补回，
+// 补齐窗口打 meta.stale=true；三链路全失败（error）仍由 applyLatestReadyFallback 整卡回退
+export function backfillPartialWindows(
+  snapshots: ProviderSnapshot[],
+  latestReadySnapshots: Map<string, ProviderSnapshot>,
+): ProviderSnapshot[] {
+  return snapshots.map((snapshot) => {
+    if (snapshot.providerId !== "chatgpt" || snapshot.status !== "partial") return snapshot;
+    const accountId = typeof snapshot.meta?.accountId === "string" ? snapshot.meta.accountId : null;
+    const previous =
+      latestReadySnapshots.get(accountId ?? "") ?? latestReadySnapshots.get(snapshot.sourceUrl);
+    if (!previous || previous.windows.length === 0) return snapshot;
+    const existingKeys = new Set(snapshot.windows.map((window) => window.key));
+    const missing = previous.windows.filter((window) => !existingKeys.has(window.key));
+    if (missing.length === 0) return snapshot;
+    return {
+      ...snapshot,
+      windows: [
+        ...snapshot.windows,
+        ...missing.map((window) => ({ ...window, meta: { ...(window.meta ?? {}), stale: true } })),
+      ],
+      meta: {
+        ...snapshot.meta,
+        staleWindowKeys: missing.map((window) => window.key),
       },
     };
   });
@@ -562,16 +630,17 @@ async function handleProviderSnapshot(request: Request, providerId: string, env:
     fetchImpl: fetch,
     config: await buildProviderRuntimeConfig(env, env.SUPABASE_USER_ID ?? null, providerId, fetch),
   };
-  if (providerId === "opencode-go") {
+  if (providerId === "opencode-go" || providerId === "chatgpt") {
     fetchInput.requestTimeoutMs = 15_000;
   }
-  const snapshot = await provider.fetchSnapshot(fetchInput);
+  const result = await provider.fetchSnapshot(fetchInput);
 
   if (request.headers.get("x-api-monitor-persist") === "1") {
-    await persistSnapshot(env, env.SUPABASE_USER_ID ?? null, snapshot.snapshot, null);
+    await persistSnapshot(env, env.SUPABASE_USER_ID ?? null, result.snapshot, null);
   }
 
-  return successResponse(snapshot);
+  // credentialUpdate 只进写回通道（spec §4）：调试路径不写回，轮换后的 token 也不回传给调用方
+  return successResponse({ snapshot: result.snapshot, warnings: result.warnings });
 }
 
 async function resolveRequestUserId(
@@ -616,10 +685,12 @@ async function handleDashboardRefresh(request: Request, env: WorkerEnv, userId: 
   const decision = decisionPayload.data ?? null;
   const shouldPersist = body.persist !== false && Boolean(env.SUPABASE_URL && env.SUPABASE_SERVICE_ROLE_KEY && userId);
   const liveSnapshots = await collectUsageSnapshots(env, userId);
-  const displaySnapshots = await applyLatestReadyFallback(env, userId, liveSnapshots);
+  const latestReadySnapshots = await fetchLatestReadySnapshots(env, userId);
+  const backfilledSnapshots = backfillPartialWindows(liveSnapshots, latestReadySnapshots);
+  const displaySnapshots = await applyLatestReadyFallback(env, userId, backfilledSnapshots, latestReadySnapshots);
 
   if (shouldPersist && decision?.allowed) {
-    for (const snapshot of liveSnapshots) {
+    for (const snapshot of backfilledSnapshots) {
       await persistSnapshot(env, userId, snapshot, decision);
     }
   }
@@ -683,16 +754,20 @@ async function handleRefresh(request: Request, env: WorkerEnv): Promise<Response
   }
 
   const snapshots = await collectUsageSnapshots(env, userId, body.providerId);
-  const hasAccountSnapshots = snapshots.some((snapshot) => typeof snapshot.meta.accountId === "string");
+  const latestReadySnapshots = await fetchLatestReadySnapshots(env, userId);
+  const backfilledSnapshots = backfillPartialWindows(snapshots, latestReadySnapshots);
+  const hasAccountSnapshots = backfilledSnapshots.some(
+    (snapshot) => typeof snapshot.meta.accountId === "string",
+  );
 
   if (hasAccountSnapshots) {
     if (body.persist !== false) {
-      for (const snapshot of snapshots) {
+      for (const snapshot of backfilledSnapshots) {
         await persistSnapshot(env, userId, snapshot, decision);
       }
     }
 
-    const dashboard = buildUsageDashboard(snapshots, {
+    const dashboard = buildUsageDashboard(backfilledSnapshots, {
       providerPreferences: await readDashboardPreferences(env, userId),
       refresh: {
         scope: "single",

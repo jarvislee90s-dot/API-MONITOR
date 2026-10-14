@@ -1,9 +1,9 @@
 ﻿import { describe, expect, it, vi } from "vitest";
 
-import { handleApiRequest } from "../../worker/index";
+import { backfillPartialWindows, handleApiRequest } from "../../worker/index";
 import { buildUsageDashboard } from "../../worker/dashboard";
 import { RefreshSessionDurableObject } from "../../worker/durable-object/refresh-session";
-import { encryptCredentialPayload } from "../../worker/security/credentials";
+import { decryptCredentialPayload, encryptCredentialPayload } from "../../worker/security/credentials";
 import type { ProviderSnapshot, WorkerEnv } from "../../worker/types";
 
 class MemoryStorage {
@@ -1880,6 +1880,183 @@ describe("worker api", () => {
       const headers = new Headers(init?.headers);
       expect(headers.get("authorization")).toBe("env-token");
       expect(headers.get("cookie")).toContain("bigmodel_token_production=env-token");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("chatgpt 集成", () => {
+  const encryptionKey = "0123456789abcdef0123456789abcdef";
+
+  it("backfillPartialWindows 补齐 partial 快照缺失窗口并标记 stale，非 chatgpt/非 partial 不动", () => {
+    const previous: ProviderSnapshot = {
+      providerId: "chatgpt",
+      providerName: "ChatGPT",
+      sourceUrl: "https://chatgpt.com",
+      status: "ready",
+      capturedAt: "2026-10-13T00:00:00.000Z",
+      summary: "ready",
+      windows: [
+        { key: "codex_5h", label: "Codex 5小时", used: 20, limit: 100, percentUsed: 20 },
+        { key: "web_5h_default", label: "对话 5小时·default", used: 30, limit: 100, percentUsed: 30 },
+      ],
+      metrics: {},
+      meta: {},
+    };
+    const chatgptPartial: ProviderSnapshot = {
+      ...previous,
+      status: "partial",
+      capturedAt: "2026-10-14T00:00:00.000Z",
+      windows: [{ key: "codex_5h", label: "Codex 5小时", used: 40, limit: 100, percentUsed: 40 }],
+      summary: "partial",
+    };
+    const zhipuPartial: ProviderSnapshot = {
+      providerId: "zhipu",
+      providerName: "智谱 BigModel",
+      sourceUrl: "https://bigmodel.cn/coding-plan/personal/usage",
+      status: "partial",
+      capturedAt: "2026-10-14T00:00:00.000Z",
+      summary: "partial",
+      windows: [],
+      metrics: {},
+      meta: {},
+    };
+
+    const result = backfillPartialWindows(
+      [chatgptPartial, zhipuPartial],
+      new Map([["https://chatgpt.com", previous]]),
+    );
+
+    expect(result[0]?.windows).toHaveLength(2);
+    expect(result[0]?.windows[1]).toMatchObject({ key: "web_5h_default", meta: { stale: true } });
+    expect(result[0]?.meta.staleWindowKeys).toEqual(["web_5h_default"]);
+    expect(result[1]).toBe(zhipuPartial);
+  });
+
+  it("refresh 刷新 chatgpt 时把轮换后的 token 写回 Supabase", async () => {
+    const encrypted = await encryptCredentialPayload(
+      { accessToken: "fake-access-token-1", refreshToken: "fake-refresh-token-1", accountId: "fake-account-1" },
+      encryptionKey,
+    );
+    const writes: Array<{ url: string; method: string; body: Record<string, unknown> | null }> = [];
+    let rateLimitsCalls = 0;
+
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+      const method = init?.method ?? "GET";
+      if (init?.body) {
+        writes.push({ url, method, body: JSON.parse(String(init.body)) as Record<string, unknown> });
+      }
+
+      if (url.startsWith("https://supabase.test/rest/v1/provider_preferences")) {
+        return new Response(
+          JSON.stringify([{ provider_key: "chatgpt", enabled: true, display_order: 1, active_provider_account_id: null }]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.startsWith("https://supabase.test/rest/v1/provider_accounts") && method === "GET") {
+        if (url.includes("id=eq.acc-1")) {
+          return new Response(
+            JSON.stringify([{ provider_key: "chatgpt", config: {}, source_url: "https://chatgpt.com" }]),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response(
+          JSON.stringify([
+            { id: "acc-1", provider_key: "chatgpt", account_label: "默认账号", homepage_enabled: true, homepage_order: 100 },
+          ]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.startsWith("https://supabase.test/rest/v1/provider_account_credentials") && method === "GET") {
+        return new Response(
+          JSON.stringify([{ encrypted_payload: encrypted.encryptedPayload, nonce: encrypted.nonce, key_version: "v1" }]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.startsWith("https://supabase.test/rest/v1/usage_snapshots") && method === "GET") {
+        return new Response(JSON.stringify([]), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (url.startsWith("https://supabase.test/")) {
+        return new Response("{}", { status: 201 });
+      }
+      if (url === "https://auth.openai.com/oauth/token") {
+        return new Response(
+          JSON.stringify({ access_token: "fake-access-token-2", refresh_token: "fake-refresh-token-2" }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url === "https://chatgpt.com/backend-api/codex/rate_limits") {
+        rateLimitsCalls += 1;
+        if (rateLimitsCalls === 1) return new Response("{}", { status: 401 });
+        return new Response(
+          JSON.stringify({ rate_limits: { codex_5h: { used_percent: 15 } } }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+
+    vi.stubGlobal("fetch", fetchImpl as unknown as typeof fetch);
+    try {
+      const env = {
+        ...createEnv(fetchImpl as typeof fetch),
+        SUPABASE_URL: "https://supabase.test",
+        SUPABASE_SERVICE_ROLE_KEY: "service-role-test",
+        SUPABASE_USER_ID: "user-1",
+        CREDENTIAL_ENCRYPTION_KEY: encryptionKey,
+      };
+      const response = await handleApiRequest(
+        new Request("https://api.monitor.local/api/refresh", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ providerId: "chatgpt" }),
+        }),
+        env,
+      );
+      const payload = (await response.json()) as {
+        ok: boolean;
+        data: { cards: Array<{ providerId: string; status: string; metrics: Record<string, unknown> }> };
+      };
+
+      expect(response.status).toBe(200);
+      expect(payload.ok).toBe(true);
+      const card = payload.data.cards[0];
+      expect(card).toMatchObject({ providerId: "chatgpt", status: "ready" });
+      expect(card?.metrics.codexTokenRefreshed).toBe(true);
+
+      // 写回通道：加密覆盖 provider_account_credentials
+      const credWrite = writes.find(
+        (write) =>
+          write.url.startsWith("https://supabase.test/rest/v1/provider_account_credentials") &&
+          write.method === "POST",
+      );
+      expect(credWrite).toBeDefined();
+      expect(credWrite?.body).toMatchObject({ user_id: "user-1", provider_account_id: "acc-1" });
+      expect(JSON.stringify(credWrite?.body)).not.toContain("fake-access-token-2");
+      const decryptedUpdate = await decryptCredentialPayload(
+        {
+          encryptedPayload: String(credWrite?.body?.encrypted_payload),
+          nonce: String(credWrite?.body?.nonce),
+          keyVersion: "v1",
+        },
+        encryptionKey,
+      );
+      expect(decryptedUpdate).toEqual({
+        accessToken: "fake-access-token-2",
+        refreshToken: "fake-refresh-token-2",
+      });
+
+      // hint 脱敏同步
+      const hintPatch = writes.find(
+        (write) => write.method === "PATCH" && write.url.startsWith("https://supabase.test/rest/v1/provider_accounts"),
+      );
+      expect(hintPatch?.body?.credential_hint).toEqual({
+        accessToken: "fake-...en-2",
+        refreshToken: "fake-...en-2",
+      });
     } finally {
       vi.unstubAllGlobals();
     }
