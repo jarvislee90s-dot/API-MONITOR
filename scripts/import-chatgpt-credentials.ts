@@ -3,7 +3,8 @@
  *
  * 1. 读取 ~/.codex/auth.json（Codex CLI 登录产物），提取 accessToken / refreshToken / accountId；
  * 2. 复用项目专用浏览器 Profile（output/chatgpt-browser-profile，已 gitignore）打开 chatgpt.com，
- *    已登录则提取 __Secure-next-auth.session-token，未登录等待人工 Google 登录（不自动化登录）；
+ *    已登录则提取 __Secure-next-auth.session-token 并调 /api/auth/session 验证服务端仍认可，
+ *    未登录（含 Profile 残留已被服务端失效的死 cookie）时等待人工 Google 登录（不自动化登录）；
  * 3. 用 accessToken 试调一次 codex rate_limits，成功才继续；
  * 4. AES-GCM 加密凭据，按 provider_key=chatgpt + account_label=默认账号 upsert 到 Supabase；
  * 5. --check 干跑：只读取与校验，不写库。
@@ -12,7 +13,10 @@
  *   node --experimental-strip-types scripts/import-chatgpt-credentials.ts --check
  *   node --experimental-strip-types scripts/import-chatgpt-credentials.ts [--skip-browser] [--auth-json <路径>]
  *
+ *   --relogin：进入浏览器后先清除 Profile 中的旧 cookie，再走登录检测/等待（换账号或 cookie 污染时使用）。
+ *
  * 安全：auth.json 与 cookie 仅在内存中转，不复制进项目目录、不进 git；输出只打印脱敏 hint。
+ * --check 干跑只读取与校验，不写库，也不依赖 .env（Supabase 配置仅在真正写入前加载）。
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -22,7 +26,13 @@ import { chromium } from "playwright";
 const PROFILE_DIR = resolve(process.cwd(), "output/chatgpt-browser-profile");
 const CHATGPT_HOME = "https://chatgpt.com";
 const CODEX_RATE_LIMITS_URL = "https://chatgpt.com/backend-api/codex/rate_limits";
+const AUTH_SESSION_URL = "https://chatgpt.com/api/auth/session";
 const LOGIN_WAIT_MS = 300_000;
+// 与真实浏览器一致的 UA，避免服务端接口按自动化 UA 拒绝
+const BROWSER_USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+// 登录入口文案：英文 "Log in" / 中文「登录」均视为未登录
+const LOGIN_ENTRY_SELECTOR = "text=/Log in|登录/i";
 
 function loadEnv(): Record<string, string> {
   const envPath = resolve(process.cwd(), ".env");
@@ -81,8 +91,34 @@ function maskHint(value: string): string {
   return `${value.slice(0, 5)}...${value.slice(-4)}`;
 }
 
-// 从专用 Profile 提取 chatgpt.com 的 __Secure-next-auth.session-token；未登录则等待人工登录
-async function extractSessionToken(): Promise<string | null> {
+// 校验 session cookie 是否被服务端认可：GET /api/auth/session，响应含非空 accessToken 才算有效。
+// 未登录时该接口返回 200 + 空 JSON，因此必须检查 accessToken，不能只看 HTTP 状态码。
+async function validateSessionCookie(token: string): Promise<{ valid: boolean; error?: string }> {
+  try {
+    const resp = await fetch(AUTH_SESSION_URL, {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        Cookie: `__Secure-next-auth.session-token=${token}`,
+        "User-Agent": BROWSER_USER_AGENT,
+      },
+    });
+    if (!resp.ok) {
+      return { valid: false, error: `HTTP ${resp.status}` };
+    }
+    const json = (await resp.json().catch(() => null)) as { accessToken?: unknown } | null;
+    if (!json || typeof json.accessToken !== "string" || json.accessToken.length === 0) {
+      return { valid: false, error: "响应不含 accessToken" };
+    }
+    return { valid: true };
+  } catch (err) {
+    return { valid: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+// 从专用 Profile 提取 chatgpt.com 的 __Secure-next-auth.session-token；未登录则等待人工登录。
+// 只会返回通过服务端验证的 cookie：Profile 残留的死 cookie 一律按未登录处理。
+async function extractSessionToken(forceRelogin: boolean): Promise<string | null> {
   const context = await chromium.launchPersistentContext(PROFILE_DIR, {
     headless: false,
     viewport: { width: 1280, height: 900 },
@@ -90,6 +126,12 @@ async function extractSessionToken(): Promise<string | null> {
   });
 
   try {
+    // --relogin：先清空旧 cookie，避免残留死 session-token 短路登录检测（换账号 / cookie 污染场景）
+    if (forceRelogin) {
+      await context.clearCookies();
+      console.log("[INFO] 已清除 Profile 中的旧 cookie（--relogin）");
+    }
+
     const page = context.pages()[0] ?? (await context.newPage());
     console.log(`[INFO] 打开 ${CHATGPT_HOME} ...`);
     await page.goto(CHATGPT_HOME, { waitUntil: "domcontentloaded", timeout: 60_000 });
@@ -101,10 +143,16 @@ async function extractSessionToken(): Promise<string | null> {
       return token?.value ?? null;
     };
 
-    // 页面无 "Log in" 入口且已拿到 cookie → 已登录
+    // 登录入口检测（快速路径与等待循环共用）：页面仍显示登录入口即视为未登录
+    const loginEntry = page.locator(LOGIN_ENTRY_SELECTOR);
+
+    // 快速路径：有 cookie + 页面无登录入口 + 服务端验证通过 → 已登录
     const immediate = await readToken();
-    const loginButtons = await page.locator("text=Log in").count();
-    if (immediate && loginButtons === 0) return immediate;
+    if (immediate && (await loginEntry.count()) === 0) {
+      const validation = await validateSessionCookie(immediate);
+      if (validation.valid) return immediate;
+      console.warn(`[WARN] Profile 残留的 session cookie 已被服务端失效（${validation.error}），按未登录处理`);
+    }
 
     console.log("");
     console.log("═════════════════════════════════════════════════");
@@ -113,8 +161,17 @@ async function extractSessionToken(): Promise<string | null> {
     console.log("═════════════════════════════════════════════════");
     const deadline = Date.now() + LOGIN_WAIT_MS;
     while (Date.now() < deadline) {
-      const token = await readToken();
-      if (token) return token;
+      try {
+        const token = await readToken();
+        // 接受 cookie 前复评登录入口：页面还显示登录按钮说明 cookie 是残留死值，继续等待人工登录
+        if (token && (await loginEntry.count()) === 0) {
+          const validation = await validateSessionCookie(token);
+          if (validation.valid) return token;
+          console.warn(`[WARN] session cookie 服务端验证未通过（${validation.error}），继续等待人工登录`);
+        }
+      } catch {
+        // 人工登录涉及多次跳转，页面导航瞬间 locator 可能暂时失效，下一轮重试
+      }
       await page.waitForTimeout(2_000);
     }
     console.error(`[FAIL] 登录超时（${LOGIN_WAIT_MS / 1000} 秒）`);
@@ -254,9 +311,14 @@ async function upsertChatgptAccountCredentials(
       key_version: encrypted.keyVersion,
     }),
   });
-  console.log(credResp.ok ? "[OK] 加密凭据已写入 provider_account_credentials" : `[WARN] 加密凭据写入失败: HTTP ${credResp.status}`);
+  if (!credResp.ok) {
+    console.warn(`[WARN] 加密凭据写入失败: HTTP ${credResp.status}`);
+    console.warn("[WARN] 凭据未写入，账号状态未变更");
+    return;
+  }
+  console.log("[OK] 加密凭据已写入 provider_account_credentials");
 
-  // 4. 同步脱敏 hint 与账号状态
+  // 4. 同步脱敏 hint 与账号状态（凭据写入成功才把账号标为 ready）
   const hint = Object.fromEntries(Object.entries(credentials).map(([key, value]) => [key, maskHint(value)]));
   const patchResp = await fetch(new URL(`/rest/v1/provider_accounts?id=eq.${accountId}`, supabaseUrl), {
     method: "PATCH",
@@ -270,13 +332,14 @@ async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const checkOnly = args.includes("--check");
   const skipBrowser = args.includes("--skip-browser");
+  const forceRelogin = args.includes("--relogin");
   const authJsonIndex = args.indexOf("--auth-json");
   const authJsonPath =
     authJsonIndex >= 0 && args[authJsonIndex + 1]
       ? resolve(args[authJsonIndex + 1]!)
       : resolve(process.env.USERPROFILE ?? process.env.HOME ?? ".", ".codex/auth.json");
 
-  const env = loadEnv();
+  // --check 干跑只读取与校验，不写库，因此不加载 .env（loadEnv 延迟到真正写入前）
 
   const codex = readCodexAuthJson(authJsonPath);
   if (!codex) {
@@ -287,9 +350,12 @@ async function main(): Promise<void> {
 
   let sessionToken: string | null = null;
   if (skipBrowser) {
+    if (forceRelogin) {
+      console.warn("[WARN] --relogin 与 --skip-browser 同时传入：未打开浏览器，--relogin 不生效");
+    }
     console.warn("[WARN] --skip-browser：跳过网页 session cookie 提取");
   } else {
-    sessionToken = await extractSessionToken();
+    sessionToken = await extractSessionToken(forceRelogin);
     if (sessionToken) {
       console.log(`[OK] session cookie 已提取（${maskHint(sessionToken)}）`);
     } else {
@@ -318,6 +384,8 @@ async function main(): Promise<void> {
     return;
   }
 
+  // 真正写入前才加载 .env（--check 干跑不依赖 Supabase 配置）
+  const env = loadEnv();
   await upsertChatgptAccountCredentials(env, credentials);
   console.log("\n━━━ 完成 ━━━");
   console.log("看板下次刷新即使用新凭据；Codex token 过期后由 Worker 自动刷新。");
