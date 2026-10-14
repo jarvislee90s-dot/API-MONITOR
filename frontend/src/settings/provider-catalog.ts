@@ -49,4 +49,10 @@ export const PUBLIC_PROVIDER_CATALOG: ProviderCatalogItem[] = [
     sourceUrl: "https://ollama.com/settings",
     description: "用量 / 5小时周额度 / 模型请求数",
   },
+  {
+    providerKey: "chatgpt",
+    providerName: "ChatGPT",
+    sourceUrl: "https://chatgpt.com",
+    description: "Codex / 对话额度 / 订阅状态",
+  },
 ];
