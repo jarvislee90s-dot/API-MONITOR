@@ -2047,6 +2047,8 @@ describe("chatgpt 集成", () => {
       expect(decryptedUpdate).toEqual({
         accessToken: "fake-access-token-2",
         refreshToken: "fake-refresh-token-2",
+        // 写回为整块覆盖：未轮换的 accountId 必须从初始凭据 merge 保留（C1）
+        accountId: "fake-account-1",
       });
 
       // hint 脱敏同步
@@ -2056,6 +2058,7 @@ describe("chatgpt 集成", () => {
       expect(hintPatch?.body?.credential_hint).toEqual({
         accessToken: "fake-...en-2",
         refreshToken: "fake-...en-2",
+        accountId: "fake-account-1",
       });
     } finally {
       vi.unstubAllGlobals();
