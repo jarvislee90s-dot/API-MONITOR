@@ -390,29 +390,38 @@ async function fetchLatestReadySnapshots(env: WorkerEnv, userId: string | null):
   url.searchParams.set("order", "created_at.desc");
   url.searchParams.set("limit", "20");
 
-  const response = await fetch(url, {
-    headers: {
-      apikey: env.SUPABASE_SERVICE_ROLE_KEY,
-      Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
-      Accept: "application/json",
-    },
-  });
-  if (!response.ok) {
-    return snapshots;
-  }
-
-  const rows = (await response.json().catch(() => [])) as Array<{
-    provider_account_id?: string | null;
-    source_url?: string;
-    payload?: ProviderSnapshot;
-  }>;
-  for (const row of rows) {
-    // 优先按账号 id 区分回退快照,避免同 source_url 多账号互相覆盖
-    const key = row.provider_account_id ?? row.source_url ?? row.payload?.sourceUrl ?? "";
-    if (!key || snapshots.has(key)) continue;
-    if (row.payload?.status === "ready") {
-      snapshots.set(key, row.payload);
+  try {
+    const response = await fetch(url, {
+      headers: {
+        apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+        Accept: "application/json",
+      },
+    });
+    if (!response.ok) {
+      return snapshots;
     }
+
+    const rows = (await response.json().catch(() => [])) as Array<{
+      provider_account_id?: string | null;
+      source_url?: string;
+      payload?: ProviderSnapshot;
+    }>;
+    for (const row of rows) {
+      // 优先按账号 id 区分回退快照,避免同 source_url 多账号互相覆盖
+      const key = row.provider_account_id ?? row.source_url ?? row.payload?.sourceUrl ?? "";
+      if (!key || snapshots.has(key)) continue;
+      if (row.payload?.status === "ready") {
+        snapshots.set(key, row.payload);
+      }
+    }
+  } catch (error) {
+    // 网络级异常防护：Supabase 传输抖动不应把成功的刷新链路变成 500，
+    // 返回空 Map 跳过回退/补齐，仅告警（不打印凭据等敏感信息）
+    console.warn(
+      `[usage] 读取最近成功快照失败: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return new Map<string, ProviderSnapshot>();
   }
 
   return snapshots;

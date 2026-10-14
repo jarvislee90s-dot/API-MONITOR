@@ -2061,4 +2061,60 @@ describe("chatgpt 集成", () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it("Supabase usage_snapshots 查询网络异常时刷新不 500，login_required 快照正常返回", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+      const method = init?.method ?? "GET";
+      if (url.startsWith("https://supabase.test/rest/v1/provider_preferences")) {
+        return new Response(
+          JSON.stringify([{ provider_key: "chatgpt", enabled: true, display_order: 1, active_provider_account_id: null }]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.startsWith("https://supabase.test/rest/v1/provider_accounts")) {
+        return new Response(JSON.stringify([]), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      // 回退快照查询直接网络级抛错（reject），模拟 Supabase 传输抖动
+      if (url.startsWith("https://supabase.test/rest/v1/usage_snapshots") && method === "GET") {
+        throw new Error("supabase network unreachable");
+      }
+      if (url.startsWith("https://supabase.test/")) {
+        return new Response("{}", { status: 201 });
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+
+    vi.stubGlobal("fetch", fetchImpl as unknown as typeof fetch);
+    try {
+      const env = {
+        ...createEnv(fetchImpl as typeof fetch),
+        SUPABASE_URL: "https://supabase.test",
+        SUPABASE_SERVICE_ROLE_KEY: "service-role-test",
+        SUPABASE_USER_ID: "user-1",
+      };
+      const response = await handleApiRequest(
+        new Request("https://api.monitor.local/api/refresh", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ providerId: "chatgpt" }),
+        }),
+        env,
+      );
+      const payload = (await response.json()) as {
+        ok: boolean;
+        data: { snapshot: { snapshot: { providerId: string; status: string } } };
+      };
+
+      expect(response.status).toBe(200);
+      expect(payload.ok).toBe(true);
+      expect(payload.data.snapshot.snapshot).toMatchObject({
+        providerId: "chatgpt",
+        status: "login_required",
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
