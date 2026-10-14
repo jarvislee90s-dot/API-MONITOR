@@ -1602,6 +1602,29 @@ describe("chatgpt adapter (codex 链路)", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(3);
   });
 
+  it("does not refresh the codex token on a Cloudflare challenge (403 + cf-mitigated)", async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response("challenge", { status: 403, headers: { "cf-mitigated": "challenge" } }),
+    );
+
+    const result = await fetchChatgptSnapshot({
+      now: NOW,
+      fetchImpl: fetchImpl as typeof fetch,
+      config: {
+        accessToken: "fake-access-token-1",
+        refreshToken: "fake-refresh-token-1",
+        accountId: "fake-account-1",
+      },
+    });
+
+    // CF 质询是 IP 拦截而非凭据失效：不得消耗 token 刷新调用
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(result.credentialUpdate).toBeUndefined();
+    // codex 桶 cfChallenge=true 且无其他数据源 → error 分支，summary 提示 Cloudflare 拦截
+    expect(result.snapshot.status).toBe("error");
+    expect(result.snapshot.summary).toContain("Cloudflare 拦截");
+  });
+
   it("returns login_required when token refresh fails and no session cookie", async () => {
     const fetchImpl = vi.fn(async (input: string | URL | Request) => {
       const value = String(
