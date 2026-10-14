@@ -270,6 +270,7 @@ async function fetchProviderSnapshot(
   providerId: string,
   configOverride?: Record<string, unknown>,
   account?: { accountId?: string; accountLabel?: string },
+  userId?: string | null,
 ): Promise<ProviderSnapshot> {
   const provider = getProvider(providerId);
   if (!provider) {
@@ -295,12 +296,15 @@ async function fetchProviderSnapshot(
     // 仅带 accountId 的账号刷新链路写回，调试路径（handleProviderSnapshot）无账号上下文不写回。
     // 凭据表是整 payload 单加密块（on_conflict 全量覆盖），须以解密后的完整凭据为底
     // merge 轮换字段，否则首次轮换就会抹掉 accountId/sessionToken 等未轮换字段
+    // 写回归属按请求链路解析的 userId（bearer 认证下可能与 env.SUPABASE_USER_ID 不同），
+    // 回退 env.SUPABASE_USER_ID，避免把凭据行 upsert 到错误的 user 下
+    const writeBackUserId = userId ?? env.SUPABASE_USER_ID ?? null;
     if (
       result.credentialUpdate &&
       account?.accountId &&
       env.SUPABASE_URL &&
       env.SUPABASE_SERVICE_ROLE_KEY &&
-      env.SUPABASE_USER_ID
+      writeBackUserId
     ) {
       const mergedCredentials: Record<string, string> = {};
       for (const field of ["accessToken", "refreshToken", "accountId", "sessionToken", "codexClientId"]) {
@@ -313,16 +317,21 @@ async function fetchProviderSnapshot(
       try {
         await updateProviderAccountCredentials(
           env,
-          env.SUPABASE_USER_ID,
+          writeBackUserId,
           account.accountId,
           mergedCredentials,
           fetch,
         );
       } catch (error) {
         console.warn(
-          `[chatgpt] token 写回失败: ${error instanceof Error ? error.message : String(error)}`,
+          `[chatgpt] token 写回失败(provider=${providerId}, account=${account.accountId}): ${error instanceof Error ? error.message : String(error)}`,
         );
       }
+    } else if (result.credentialUpdate && account?.accountId && !writeBackUserId) {
+      // 有轮换结果却无法定位归属用户：告警（只含 provider/账号定位信息，不含凭据本体）
+      console.warn(
+        `[chatgpt] token 轮换写回跳过：缺少 userId(provider=${providerId}, account=${account.accountId})`,
+      );
     }
     if (!account?.accountId) {
       return result.snapshot;
@@ -368,7 +377,7 @@ async function collectUsageSnapshots(env: WorkerEnv, userId: string | null, prov
       : [{ providerId: provider.id, config: buildProviderConfig(env, provider.id) }];
 
     for (const runtimeConfig of runtimeConfigs) {
-      snapshots.push(await fetchProviderSnapshot(env, provider.id, runtimeConfig.config, runtimeConfig));
+      snapshots.push(await fetchProviderSnapshot(env, provider.id, runtimeConfig.config, runtimeConfig, userId));
     }
   }
   return snapshots;
@@ -709,8 +718,15 @@ async function handleDashboardRefresh(request: Request, env: WorkerEnv, userId: 
   const decision = decisionPayload.data ?? null;
   const shouldPersist = body.persist !== false && Boolean(env.SUPABASE_URL && env.SUPABASE_SERVICE_ROLE_KEY && userId);
   const liveSnapshots = await collectUsageSnapshots(env, userId);
-  const latestReadySnapshots = await fetchLatestReadySnapshots(env, userId);
-  const backfilledSnapshots = backfillPartialWindows(liveSnapshots, latestReadySnapshots);
+  // 仅存在 chatgpt partial 快照时才预取上一份 ready（补齐/回退共用同一 Map）；
+  // 其余情况传 undefined，applyLatestReadyFallback 保持原有惰性（全 ready 零查询）
+  const needsBackfill = liveSnapshots.some(
+    (snapshot) => snapshot.providerId === "chatgpt" && snapshot.status === "partial",
+  );
+  const latestReadySnapshots = needsBackfill ? await fetchLatestReadySnapshots(env, userId) : undefined;
+  const backfilledSnapshots = latestReadySnapshots
+    ? backfillPartialWindows(liveSnapshots, latestReadySnapshots)
+    : liveSnapshots;
   const displaySnapshots = await applyLatestReadyFallback(env, userId, backfilledSnapshots, latestReadySnapshots);
 
   if (shouldPersist && decision?.allowed) {
@@ -778,8 +794,14 @@ async function handleRefresh(request: Request, env: WorkerEnv): Promise<Response
   }
 
   const snapshots = await collectUsageSnapshots(env, userId, body.providerId);
-  const latestReadySnapshots = await fetchLatestReadySnapshots(env, userId);
-  const backfilledSnapshots = backfillPartialWindows(snapshots, latestReadySnapshots);
+  // 同 handleDashboardRefresh：仅 chatgpt partial 才预取上一份 ready，避免无谓 Supabase 查询
+  const needsBackfill = snapshots.some(
+    (snapshot) => snapshot.providerId === "chatgpt" && snapshot.status === "partial",
+  );
+  const latestReadySnapshots = needsBackfill ? await fetchLatestReadySnapshots(env, userId) : undefined;
+  const backfilledSnapshots = latestReadySnapshots
+    ? backfillPartialWindows(snapshots, latestReadySnapshots)
+    : snapshots;
   const hasAccountSnapshots = backfilledSnapshots.some(
     (snapshot) => typeof snapshot.meta.accountId === "string",
   );
