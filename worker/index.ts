@@ -98,6 +98,7 @@ function buildProviderConfig(env: WorkerEnv, providerId: string): Record<string,
       pageUrl: env.OLLAMA_PAGE_URL,
       apiUrl: env.OLLAMA_URL,
       apiKey: env.OLLAMA_KEY,
+      authCookie: env.OLLAMA_AUTH_COOKIE,
     };
   }
 

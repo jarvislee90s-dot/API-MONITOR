@@ -1280,6 +1280,188 @@ describe("ollama adapter", () => {
       config: { apiKey: "bad-key", apiUrl: "https://ollama.com/v1" },
     });
     expect(result.snapshot.status).toBe("login_required");
-    expect(result.snapshot.summary).toContain("API Key 可能已失效");
+    expect(result.snapshot.summary).toContain("登录态可能已失效");
+  });
+
+  it("returns login_required when neither cookie nor api key is configured", async () => {
+    const result = await fetchOllamaSnapshot({ now: NOW, config: {} });
+    expect(result.snapshot.status).toBe("login_required");
+    expect(result.snapshot.metrics).toMatchObject({ hasAuthCookie: false, hasApiKey: false });
+  });
+});
+
+describe("ollama settings page (cookie path)", () => {
+  const NOW = new Date("2026-10-07T02:40:00.000Z");
+
+  // 取自真实 settings 页的服务端渲染片段(结构一致,数值为样例)
+  const settingsHtml = `
+    <span class="text-sm ">Session usage</span> <span class="text-sm "> 9.7% used </span>
+    <div aria-label="Session usage 9.7% used">
+      <button data-usage-segment data-model="glm-5.3-flash" data-requests="14" aria-label="glm-5.3-flash: 14 requests"></button>
+      <button data-usage-segment data-model="deepseek-v4.1-flash" data-requests="352" aria-label="deepseek-v4.1-flash: 352 requests"></button>
+    </div>
+    <div class="local-time" data-time="2026-10-07T03:00:00Z"> Resets in 11 minutes. </div>
+    <span class="text-sm">Weekly usage</span> <span class="text-sm ">65.1% used</span>
+    <div aria-label="Weekly usage 65.1% used">
+      <button data-usage-segment data-model="glm-5.3-flash" data-requests="56"></button>
+      <button data-usage-segment data-model="deepseek-v4.1-flash" data-requests="9650"></button>
+    </div>
+    <div class="local-time" data-time="2026-10-12T00:00:00Z"> Resets in 4 days. </div>
+    <div id="weekly-usage-models">
+      <div>Models used this week</div>
+      <div><span title="glm-5.3-flash">glm-5.3-flash</span><span> 56 requests </span></div>
+      <div><span title="deepseek-v4.1-flash">deepseek-v4.1-flash</span><span> 9,650 requests </span></div>
+    </div>
+    <form method="POST" action="/settings"></form>
+  `;
+
+  it("parses session/weekly percent, reset times and model requests from settings HTML", async () => {
+    const fetchImpl = vi.fn(async () =>
+      new Response(settingsHtml, { status: 200, headers: { "content-type": "text/html" } }),
+    );
+
+    const result = await fetchOllamaSnapshot({
+      now: NOW,
+      fetchImpl: fetchImpl as typeof fetch,
+      config: { authCookie: "aid=abc; __Secure-session=xyz", pageUrl: "https://ollama.com/settings" },
+    });
+
+    expect(result.snapshot.status).toBe("ready");
+    expect(result.snapshot.windows.map((w) => w.key)).toEqual(["rp5h", "weekly"]);
+    // 重置时间取自页面 data-time（页面是权威值，不再用本地推算）
+    expect(result.snapshot.windows[0]).toMatchObject({
+      label: "5小时",
+      used: 9.7,
+      percentUsed: 9.7,
+      resetAt: "2026-10-07T03:00:00.000Z",
+    });
+    expect(result.snapshot.windows[1]).toMatchObject({
+      label: "每周",
+      used: 65.1,
+      percentUsed: 65.1,
+      resetAt: "2026-10-12T00:00:00.000Z",
+    });
+    expect(result.snapshot.metrics).toMatchObject({
+      sessionUsagePercent: 9.7,
+      weeklyUsagePercent: 65.1,
+      sessionRequestCount: 366,
+      weeklyRequestCount: 9706,
+      weeklyModelCount: 2,
+      fetchMethod: "cookie",
+    });
+    expect(JSON.parse(String(result.snapshot.metrics.weeklyModels))).toEqual([
+      { name: "deepseek-v4.1-flash", requests: 9650 },
+      { name: "glm-5.3-flash", requests: 56 },
+    ]);
+
+    // 只请求一次(网页路径命中即返回,不回退 API Key)
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(String(url)).toBe("https://ollama.com/settings");
+    expect((init.headers as Record<string, string>).Cookie).toContain("__Secure-session=xyz");
+  });
+
+  it("parses model segments when attributes span multiple lines", async () => {
+    // 真实页面里属性间存在换行,解析不能依赖固定空白
+    const multilineHtml = `
+      <div aria-label="Session usage 9.7% used">
+        <button
+          type="button"
+          class="relative h-full"
+          data-usage-segment
+          data-model="glm-5.3-flash"
+          data-requests="14"
+        ></button>
+        <button
+          data-requests="352"
+          data-model="deepseek-v4.1-flash"
+          data-usage-segment
+        ></button>
+      </div>
+      <div aria-label="Weekly usage 65.1% used"></div>
+      <div id="weekly-usage-models">
+        <div><span title="glm-5.3-flash">glm-5.3-flash</span><span> 56 requests </span></div>
+      </div>
+      <form method="POST" action="/settings"></form>
+    `;
+    const fetchImpl = vi.fn(async () => new Response(multilineHtml, { status: 200 }));
+
+    const result = await fetchOllamaSnapshot({
+      now: NOW,
+      fetchImpl: fetchImpl as typeof fetch,
+      config: { authCookie: "aid=abc; __Secure-session=xyz", pageUrl: "https://ollama.com/settings" },
+    });
+
+    expect(result.snapshot.metrics.sessionRequestCount).toBe(366);
+    expect(JSON.parse(String(result.snapshot.metrics.weeklyModels))).toEqual([
+      { name: "glm-5.3-flash", requests: 56 },
+    ]);
+  });
+
+  it("prefers cookie path over api key and does not call /api/usage", async () => {
+    const fetchImpl = vi.fn(async (url: string | URL | Request) =>
+      String(url).includes("/settings")
+        ? new Response(settingsHtml, { status: 200 })
+        : new Response(JSON.stringify({ limits: { weekly: { usage: 0.01, models: [] } } }), { status: 200 }),
+    );
+
+    const result = await fetchOllamaSnapshot({
+      now: NOW,
+      fetchImpl: fetchImpl as typeof fetch,
+      config: { authCookie: "aid=abc; __Secure-session=xyz", apiKey: "ollama-key", apiUrl: "https://ollama.com/v1" },
+    });
+
+    expect(result.snapshot.status).toBe("ready");
+    expect(result.snapshot.metrics.fetchMethod).toBe("cookie");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(String(fetchImpl.mock.calls[0][0])).toContain("/settings");
+  });
+
+  it("falls back to api key when the settings page is not usable", async () => {
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      if (String(url).includes("/settings")) return new Response("<html>login</html>", { status: 200 });
+      return new Response(
+        JSON.stringify({ limits: { session: { usage: 0.068, models: [] }, weekly: { usage: 0.007, models: [] } } }),
+        { status: 200 },
+      );
+    });
+
+    const result = await fetchOllamaSnapshot({
+      now: NOW,
+      fetchImpl: fetchImpl as typeof fetch,
+      config: { authCookie: "aid=abc; __Secure-session=xyz", apiKey: "ollama-key", apiUrl: "https://ollama.com/v1" },
+    });
+
+    expect(result.snapshot.status).toBe("ready");
+    expect(result.snapshot.metrics).toMatchObject({ fetchMethod: "apiKey", sessionUsagePercent: 6.8 });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports login_required when the cookie is expired and no api key is set", async () => {
+    const fetchImpl = vi.fn(async () => new Response("expired", { status: 401 }));
+    const result = await fetchOllamaSnapshot({
+      now: NOW,
+      fetchImpl: fetchImpl as typeof fetch,
+      config: { authCookie: "aid=abc; __Secure-session=stale", pageUrl: "https://ollama.com/settings" },
+    });
+
+    expect(result.snapshot.status).toBe("login_required");
+    expect(result.snapshot.summary).toContain("refresh-ollama-cookie");
+  });
+
+  it("reports partial with a hint when api key channel returns no quota data", async () => {
+    // 现状:官方 /api/usage 只返回 request_count/buckets,没有 limits
+    const fetchImpl = vi.fn(async () =>
+      new Response(JSON.stringify({ range: "7d", totals: { request_count: 25145 }, buckets: [] }), { status: 200 }),
+    );
+
+    const result = await fetchOllamaSnapshot({
+      now: NOW,
+      fetchImpl: fetchImpl as typeof fetch,
+      config: { apiKey: "ollama-key", apiUrl: "https://ollama.com/v1" },
+    });
+
+    expect(result.snapshot.status).toBe("partial");
+    expect(result.snapshot.summary).toContain("cookie");
   });
 });

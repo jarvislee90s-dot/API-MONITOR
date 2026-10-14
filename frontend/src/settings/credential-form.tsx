@@ -20,7 +20,7 @@ function credentialFields(providerKey: string | undefined): string[] {
   if (providerKey === "aliyun-bailian") return ["authCookie", "apiUrl"];
   if (providerKey === "volc-ark") return ["authCookie", "apiUrl"];
   if (providerKey === "zhipu") return ["authCookie", "authToken"];
-  if (providerKey === "ollama") return ["apiKey", "apiUrl"];
+  if (providerKey === "ollama") return ["authCookie", "apiKey", "apiUrl"];
   return ["authCookie"];
 }
 

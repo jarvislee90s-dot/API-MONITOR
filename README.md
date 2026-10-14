@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-API 与 Coding Plan 用量聚合看板。它把 OpenRouter、OpenCode Go、讯飞 MaaS Coding Plan、阿里云百炼 Coding Plan、火山方舟 Coding Plan、智谱 BigModel Coding Plan 的用量状态聚合到一个响应式网页里，并用 Supabase 保存刷新快照和云端配置。
+API 与 Coding Plan 用量聚合看板。它把 OpenRouter、OpenCode Go、讯飞 MaaS Coding Plan、阿里云百炼 Coding Plan、火山方舟 Coding Plan、智谱 BigModel Coding Plan、Ollama Pro 的用量状态聚合到一个响应式网页里，并用 Supabase 保存刷新快照和云端配置。
 
 线上示例：
 
@@ -41,7 +41,7 @@ https://apimonitor.bondtoolbox.asia
 | 阿里云百炼 | 已接入原网页入口；云端抓取保留为实验选项 |
 | 火山方舟 | 已接入 `GetCodingPlanUsage` 用量接口（5小时/周/月百分比） |
 | 智谱 BigModel | 已接入 `monitor/usage/quota/limit` + `credit-usage/usage-detail` 用量接口（5小时/周配额、Cache 命中率、积分） |
-| Ollama Pro | 已接入 `/api/usage` 用量接口（5小时/周额度、模型请求数、预计总请求） |
+| Ollama Pro | 已接入网页登录态抓取 `settings` 页（5小时/周额度百分比、重置时间、模型请求数、预计总请求）；API Key 保留为兜底 |
 | 配置页 | 已接入 `#/settings` |
 
 ## 架构
@@ -115,6 +115,7 @@ flowchart TB
 | 讯飞 MaaS / OpenRouter | Worker 云端直抓 | ✅ 实时刷新 | 前端点同步 |
 | OpenCode Go | 本地脚本抓取 + 推送 | ❌ 无效（云端 IP 被封） | 手动跑 `refresh-opencode-usage.ts` |
 | 智谱 BigModel | Worker 云端直抓（持久化 cookie/token） | ✅ 实时刷新 | 本地脚本刷新 cookie 后点同步 |
+| Ollama Pro | Worker 云端直抓（网页登录态 cookie） | ✅ 实时刷新 | 本地脚本刷新 cookie 后点同步 |
 
 ### 注意事项
 
@@ -125,7 +126,7 @@ flowchart TB
 
 ### 刷新 Cookie 与用量（本地脚本）
 
-部分供应商的登录态 cookie 会过期，或其用量页屏蔽数据中心 IP，需要本地脚本辅助刷新。火山/OpenCode 脚本复用本地浏览器 Profile 提取登录态，运行前需关闭对应浏览器（含后台进程）避免 Profile 锁定；DeepSeek/智谱脚本用账号密码在临时浏览器登录。`.env` 中需配置 `CLOUDFLARE_API_TOKEN`。
+部分供应商的登录态 cookie 会过期，或其用量页屏蔽数据中心 IP，需要本地脚本辅助刷新。火山/OpenCode 脚本复用本地浏览器 Profile 提取登录态，运行前需关闭对应浏览器（含后台进程）避免 Profile 锁定；Ollama 脚本使用项目专用 Profile（登录一次后长期复用，不占用日常浏览器）；DeepSeek/智谱脚本用账号密码在临时浏览器登录。`.env` 中需配置 `CLOUDFLARE_API_TOKEN`。
 
 #### 智谱 BigModel Cookie 刷新
 
@@ -168,6 +169,29 @@ node --experimental-strip-types scripts/refresh-opencode-cookie.ts
 ```
 
 脚本提取 cookie 后会用 `OPENCODE_GO_WORKSPACE_ID` 验证有效性，再通过 Cloudflare API 更新 Worker secret。Worker 下次刷新即使用新 cookie。
+
+#### Ollama Pro Cookie 刷新
+
+**为什么 Ollama 需要 cookie 而不是 API Key**：Ollama 官方 `/api/usage` 接口（API Key 通道）已改为只返回请求数统计，**不再提供 5小时/周额度百分比与模型请求明细**；这些数据只出现在网页登录态（`ollama.com/settings`）的服务端渲染 HTML 里。因此看板抓取优先走 cookie，API Key 仅作为兜底。
+
+登录态过期后看板会显示 `login_required` 或额度数据为空，运行：
+
+```powershell
+node --experimental-strip-types scripts/refresh-ollama-cookie.ts
+```
+
+脚本使用**项目专用浏览器 Profile**（`output/ollama-browser-profile/`，已被 gitignore，不会提交）：
+
+- 首次运行或登录态失效时，会打开浏览器窗口等待人工登录 ollama（GitHub / 邮箱均可，最长等待 300 秒）；**登录一次后 cookie 持久化在专用 Profile 中，以后重跑直接复用、无需再登**。
+- 提取 `__Secure-session` 等 ollama.com cookie 后，调 `settings` 页验证（能解析出额度百分比才算有效），再写入 Supabase（provider_key=`ollama`、label=`默认账号`，AES-GCM 加密 `{authCookie}`）、本地 `.env` 的 `OLLAMA_AUTH_COOKIE` 与 Cloudflare Worker 的同名 secret。
+
+强制换账号重新登录（会先清除旧 cookie）：
+
+```powershell
+node --experimental-strip-types scripts/refresh-ollama-cookie.ts --relogin
+```
+
+Worker 端的抓取逻辑（`worker/providers/ollama.ts`）：优先用 `authCookie` 请求 `ollama.com/settings` 并解析 HTML 中的额度百分比、重置时间（`data-time`，页面权威值）与模型请求列表；cookie 不可用时自动回退 API Key 通道并在摘要中提示需要刷新登录态。
 
 ## 目录结构
 
@@ -246,6 +270,8 @@ npx wrangler@4 secret put XFYUN_MAAS_AUTH_COOKIE
 npx wrangler@4 secret put ALIYUN_BAILIAN_AUTH_COOKIE
 npx wrangler@4 secret put ALIYUN_BAILIAN_SEC_TOKEN
 npx wrangler@4 secret put VOLC_ARK_AUTH_COOKIE
+npx wrangler@4 secret put ZHIPU_AUTH_COOKIE
+npx wrangler@4 secret put OLLAMA_AUTH_COOKIE
 ```
 
 部署：
@@ -291,6 +317,10 @@ not_found_handling = "single-page-application"
 | `ZHIPU_AUTH_COOKIE` | 智谱登录态 cookie（`bigmodel_token_production` + `acw_tc` 等 WAF cookie） |
 | `ZHIPU_AUTH_TOKEN` | 智谱登录 token（即 `bigmodel_token_production` 的值） |
 | `Zai_account` / `Zai_password` | 智谱登录脚本专用账号密码（不写入 Worker） |
+| `OLLAMA_PAGE_URL` | Ollama 用量页入口（默认 `https://ollama.com/settings`） |
+| `OLLAMA_URL` | Ollama API 前缀（默认 `https://ollama.com/v1`，兜底通道使用） |
+| `OLLAMA_KEY` | Ollama API Key（兜底通道，仅提供请求数统计） |
+| `OLLAMA_AUTH_COOKIE` | Ollama 网页登录态 cookie（额度百分比与模型请求明细的必需项） |
 | `CLOUDFLARE_API_TOKEN` | 本地 Wrangler 部署使用 |
 | `INGEST_API_KEY` | 本地脚本推送 opencode 快照的共享密钥（Worker 端需配置同名 secret） |
 | `APIMONITOR_INGEST_URL` | 本地脚本推送目标（Worker 线上地址，已配置为自定义域名） |
