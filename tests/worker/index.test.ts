@@ -1988,7 +1988,7 @@ describe("chatgpt 集成", () => {
           { status: 200, headers: { "content-type": "application/json" } },
         );
       }
-      if (url === "https://chatgpt.com/backend-api/codex/rate_limits") {
+      if (url === "https://chatgpt.com/backend-api/codex/usage") {
         rateLimitsCalls += 1;
         if (rateLimitsCalls === 1) return new Response("{}", { status: 401 });
         return new Response(
@@ -2095,7 +2095,7 @@ describe("chatgpt 集成", () => {
       if (url.startsWith("https://supabase.test/")) {
         return new Response("{}", { status: 201 });
       }
-      if (url === "https://chatgpt.com/backend-api/codex/rate_limits") {
+      if (url === "https://chatgpt.com/backend-api/codex/usage") {
         return new Response(
           JSON.stringify({ rate_limits: { codex_5h: { used_percent: 40 } } }),
           { status: 200, headers: { "content-type": "application/json" } },
@@ -2205,7 +2205,7 @@ describe("chatgpt 集成", () => {
         return new Response("{}", { status: 201 });
       }
       // codex 链路：实取到新值 40%
-      if (url === "https://chatgpt.com/backend-api/codex/rate_limits") {
+      if (url === "https://chatgpt.com/backend-api/codex/usage") {
         return new Response(
           JSON.stringify({ rate_limits: { codex_5h: { used_percent: 40 } } }),
           { status: 200, headers: { "content-type": "application/json" } },
@@ -2330,7 +2330,7 @@ describe("chatgpt 集成", () => {
         );
       }
       // codex 链路：本轮实取到新值 40%
-      if (url === "https://chatgpt.com/backend-api/codex/rate_limits") {
+      if (url === "https://chatgpt.com/backend-api/codex/usage") {
         return new Response(
           JSON.stringify({ rate_limits: { codex_5h: { used_percent: 40 } } }),
           { status: 200, headers: { "content-type": "application/json" } },

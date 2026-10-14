@@ -1487,7 +1487,7 @@ describe("chatgpt adapter (codex 链路)", () => {
   });
 
   it("仅放行 chatgpt.com 系与 auth.openai.com 的 https 域名", () => {
-    expect(isTrustedChatgptUrl("https://chatgpt.com/backend-api/codex/rate_limits")).toBe(true);
+    expect(isTrustedChatgptUrl("https://chatgpt.com/backend-api/codex/usage")).toBe(true);
     expect(isTrustedChatgptUrl("https://auth.openai.com/oauth/token")).toBe(true);
     expect(isTrustedChatgptUrl("https://evil.example.com/oauth/token")).toBe(false);
     expect(isTrustedChatgptUrl("http://chatgpt.com/api/auth/session")).toBe(false);
@@ -1498,9 +1498,21 @@ describe("chatgpt adapter (codex 链路)", () => {
     const fetchImpl = vi.fn(async () =>
       new Response(
         JSON.stringify({
-          rate_limits: {
-            codex_5h: { used_percent: 42.5, resets_in_seconds: 3600 },
-            codex_weekly: { used_percent: 0.25, reset_at: "2026-10-19T00:00:00Z" },
+          // 实测结构（2026-10-14 免费账号）：rate_limit（单数）+ primary/secondary_window + 顶层 plan_type
+          plan_type: "plus",
+          rate_limit: {
+            allowed: true,
+            limit_reached: false,
+            primary_window: {
+              used_percent: 42.5,
+              limit_window_seconds: 18000,
+              reset_after_seconds: 3600,
+            },
+            secondary_window: {
+              used_percent: 25,
+              limit_window_seconds: 604800,
+              reset_at: 1794844800,
+            },
           },
         }),
         { status: 200, headers: { "content-type": "application/json" } },
@@ -1516,6 +1528,8 @@ describe("chatgpt adapter (codex 链路)", () => {
     expect(result.snapshot.status).toBe("ready");
     // 仅配置 codex 凭据（未配置 sessionToken）：web 桶未尝试 → 抓取方式应为「未配置」而非「快照回退」
     expect(result.snapshot.metrics.webFetchMethod).toBe("unconfigured");
+    // plan_type 由 codex/usage 顶层兜底填充（session 链路未配置）
+    expect(result.snapshot.metrics.plan).toBe("plus");
     expect(result.snapshot.windows.map((w) => w.key)).toEqual(["codex_5h", "codex_weekly"]);
     expect(result.snapshot.windows[0]).toMatchObject({
       label: "Codex 5小时",
@@ -1525,16 +1539,34 @@ describe("chatgpt adapter (codex 链路)", () => {
     expect(result.snapshot.windows[1]).toMatchObject({
       label: "Codex 每周",
       percentUsed: 25,
-      resetAt: "2026-10-19T00:00:00.000Z",
+      // reset_at 数字 Unix 秒时间戳（1794844800 → 2026-11-16T16:00:00Z）
+      resetAt: "2026-11-16T16:00:00.000Z",
     });
 
     const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
-    expect(String(url)).toBe("https://chatgpt.com/backend-api/codex/rate_limits");
+    expect(String(url)).toBe("https://chatgpt.com/backend-api/codex/usage");
     expect(init.headers).toMatchObject({
       Authorization: "Bearer fake-access-token-1",
       "chatgpt-account-id": "fake-account-1",
     });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("免费档 30 天主窗口按窗口时长动态命名（实测 limit_window_seconds=2592000）", () => {
+    const windows = parseCodexWindows(
+      {
+        plan_type: "free",
+        rate_limit: {
+          limit_reached: true,
+          primary_window: { used_percent: 100, limit_window_seconds: 2592000, reset_at: 1794373428 },
+          secondary_window: null,
+        },
+      },
+      NOW,
+    );
+
+    expect(windows).toHaveLength(1);
+    expect(windows[0]).toMatchObject({ key: "codex_5h", label: "Codex 30天", percentUsed: 100 });
   });
 
   it("tolerates used/limit 形态的 codex 响应", () => {
@@ -1646,7 +1678,7 @@ describe("chatgpt adapter (codex 链路)", () => {
     // 发生了 token 刷新调用（rate_limits 403 → token 刷新 → rate_limits 重试）
     expect(fetchImpl.mock.calls.length).toBeGreaterThanOrEqual(2);
     const retryCall = fetchImpl.mock.calls[2] as unknown as [string, RequestInit];
-    expect(String(retryCall[0])).toBe("https://chatgpt.com/backend-api/codex/rate_limits");
+    expect(String(retryCall[0])).toBe("https://chatgpt.com/backend-api/codex/usage");
     expect((retryCall[1].headers as Record<string, string>).Authorization).toBe(
       "Bearer fake-access-token-2",
     );
@@ -1700,7 +1732,7 @@ describe("chatgpt adapter (codex 链路)", () => {
 
     // 只有 codex rate_limits 一次调用：不触发「401 → 刷新 → 重试」，不消耗 refresh token
     expect(fetchImpl).toHaveBeenCalledTimes(1);
-    expect(String(fetchImpl.mock.calls[0][0])).toBe("https://chatgpt.com/backend-api/codex/rate_limits");
+    expect(String(fetchImpl.mock.calls[0][0])).toBe("https://chatgpt.com/backend-api/codex/usage");
     expect(fetchImpl.mock.calls.some(([url]) => String(url).includes("auth.openai.com"))).toBe(false);
     expect(result.snapshot.status).toBe("login_required");
     expect(result.credentialUpdate).toBeUndefined();
@@ -1830,6 +1862,44 @@ describe("chatgpt adapter (网页/订阅链路)", () => {
     const [limitsUrl, limitsInit] = fetchImpl.mock.calls[1] as unknown as [string, RequestInit];
     expect(String(limitsUrl)).toBe("https://chatgpt.com/backend-api/rate_limits");
     expect((limitsInit.headers as Record<string, string>).Authorization).toBe("Bearer fake-web-access-token");
+  });
+
+  it("回发 NextAuth 分片形态的 session cookie（导入脚本入库格式，含 = 原样透传）", async () => {
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const value = String(
+        typeof input === "string" ? input : input instanceof Request ? input.url : input,
+      );
+      if (value === "https://chatgpt.com/api/auth/session") {
+        return new Response(JSON.stringify({ accessToken: "fake-web-access-token" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (value === "https://chatgpt.com/backend-api/rate_limits") {
+        return new Response(JSON.stringify({}), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (value === "https://chatgpt.com/backend-api/accounts/check") {
+        return new Response(JSON.stringify({ account: { plan_type: "free" } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected ${value}`);
+    });
+
+    const chunkedCookie =
+      "__Secure-next-auth.session-token.0=fake-chunk-zero; __Secure-next-auth.session-token.1=fake-chunk-one";
+    await fetchChatgptSnapshot({
+      now: NOW,
+      fetchImpl: fetchImpl as typeof fetch,
+      config: { sessionToken: chunkedCookie },
+    });
+
+    const [, sessionInit] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect((sessionInit.headers as Record<string, string>).Cookie).toBe(chunkedCookie);
   });
 
   it("parses the new grouped array shape with slug pass-through", () => {
@@ -2028,7 +2098,7 @@ describe("chatgpt adapter (网页/订阅链路)", () => {
       const value = String(
         typeof input === "string" ? input : input instanceof Request ? input.url : input,
       );
-      if (value === "https://chatgpt.com/backend-api/codex/rate_limits") {
+      if (value === "https://chatgpt.com/backend-api/codex/usage") {
         return new Response(
           JSON.stringify({ rate_limits: { codex_5h: { used_percent: 5 }, codex_weekly: { used_percent: 10 } } }),
           { status: 200, headers: { "content-type": "application/json" } },

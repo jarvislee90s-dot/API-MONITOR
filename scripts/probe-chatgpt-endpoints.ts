@@ -9,12 +9,17 @@
  *   node --experimental-strip-types scripts/probe-chatgpt-endpoints.ts --refresh          # 额外探测刷新端点（会轮换 token）
  *   CHATGPT_SESSION_TOKEN=xxx node --experimental-strip-types scripts/probe-chatgpt-endpoints.ts  # 额外探测网页/订阅端点
  *   CODEX_AUTH_JSON=D:\path\auth.json node --experimental-strip-types scripts/probe-chatgpt-endpoints.ts
+ *
+ * 说明：检测到 Windows 系统代理（或 HTTPS_PROXY）时自动以 NODE_USE_ENV_PROXY=1 重启自身使 fetch 走代理；
+ *       CHATGPT_SESSION_TOKEN 支持纯 token 值或完整分片 cookie 串（含 "=" 时原样回发）。
  */
 
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { connect } from "node:net";
 import { resolve } from "node:path";
 
-const CODEX_RATE_LIMITS_URL = "https://chatgpt.com/backend-api/codex/rate_limits";
+const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/codex/usage";
 const CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token";
 const WEB_SESSION_URL = "https://chatgpt.com/api/auth/session";
 const WEB_RATE_LIMITS_URL = "https://chatgpt.com/backend-api/rate_limits";
@@ -89,6 +94,78 @@ async function probe(name: string, url: string, init: RequestInit): Promise<void
 
 const BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
+// sessionToken 兼容两种形态：纯值拼单体 cookie 头；含 "=" 视为导入脚本写入的分片完整串，原样回发
+function buildSessionCookieHeader(sessionToken: string): string {
+  return sessionToken.includes("=")
+    ? sessionToken
+    : `__Secure-next-auth.session-token=${sessionToken}`;
+}
+
+// Node fetch 不走 Windows 系统代理，检测到可达代理时以 NODE_USE_ENV_PROXY=1 重启自身。
+// 读注册表用 spawnSync 参数数组（execSync 经 cmd.exe 会吃掉路径反斜杠）。
+function detectProxy(): string | null {
+  const fromEnv = process.env.HTTPS_PROXY ?? process.env.https_proxy ?? null;
+  if (fromEnv) return fromEnv;
+  if (process.platform !== "win32") return null;
+  try {
+    const settingsKey = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings";
+    const run = (value: string) =>
+      spawnSync("reg", ["query", settingsKey, "/v", value], { encoding: "utf8" });
+    const enabled = run("ProxyEnable");
+    if (enabled.status !== 0 || !/ProxyEnable\s+REG_DWORD\s+0x1/i.test(enabled.stdout ?? "")) return null;
+    const server = run("ProxyServer");
+    const matched =
+      server.status === 0 ? /ProxyServer\s+REG_SZ\s+(\S+)/.exec(server.stdout ?? "") : null;
+    return matched ? (matched[1].startsWith("http") ? matched[1] : `http://${matched[1]}`) : null;
+  } catch {
+    return null;
+  }
+}
+
+function proxyReachable(proxyUrl: string, timeoutMs = 1500): Promise<boolean> {
+  return new Promise((resolve) => {
+    try {
+      const url = new URL(proxyUrl);
+      const socket = connect(
+        { host: url.hostname, port: Number(url.port) || 80, timeout: timeoutMs },
+        () => {
+          socket.destroy();
+          resolve(true);
+        },
+      );
+      socket.on("error", () => resolve(false));
+      socket.on("timeout", () => {
+        socket.destroy();
+        resolve(false);
+      });
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+async function ensureProxyOrRespawn(): Promise<boolean> {
+  if (process.env.NODE_USE_ENV_PROXY === "1") return false;
+  const proxy = detectProxy();
+  if (!proxy) return false;
+  if (!(await proxyReachable(proxy))) {
+    console.warn(`[WARN] 系统代理 ${proxy} 当前不可达，将直连（请先启动代理软件，或用 HTTPS_PROXY 指定其他地址）`);
+    return false;
+  }
+  console.log(`[INFO] 检测到可达代理 ${proxy}，以 NODE_USE_ENV_PROXY=1 重启自身使 fetch 走代理 ...`);
+  const child = spawn(
+    process.execPath,
+    // argv[1] 是脚本路径，必须保留；respawn 参数 = [node, --experimental-strip-types, 脚本, ...用户参数]
+    ["--experimental-strip-types", process.argv[1]!, ...process.argv.slice(2)],
+    {
+      env: { ...process.env, NODE_USE_ENV_PROXY: "1", HTTPS_PROXY: proxy, HTTP_PROXY: proxy },
+      stdio: "inherit",
+    },
+  );
+  child.on("exit", (code) => process.exit(code ?? 1));
+  return true;
+}
+
 async function main(): Promise<void> {
   const auth = loadAuthJson();
   if (!auth) {
@@ -97,7 +174,7 @@ async function main(): Promise<void> {
   }
   console.log(`[OK] auth.json 已读取（account_id: ${auth.accountId ?? "(missing)"}）`);
 
-  await probe("codex rate_limits (Bearer + chatgpt-account-id)", CODEX_RATE_LIMITS_URL, {
+  await probe("codex rate_limits (Bearer + chatgpt-account-id)", CODEX_USAGE_URL, {
     method: "GET",
     headers: {
       Accept: "application/json",
@@ -126,7 +203,7 @@ async function main(): Promise<void> {
       method: "GET",
       headers: {
         Accept: "application/json",
-        Cookie: `__Secure-next-auth.session-token=${sessionToken}`,
+        Cookie: buildSessionCookieHeader(sessionToken),
         "User-Agent": BROWSER_UA,
       },
     });
@@ -158,7 +235,10 @@ async function main(): Promise<void> {
   console.log("      不符时修正解析器键名/常量并同步更新 tests/worker/providers.test.ts 对应断言。");
 }
 
-main().catch((err) => {
-  console.error("[FAIL] 脚本执行失败:", err);
-  process.exit(1);
-});
+// 检测到系统代理时上方函数会重启自身接管执行；正常路径才运行 main
+if (!(await ensureProxyOrRespawn())) {
+  main().catch((err) => {
+    console.error("[FAIL] 脚本执行失败:", err);
+    process.exit(1);
+  });
+}
