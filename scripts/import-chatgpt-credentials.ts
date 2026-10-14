@@ -15,25 +15,30 @@
  *
  *   --relogin：进入浏览器后先清除 Profile 中的旧 cookie，再走登录检测/等待（换账号或 cookie 污染时使用）。
  *
+ * 网络与凭据说明：
+ *   - 检测到 Windows 系统代理（或 HTTPS_PROXY）时自动以 NODE_USE_ENV_PROXY=1 重启自身，使 Node fetch 走代理；
+ *   - NextAuth 的 session token 超过单 cookie 上限会分片存储（.0/.1），脚本收集分片、
+ *     按浏览器原样形态（name.0=v0; name.1=v1）存入 Supabase，Worker 侧原样回发；
+ *   - 登录与否的唯一判定信号是服务端 /api/auth/session 验证，不做任何页面 DOM 选择器假设。
+ *
  * 安全：auth.json 与 cookie 仅在内存中转，不复制进项目目录、不进 git；输出只打印脱敏 hint。
  * --check 干跑只读取与校验，不写库，也不依赖 .env（Supabase 配置仅在真正写入前加载）。
  */
 
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { connect } from "node:net";
 import { resolve } from "node:path";
 import { chromium } from "playwright";
 
 const PROFILE_DIR = resolve(process.cwd(), "output/chatgpt-browser-profile");
 const CHATGPT_HOME = "https://chatgpt.com";
-const CODEX_RATE_LIMITS_URL = "https://chatgpt.com/backend-api/codex/rate_limits";
+const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/codex/usage";
 const AUTH_SESSION_URL = "https://chatgpt.com/api/auth/session";
 const LOGIN_WAIT_MS = 300_000;
 // 与真实浏览器一致的 UA，避免服务端接口按自动化 UA 拒绝
 const BROWSER_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-// 登录入口文案：英文 "Log in" / 中文「登录」均视为未登录。
-// 必须整词锚定，避免子串误伤已登录页面的「退出登录」等文案
-const LOGIN_ENTRY_SELECTOR = "text=/^(Log in|登录)$/i";
 
 function loadEnv(): Record<string, string> {
   const envPath = resolve(process.cwd(), ".env");
@@ -92,42 +97,127 @@ function maskHint(value: string): string {
   return `${value.slice(0, 5)}...${value.slice(-4)}`;
 }
 
-// 校验 session cookie 是否被服务端认可：GET /api/auth/session，响应含非空 accessToken 才算有效。
-// 未登录时该接口返回 200 + 空 JSON，因此必须检查 accessToken，不能只看 HTTP 状态码。
-async function validateSessionCookie(token: string): Promise<{ valid: boolean; error?: string }> {
+// Node 的 fetch 默认不走 Windows 系统代理（国内直连 chatgpt.com 会失败）；
+// 检测到可达的系统代理时以 NODE_USE_ENV_PROXY=1 重启自身，让内置 fetch 显式走代理。
+// 注意：读注册表必须用 spawnSync 参数数组——execSync 经 cmd.exe 传参会吃掉路径里的反斜杠。
+let cachedProxy: string | null | undefined;
+
+function detectProxy(): string | null {
+  if (cachedProxy !== undefined) return cachedProxy;
+  const fromEnv = process.env.HTTPS_PROXY ?? process.env.https_proxy ?? null;
+  if (fromEnv) {
+    cachedProxy = fromEnv;
+    return cachedProxy;
+  }
+  if (process.platform !== "win32") {
+    cachedProxy = null;
+    return null;
+  }
   try {
-    const resp = await fetch(AUTH_SESSION_URL, {
-      method: "GET",
-      headers: {
-        Accept: "application/json",
-        Cookie: `__Secure-next-auth.session-token=${token}`,
-        "User-Agent": BROWSER_USER_AGENT,
-      },
-    });
-    if (!resp.ok) {
-      return { valid: false, error: `HTTP ${resp.status}` };
+    const settingsKey = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings";
+    const run = (value: string) =>
+      spawnSync("reg", ["query", settingsKey, "/v", value], { encoding: "utf8" });
+    const enabled = run("ProxyEnable");
+    if (enabled.status !== 0 || !/ProxyEnable\s+REG_DWORD\s+0x1/i.test(enabled.stdout ?? "")) {
+      cachedProxy = null;
+      return null;
     }
-    const json = (await resp.json().catch(() => null)) as { accessToken?: unknown } | null;
-    if (!json || typeof json.accessToken !== "string" || json.accessToken.length === 0) {
-      return { valid: false, error: "响应不含 accessToken" };
-    }
-    return { valid: true };
-  } catch (err) {
-    return { valid: false, error: err instanceof Error ? err.message : String(err) };
+    const server = run("ProxyServer");
+    const matched =
+      server.status === 0 ? /ProxyServer\s+REG_SZ\s+(\S+)/.exec(server.stdout ?? "") : null;
+    cachedProxy = matched
+      ? matched[1].startsWith("http")
+        ? matched[1]
+        : `http://${matched[1]}`
+      : null;
+    return cachedProxy;
+  } catch {
+    cachedProxy = null;
+    return null;
   }
 }
 
-// 从专用 Profile 提取 chatgpt.com 的 __Secure-next-auth.session-token；未登录则等待人工登录。
-// 只会返回通过服务端验证的 cookie：Profile 残留的死 cookie 一律按未登录处理。
-async function extractSessionToken(forceRelogin: boolean): Promise<string | null> {
+function proxyReachable(proxyUrl: string, timeoutMs = 1500): Promise<boolean> {
+  return new Promise((resolve) => {
+    try {
+      const url = new URL(proxyUrl);
+      const socket = connect(
+        { host: url.hostname, port: Number(url.port) || 80, timeout: timeoutMs },
+        () => {
+          socket.destroy();
+          resolve(true);
+        },
+      );
+      socket.on("error", () => resolve(false));
+      socket.on("timeout", () => {
+        socket.destroy();
+        resolve(false);
+      });
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+// 返回 true 表示已重启子进程接管执行，当前进程应停在原地等待子进程退出
+async function ensureProxyOrRespawn(): Promise<boolean> {
+  if (process.env.NODE_USE_ENV_PROXY === "1") return false;
+  const proxy = detectProxy();
+  if (!proxy) return false;
+  if (!(await proxyReachable(proxy))) {
+    console.warn(`[WARN] 系统代理 ${proxy} 当前不可达，将直连（请先启动代理软件，或用 HTTPS_PROXY 指定其他地址）`);
+    return false;
+  }
+  console.log(`[INFO] 检测到可达代理 ${proxy}，以 NODE_USE_ENV_PROXY=1 重启自身使 fetch 走代理 ...`);
+  const child = spawn(
+    process.execPath,
+    // argv[1] 是脚本路径，必须保留；respawn 参数 = [node, --experimental-strip-types, 脚本, ...用户参数]
+    ["--experimental-strip-types", process.argv[1]!, ...process.argv.slice(2)],
+    {
+      env: { ...process.env, NODE_USE_ENV_PROXY: "1", HTTPS_PROXY: proxy, HTTP_PROXY: proxy },
+      stdio: "inherit",
+    },
+  );
+  child.on("exit", (code) => process.exit(code ?? 1));
+  return true;
+}
+
+// NextAuth 的 session token 超过单 cookie 上限（约 4KB）时会分片存储为 name.0 / name.1 ...，
+// 必须收集全部分片按序拼接；向服务端发送与入库均按浏览器原样形态（name.0=v0; name.1=v1）。
+function chunkIndex(name: string): number {
+  const matched = /\.(\d+)$/.exec(name);
+  return matched ? Number(matched[1]) : -1;
+}
+
+function buildSessionCookieHeader(cookies: Array<{ name: string; value: string }>): string | null {
+  const parts = cookies
+    .filter((cookie) => /^__Secure-next-auth\.session-token(\.\d+)?$/.test(cookie.name))
+    .sort((a, b) => chunkIndex(a.name) - chunkIndex(b.name));
+  if (parts.length === 0) return null;
+  return parts.map((cookie) => `${cookie.name}=${cookie.value}`).join("; ");
+}
+
+// 从专用 Profile 提取 chatgpt.com 的 session cookie；未登录则打开页面等待人工登录。
+// 登录判定在浏览器页面内同源请求 /api/auth/session（完整浏览器指纹 + 自动携带 cookie），
+// 不做任何页面 DOM 选择器假设；返回页面句柄供后续 codex 校验复用（调用方负责关闭 context）。
+type BrowserSession = {
+  cookieHeader: string | null;
+  page: import("playwright").Page;
+  context: import("playwright").BrowserContext;
+};
+
+async function extractSessionToken(forceRelogin: boolean): Promise<BrowserSession | null> {
+  // 检测到可达代理时显式传给 Chromium，避免依赖（可能残留失效的）系统代理设置
+  const proxy = detectProxy();
   const context = await chromium.launchPersistentContext(PROFILE_DIR, {
     headless: false,
     viewport: { width: 1280, height: 900 },
     args: ["--no-first-run", "--no-default-browser-check", "--disable-blink-features=AutomationControlled"],
+    ...(proxy ? { proxy: { server: proxy } } : {}),
   });
 
   try {
-    // --relogin：先清空旧 cookie，避免残留死 session-token 短路登录检测（换账号 / cookie 污染场景）
+    // --relogin：先清空旧 cookie，避免残留死 session-token 干扰（换账号 / cookie 污染场景）
     if (forceRelogin) {
       await context.clearCookies();
       console.log("[INFO] 已清除 Profile 中的旧 cookie（--relogin）");
@@ -136,23 +226,27 @@ async function extractSessionToken(forceRelogin: boolean): Promise<string | null
     const page = context.pages()[0] ?? (await context.newPage());
     console.log(`[INFO] 打开 ${CHATGPT_HOME} ...`);
     await page.goto(CHATGPT_HOME, { waitUntil: "domcontentloaded", timeout: 60_000 });
-    await page.waitForTimeout(4_000);
 
-    const readToken = async (): Promise<string | null> => {
-      const cookies = await context.cookies("https://chatgpt.com");
-      const token = cookies.find((cookie) => cookie.name === "__Secure-next-auth.session-token");
-      return token?.value ?? null;
+    const readCookieHeader = async (): Promise<string | null> =>
+      buildSessionCookieHeader(await context.cookies("https://chatgpt.com"));
+
+    // 登录判定：页面内同源 fetch session 端点，返回非空 accessToken 即服务端认可当前登录态
+    const loggedIn = async (): Promise<boolean> => {
+      const result = await fetchInPage(page, AUTH_SESSION_URL);
+      const body = result?.body as { accessToken?: unknown } | null | undefined;
+      return (
+        result !== null &&
+        result.status === 200 &&
+        typeof body?.accessToken === "string" &&
+        body.accessToken.length > 0
+      );
     };
 
-    // 登录入口检测（快速路径与等待循环共用）：页面仍显示登录入口即视为未登录
-    const loginEntry = page.locator(LOGIN_ENTRY_SELECTOR);
-
-    // 快速路径：有 cookie + 页面无登录入口 + 服务端验证通过 → 已登录
-    const immediate = await readToken();
-    if (immediate && (await loginEntry.count()) === 0) {
-      const validation = await validateSessionCookie(immediate);
-      if (validation.valid) return immediate;
-      console.warn(`[WARN] Profile 残留的 session cookie 已被服务端失效（${validation.error}），按未登录处理`);
+    console.log("[INFO] 检查登录态 ...");
+    await page.waitForTimeout(3_000);
+    if (await loggedIn()) {
+      const cookieHeader = await readCookieHeader();
+      if (cookieHeader) return { cookieHeader, page, context };
     }
 
     console.log("");
@@ -161,56 +255,86 @@ async function extractSessionToken(forceRelogin: boolean): Promise<string | null
     console.log(`  登录成功后自动继续，最长等待 ${LOGIN_WAIT_MS / 1000} 秒`);
     console.log("═════════════════════════════════════════════════");
     const deadline = Date.now() + LOGIN_WAIT_MS;
-    let staleCookieWarned = false;
     while (Date.now() < deadline) {
-      try {
-        const token = await readToken();
-        // 接受 cookie 前复评登录入口：页面还显示登录按钮说明 cookie 是残留死值，继续等待人工登录
-        if (token && (await loginEntry.count()) === 0) {
-          const validation = await validateSessionCookie(token);
-          if (validation.valid) return token;
-          console.warn(`[WARN] session cookie 服务端验证未通过（${validation.error}），继续等待人工登录`);
-        } else if (token && !staleCookieWarned) {
-          // 有 cookie 但页面仍显示登录入口：多为残留死值；只提示一次避免刷屏
-          staleCookieWarned = true;
-          console.warn("[WARN] 检测到残留 session cookie 但页面仍显示登录入口，若长时间无进展请加 --relogin 重试");
-        }
-      } catch {
-        // 人工登录涉及多次跳转，页面导航瞬间 locator 可能暂时失效，下一轮重试
+      if (await loggedIn()) {
+        const cookieHeader = await readCookieHeader();
+        if (cookieHeader) return { cookieHeader, page, context };
       }
       await page.waitForTimeout(2_000);
     }
     console.error(`[FAIL] 登录超时（${LOGIN_WAIT_MS / 1000} 秒）`);
-    return null;
-  } finally {
+    // 超时仍返回页面句柄：允许仅用 Codex 凭据继续（cookieHeader 为 null）
+    return { cookieHeader: null, page, context };
+  } catch (error) {
     await context.close();
+    throw error;
   }
 }
 
-// 校验：用导入的 token 试调 codex rate_limits，成功才落库
+// 页面内同源 fetch：借浏览器完整指纹与 Profile 中的 cf_clearance 绕开 CF 对纯 fetch 的质询
+// （实测：代理出口 IP 为数据中心 IP 时，Node fetch 访问 chatgpt.com API 端点会被 403 + cf-mitigated: challenge）
+async function fetchInPage(
+  page: import("playwright").Page,
+  url: string,
+  headers?: Record<string, string>,
+): Promise<{ status: number; cfMitigated: string | null; body: unknown } | null> {
+  return page.evaluate(
+    async ({ url, headers }) => {
+      try {
+        const resp = await fetch(url, { headers, credentials: "include" });
+        let body: unknown = null;
+        try {
+          body = await resp.json();
+        } catch {
+          body = null;
+        }
+        return { status: resp.status, cfMitigated: resp.headers.get("cf-mitigated"), body };
+      } catch {
+        return null;
+      }
+    },
+    { url, headers: headers ?? {} },
+  );
+}
+
+// 校验 codex token：优先在浏览器页面内同源请求（绕 CF 质询）；--skip-browser 时退回纯 fetch
 async function validateCodexToken(
-  accessToken: string,
-  accountId: string | null,
+  codex: { accessToken: string; accountId: string | null },
+  page?: import("playwright").Page,
 ): Promise<{ ok: boolean; status: number; error?: string }> {
-  try {
-    const response = await fetch(CODEX_RATE_LIMITS_URL, {
-      method: "GET",
-      headers: {
-        Accept: "application/json",
-        Authorization: `Bearer ${accessToken}`,
-        ...(accountId ? { "chatgpt-account-id": accountId } : {}),
-      },
-    });
-    if (response.status === 401 || response.status === 403) {
-      return { ok: false, status: response.status, error: `HTTP ${response.status}，token 已失效（请在 Codex CLI 重新登录后再导入）` };
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+    Authorization: `Bearer ${codex.accessToken}`,
+    ...(codex.accountId ? { "chatgpt-account-id": codex.accountId } : {}),
+  };
+  let status: number | null = null;
+  let cfMitigated: string | null = null;
+  if (page) {
+    const result = await fetchInPage(page, CODEX_USAGE_URL, headers);
+    if (result) {
+      status = result.status;
+      cfMitigated = result.cfMitigated;
     }
-    if (!response.ok) {
-      return { ok: false, status: response.status, error: `HTTP ${response.status}` };
+  } else {
+    try {
+      const response = await fetch(CODEX_USAGE_URL, { method: "GET", headers });
+      status = response.status;
+      cfMitigated = response.headers.get("cf-mitigated");
+    } catch (err) {
+      return { ok: false, status: 0, error: err instanceof Error ? err.message : String(err) };
     }
-    return { ok: true, status: response.status };
-  } catch (err) {
-    return { ok: false, status: 0, error: err instanceof Error ? err.message : String(err) };
   }
+  if (status === null) return { ok: false, status: 0, error: "请求失败（页面内与直连 fetch 均未完成）" };
+  if (status === 403 && cfMitigated === "challenge") {
+    return { ok: false, status, error: `HTTP 403（Cloudflare 质询，请更换代理出口节点后重试）` };
+  }
+  if (status === 401 || status === 403) {
+    return { ok: false, status, error: `HTTP ${status}，token 已失效（请在 Codex CLI 重新登录后再导入）` };
+  }
+  if (status < 200 || status >= 300) {
+    return { ok: false, status, error: `HTTP ${status}` };
+  }
+  return { ok: true, status };
 }
 
 // AES-GCM 加密，与 worker/security/credentials.ts 保持一致
@@ -354,51 +478,61 @@ async function main(): Promise<void> {
   }
   console.log(`[OK] auth.json 已读取（accessToken ${maskHint(codex.accessToken)}）`);
 
+  let browser: Awaited<ReturnType<typeof extractSessionToken>> = null;
   let sessionToken: string | null = null;
   if (skipBrowser) {
     if (forceRelogin) {
       console.warn("[WARN] --relogin 与 --skip-browser 同时传入：未打开浏览器，--relogin 不生效");
     }
-    console.warn("[WARN] --skip-browser：跳过网页 session cookie 提取");
+    console.warn("[WARN] --skip-browser：跳过网页 session cookie 提取（codex 校验退回直连 fetch，可能被 CF 质询拦截）");
   } else {
-    sessionToken = await extractSessionToken(forceRelogin);
+    browser = await extractSessionToken(forceRelogin);
+    sessionToken = browser?.cookieHeader ?? null;
     if (sessionToken) {
-      console.log(`[OK] session cookie 已提取（${maskHint(sessionToken)}）`);
+      console.log(`[OK] session cookie 已提取并获服务端认可（${maskHint(sessionToken)}，共 ${sessionToken.length} 字符）`);
     } else {
       console.warn("[WARN] 未提取到 __Secure-next-auth.session-token（可仅用 Codex 凭据继续）");
     }
   }
 
-  console.log("[INFO] 校验 codex token ...");
-  const validation = await validateCodexToken(codex.accessToken, codex.accountId);
-  if (!validation.ok) {
-    console.error(`[FAIL] codex token 校验失败：${validation.error}`);
-    process.exit(1);
-  }
-  console.log(`[OK] codex rate_limits HTTP ${validation.status}`);
-
-  const credentials: Record<string, string> = { accessToken: codex.accessToken };
-  if (codex.refreshToken) credentials.refreshToken = codex.refreshToken;
-  if (codex.accountId) credentials.accountId = codex.accountId;
-  if (sessionToken) credentials.sessionToken = sessionToken;
-
-  if (checkOnly) {
-    console.log("\n[--check] 干跑结束，未写入任何数据。将导入的字段：");
-    for (const [key, value] of Object.entries(credentials)) {
-      console.log(`  ${key} = ${maskHint(value)}`);
+  try {
+    console.log("[INFO] 校验 codex token ...");
+    const validation = await validateCodexToken(codex, browser?.page);
+    if (!validation.ok) {
+      console.error(`[FAIL] codex token 校验失败：${validation.error}`);
+      process.exitCode = 1;
+      return;
     }
-    return;
-  }
+    console.log(`[OK] codex rate_limits HTTP ${validation.status}`);
 
-  // 真正写入前才加载 .env（--check 干跑不依赖 Supabase 配置）
-  const env = loadEnv();
-  await upsertChatgptAccountCredentials(env, credentials);
-  console.log("\n━━━ 完成 ━━━");
-  console.log("看板下次刷新即使用新凭据；Codex token 过期后由 Worker 自动刷新。");
-  console.log("session cookie 约 30 天有效，过期后重新运行本脚本（第二期提供续期脚本）。");
+    const credentials: Record<string, string> = { accessToken: codex.accessToken };
+    if (codex.refreshToken) credentials.refreshToken = codex.refreshToken;
+    if (codex.accountId) credentials.accountId = codex.accountId;
+    if (sessionToken) credentials.sessionToken = sessionToken;
+
+    if (checkOnly) {
+      console.log("\n[--check] 干跑结束，未写入任何数据。将导入的字段：");
+      for (const [key, value] of Object.entries(credentials)) {
+        console.log(`  ${key} = ${maskHint(value)}`);
+      }
+      return;
+    }
+
+    // 真正写入前才加载 .env（--check 干跑不依赖 Supabase 配置）
+    const env = loadEnv();
+    await upsertChatgptAccountCredentials(env, credentials);
+    console.log("\n━━━ 完成 ━━━");
+    console.log("看板下次刷新即使用新凭据；Codex token 过期后由 Worker 自动刷新。");
+    console.log("session cookie 约 30 天有效，过期后重新运行本脚本（第二期提供续期脚本）。");
+  } finally {
+    await browser?.context.close();
+  }
 }
 
-main().catch((err) => {
-  console.error("[FAIL] 脚本执行失败:", err);
-  process.exit(1);
-});
+// 检测到系统代理时上方函数会重启自身接管执行；正常路径才运行 main
+if (!(await ensureProxyOrRespawn())) {
+  main().catch((err) => {
+    console.error("[FAIL] 脚本执行失败:", err);
+    process.exit(1);
+  });
+}

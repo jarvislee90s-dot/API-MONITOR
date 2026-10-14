@@ -32,13 +32,18 @@ function percentFromUsage(
   return Math.round((used / limit) * 1000) / 10;
 }
 
-// 重置时间：优先 ISO 字段，其次"剩余秒数 + now"推算
+// 重置时间：优先 ISO 字段，其次"剩余秒数 + now"推算。
+// 实测 codex/usage 的 reset_at 是 Unix 秒时间戳（数字），一并兼容（>1e12 视为毫秒）
 function pickResetAt(source: Record<string, unknown>, now: Date): string | null {
   for (const key of ["reset_at", "resets_at", "resetAt", "resetsAt", "reset_time"]) {
     const raw = source[key];
     if (typeof raw === "string" && raw.length > 0) {
       const date = new Date(raw);
       if (!Number.isNaN(date.getTime())) return date.toISOString();
+    }
+    if (typeof raw === "number" && Number.isFinite(raw) && raw > 1e9) {
+      const ms = raw > 1e12 ? raw : raw * 1000;
+      return new Date(ms).toISOString();
     }
   }
   const seconds = pickNumber(source, [
@@ -90,11 +95,31 @@ function deepFindString(value: unknown, keyPattern: RegExp): string | null {
   return null;
 }
 
-// 宽容解析 codex rate_limits：根对象或 rate_limits 键下，
+// 按窗口时长推 label：免费档主窗口实测为 30 天（limit_window_seconds=2592000），
+// Plus/Pro 为 5 小时 + 周；不写死「5小时/每周」避免档位错标
+function codexWindowLabel(source: Record<string, unknown>, isFiveHour: boolean): string {
+  const seconds = pickNumber(source, ["limit_window_seconds", "window_seconds", "window_limit_seconds"]);
+  if (seconds !== null && seconds > 0) {
+    if (seconds <= 6 * 3600) return "Codex 5小时";
+    if (seconds >= 20 * 86400) return "Codex 30天";
+    return "Codex 每周";
+  }
+  return isFiveHour ? "Codex 5小时" : "Codex 每周";
+}
+
+// 提取 codex/usage 顶层的 plan_type（实测免费档返回 "free"，省去单独订阅端点调用）
+export function parseCodexPlan(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const plan = (payload as { plan_type?: unknown }).plan_type;
+  return typeof plan === "string" && plan.length > 0 ? plan.toLowerCase() : null;
+}
+
+// 宽容解析 codex 用量：根对象、rate_limits 或 rate_limit（实测单数）键下，
 // 键名含 5h/primary/session → codex_5h，含 week/secondary/7d → codex_weekly（spec §2）
 export function parseCodexWindows(payload: unknown, now: Date): ProviderWindow[] {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
-  const container = ((payload as { rate_limits?: unknown }).rate_limits ?? payload) as Record<
+  const withWrapper = payload as { rate_limits?: unknown; rate_limit?: unknown };
+  const container = (withWrapper.rate_limits ?? withWrapper.rate_limit ?? payload) as Record<
     string,
     unknown
   >;
@@ -133,7 +158,7 @@ export function parseCodexWindows(payload: unknown, now: Date): ProviderWindow[]
     windows.push(
       buildPercentWindow({
         key,
-        label: isFiveHour ? "Codex 5小时" : "Codex 每周",
+        label: codexWindowLabel(source, isFiveHour),
         percentUsed,
         resetAt,
       }),

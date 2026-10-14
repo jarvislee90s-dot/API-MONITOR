@@ -9,6 +9,7 @@ import type {
 } from "../types";
 import { createResult } from "./types";
 import {
+  parseCodexPlan,
   parseCodexWindows,
   parseSubscriptionPayload,
   parseWebRateLimitWindows,
@@ -26,7 +27,7 @@ type ChatgptConfig = {
 };
 
 const defaultSourceUrl = "https://chatgpt.com";
-const codexRateLimitsUrl = "https://chatgpt.com/backend-api/codex/rate_limits";
+const codexUsageUrl = "https://chatgpt.com/backend-api/codex/usage"; // 实测端点（rate_limits 路径 404）
 const codexTokenUrl = "https://auth.openai.com/oauth/token";
 const webSessionUrl = "https://chatgpt.com/api/auth/session";
 const webRateLimitsUrl = "https://chatgpt.com/backend-api/rate_limits";
@@ -121,13 +122,13 @@ function notConfiguredBucket(): ChatgptBucketOutcome {
   return { attempted: false, windows: [], loginRequired: false, cfChallenge: false, fetchFailed: false };
 }
 
-async function requestCodexRateLimits(input: {
+async function requestCodexUsage(input: {
   accessToken: string;
   accountId: string;
   fetchImpl: typeof fetch;
   requestTimeoutMs?: number;
 }): Promise<Response> {
-  return input.fetchImpl(codexRateLimitsUrl, {
+  return input.fetchImpl(codexUsageUrl, {
     method: "GET",
     headers: {
       Accept: "application/json",
@@ -148,9 +149,9 @@ async function fetchCodexWindows(input: {
   fetchImpl: typeof fetch;
   requestTimeoutMs?: number;
   skipTokenRefresh?: boolean;
-}): Promise<{ outcome: ChatgptBucketOutcome; credentialUpdate: Record<string, string> | null }> {
-  if (!isTrustedChatgptUrl(codexRateLimitsUrl) || !isTrustedChatgptUrl(codexTokenUrl)) {
-    return { outcome: { ...notConfiguredBucket(), fetchFailed: true }, credentialUpdate: null };
+}): Promise<{ outcome: ChatgptBucketOutcome; credentialUpdate: Record<string, string> | null; plan: string | null }> {
+  if (!isTrustedChatgptUrl(codexUsageUrl) || !isTrustedChatgptUrl(codexTokenUrl)) {
+    return { outcome: { ...notConfiguredBucket(), fetchFailed: true }, credentialUpdate: null, plan: null };
   }
 
   const accessToken = input.config.accessToken ?? "";
@@ -158,14 +159,14 @@ async function fetchCodexWindows(input: {
 
   let response: Response;
   try {
-    response = await requestCodexRateLimits({
+    response = await requestCodexUsage({
       accessToken,
       accountId,
       fetchImpl: input.fetchImpl,
       requestTimeoutMs: input.requestTimeoutMs,
     });
   } catch {
-    return { outcome: { ...notConfiguredBucket(), attempted: true, fetchFailed: true }, credentialUpdate: null };
+    return { outcome: { ...notConfiguredBucket(), attempted: true, fetchFailed: true }, credentialUpdate: null, plan: null };
   }
 
   let credentialUpdate: Record<string, string> | null = null;
@@ -185,7 +186,7 @@ async function fetchCodexWindows(input: {
       // 即使重试仍失败也要带出新 token：refresh token 轮换后旧值可能已作废
       credentialUpdate = { accessToken: refreshed.accessToken, refreshToken: refreshed.refreshToken };
       try {
-        response = await requestCodexRateLimits({
+        response = await requestCodexUsage({
           accessToken: refreshed.accessToken,
           accountId,
           fetchImpl: input.fetchImpl,
@@ -195,25 +196,27 @@ async function fetchCodexWindows(input: {
         return {
           outcome: { ...notConfiguredBucket(), attempted: true, fetchFailed: true },
           credentialUpdate,
+          plan: null,
         };
       }
     }
   }
 
   if (isCloudflareChallenge(response)) {
-    return { outcome: { ...notConfiguredBucket(), attempted: true, cfChallenge: true }, credentialUpdate };
+    return { outcome: { ...notConfiguredBucket(), attempted: true, cfChallenge: true }, credentialUpdate, plan: null };
   }
   if (response.status === 401 || response.status === 403) {
-    return { outcome: { ...notConfiguredBucket(), attempted: true, loginRequired: true }, credentialUpdate };
+    return { outcome: { ...notConfiguredBucket(), attempted: true, loginRequired: true }, credentialUpdate, plan: null };
   }
   if (!response.ok) {
-    return { outcome: { ...notConfiguredBucket(), attempted: true, fetchFailed: true }, credentialUpdate };
+    return { outcome: { ...notConfiguredBucket(), attempted: true, fetchFailed: true }, credentialUpdate, plan: null };
   }
 
   const payload = await response.json().catch(() => null);
   return {
     outcome: { ...notConfiguredBucket(), attempted: true, windows: parseCodexWindows(payload, input.now) },
     credentialUpdate,
+    plan: parseCodexPlan(payload),
   };
 }
 
@@ -244,6 +247,15 @@ type WebSessionResult =
   | { kind: "login_required" }
   | { kind: "failed" };
 
+// sessionToken 支持两种形态：纯 token 值（拼成单体 cookie 头）或导入脚本写入的完整 cookie 串。
+// NextAuth 的 token 超过单 cookie 上限会分片存储（name.0/name.1），导入脚本按浏览器原样
+// 形态（name.0=v0; name.1=v1）入库，此处检测到 "=" 即视为完整串原样回发。
+function buildWebSessionCookie(sessionToken: string): string {
+  return sessionToken.includes("=")
+    ? sessionToken
+    : `__Secure-next-auth.session-token=${sessionToken}`;
+}
+
 async function fetchWebAccessToken(input: {
   sessionToken: string;
   fetchImpl: typeof fetch;
@@ -255,7 +267,7 @@ async function fetchWebAccessToken(input: {
       method: "GET",
       headers: {
         Accept: "application/json",
-        Cookie: `__Secure-next-auth.session-token=${input.sessionToken}`,
+        Cookie: buildWebSessionCookie(input.sessionToken),
         "User-Agent": webUserAgent,
       },
       signal: buildTimeoutSignal(input.requestTimeoutMs),
@@ -335,7 +347,7 @@ async function fetchSubscription(input: {
       },
       signal: buildTimeoutSignal(input.requestTimeoutMs),
     });
-    if (response.status === 404) {
+    if (response.status === 404 || response.status === 405) {
       return { attempted: true, plan: "free", planRenewAt: null, notFound: true };
     }
     if (!response.ok) {
@@ -489,7 +501,7 @@ export async function fetchChatgptSnapshot(input: ProviderFetchInput): Promise<P
         requestTimeoutMs: input.requestTimeoutMs,
         skipTokenRefresh: input.skipTokenRefresh,
       })
-    : { outcome: notConfiguredBucket(), credentialUpdate: null };
+    : { outcome: notConfiguredBucket(), credentialUpdate: null, plan: null };
 
   // 网页/订阅链路：session cookie 换 accessToken 后串行拉取额度与订阅（spec §2）
   let web = notConfiguredBucket();
@@ -522,6 +534,12 @@ export async function fetchChatgptSnapshot(input: ProviderFetchInput): Promise<P
       web = { attempted: true, windows: [], loginRequired: false, cfChallenge: false, fetchFailed: true };
       subscription = { attempted: true, plan: null, planRenewAt: null, notFound: false };
     }
+  }
+
+  // codex/usage 顶层自带 plan_type（实测），session 链路未取到订阅档位时用它兜底填充；
+  // planRenewAt 仅订阅端点可提供，此处保持 null（免费档前端显示「订阅前无数据」）
+  if (subscription.plan === null && codexResult.plan) {
+    subscription = { attempted: true, plan: codexResult.plan, planRenewAt: null, notFound: true };
   }
 
   return mergeChatgptBuckets({
