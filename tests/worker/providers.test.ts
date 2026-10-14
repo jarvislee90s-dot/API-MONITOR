@@ -15,6 +15,7 @@ import {
   isTrustedChatgptUrl,
   mergeChatgptBuckets,
   parseCodexWindows,
+  parseWebRateLimitWindows,
 } from "../../worker/providers/chatgpt";
 
 describe("provider registry", () => {
@@ -1602,6 +1603,82 @@ describe("chatgpt adapter (codex 链路)", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(3);
   });
 
+  it("refreshes the codex token on a plain 403 without cf-mitigated header", async () => {
+    let rateLimitsCalls = 0;
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const value = String(
+        typeof input === "string" ? input : input instanceof Request ? input.url : input,
+      );
+      if (value === "https://auth.openai.com/oauth/token") {
+        return new Response(
+          JSON.stringify({ access_token: "fake-access-token-2", refresh_token: "fake-refresh-token-2" }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      rateLimitsCalls += 1;
+      if (rateLimitsCalls === 1) {
+        // 普通 403（无 cf-mitigated 头）：按凭据失效处理，应触发 token 刷新
+        return new Response("forbidden", { status: 403 });
+      }
+      return new Response(
+        JSON.stringify({ rate_limits: { codex_5h: { used_percent: 8 } } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+
+    const result = await fetchChatgptSnapshot({
+      now: NOW,
+      fetchImpl: fetchImpl as typeof fetch,
+      config: {
+        accessToken: "fake-access-token-1",
+        refreshToken: "fake-refresh-token-1",
+        accountId: "fake-account-1",
+      },
+    });
+
+    expect(result.snapshot.status).toBe("ready");
+    expect(result.snapshot.metrics.codexTokenRefreshed).toBe(true);
+    // 发生了 token 刷新调用（rate_limits 403 → token 刷新 → rate_limits 重试）
+    expect(fetchImpl.mock.calls.length).toBeGreaterThanOrEqual(2);
+    const retryCall = fetchImpl.mock.calls[2] as unknown as [string, RequestInit];
+    expect(String(retryCall[0])).toBe("https://chatgpt.com/backend-api/codex/rate_limits");
+    expect((retryCall[1].headers as Record<string, string>).Authorization).toBe(
+      "Bearer fake-access-token-2",
+    );
+  });
+
+  it("keeps credentialUpdate when refresh succeeds but the retry still returns 401", async () => {
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const value = String(
+        typeof input === "string" ? input : input instanceof Request ? input.url : input,
+      );
+      if (value === "https://auth.openai.com/oauth/token") {
+        return new Response(
+          JSON.stringify({ access_token: "fake-access-token-2", refresh_token: "fake-refresh-token-2" }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response("{}", { status: 401 });
+    });
+
+    const result = await fetchChatgptSnapshot({
+      now: NOW,
+      fetchImpl: fetchImpl as typeof fetch,
+      config: {
+        accessToken: "fake-access-token-1",
+        refreshToken: "fake-refresh-token-1",
+        accountId: "fake-account-1",
+      },
+    });
+
+    expect(result.snapshot.status).toBe("login_required");
+    // refresh token 轮换后旧值可能已作废：重试失败也要带出新 token
+    expect(result.credentialUpdate).toEqual({
+      accessToken: "fake-access-token-2",
+      refreshToken: "fake-refresh-token-2",
+    });
+  });
+
   it("does not refresh the codex token on a Cloudflare challenge (403 + cf-mitigated)", async () => {
     const fetchImpl = vi.fn(
       async () => new Response("challenge", { status: 403, headers: { "cf-mitigated": "challenge" } }),
@@ -1648,6 +1725,9 @@ describe("chatgpt adapter (codex 链路)", () => {
 
     expect(result.snapshot.status).toBe("login_required");
     expect(result.snapshot.summary).toContain("登录态已失效");
+    // 未配置 sessionToken 时不应指责"网页 session 无效"，只说 Codex 凭据失效
+    expect(result.snapshot.summary).not.toContain("网页 session");
+    expect(result.snapshot.summary).toContain("Codex");
     expect(result.snapshot.windows).toEqual([]);
   });
 
@@ -1664,5 +1744,202 @@ describe("chatgpt adapter (codex 链路)", () => {
     });
 
     expect(result.snapshot.status).toBe("error");
+  });
+});
+
+describe("chatgpt adapter (网页/订阅链路)", () => {
+  const NOW = new Date("2026-10-14T00:00:00.000Z");
+
+  it("exchanges session token for accessToken and parses message_cap windows", async () => {
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const value = String(
+        typeof input === "string" ? input : input instanceof Request ? input.url : input,
+      );
+      if (value === "https://chatgpt.com/api/auth/session") {
+        return new Response(JSON.stringify({ accessToken: "fake-web-access-token" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (value === "https://chatgpt.com/backend-api/rate_limits") {
+        return new Response(
+          JSON.stringify({
+            message_cap: { max_cap: 10, remaining_cap: 7, reset_at: "2026-10-14T03:00:00Z" },
+            gpt_5x_message_cap: { max_cap: 40, remaining_cap: 30, reset_at: "2026-10-14T03:00:00Z" },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (value === "https://chatgpt.com/backend-api/accounts/check") {
+        return new Response(JSON.stringify({ account: { plan_type: "free" } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected ${value}`);
+    });
+
+    const result = await fetchChatgptSnapshot({
+      now: NOW,
+      fetchImpl: fetchImpl as typeof fetch,
+      config: { sessionToken: "fake-session-token" },
+    });
+
+    expect(result.snapshot.status).toBe("ready");
+    expect(result.snapshot.windows.map((w) => w.key)).toEqual(["web_5h_default", "web_5h_gpt_5x"]);
+    expect(result.snapshot.windows[0]).toMatchObject({
+      label: "对话 5小时·default",
+      percentUsed: 30,
+      resetAt: "2026-10-14T03:00:00.000Z",
+    });
+    expect(result.snapshot.windows[1]).toMatchObject({ percentUsed: 25 });
+    expect(result.snapshot.metrics).toMatchObject({ plan: "free", planRenewAt: null, webFetchMethod: "direct" });
+
+    const [sessionUrl, sessionInit] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(String(sessionUrl)).toBe("https://chatgpt.com/api/auth/session");
+    expect((sessionInit.headers as Record<string, string>).Cookie).toBe(
+      "__Secure-next-auth.session-token=fake-session-token",
+    );
+    const [limitsUrl, limitsInit] = fetchImpl.mock.calls[1] as unknown as [string, RequestInit];
+    expect(String(limitsUrl)).toBe("https://chatgpt.com/backend-api/rate_limits");
+    expect((limitsInit.headers as Record<string, string>).Authorization).toBe("Bearer fake-web-access-token");
+  });
+
+  it("parses the new grouped array shape with slug pass-through", () => {
+    const windows = parseWebRateLimitWindows(
+      [{ slug: "gpt_5_high", used_percent: 0.4, resets_in_seconds: 900 }],
+      NOW,
+    );
+
+    expect(windows.map((w) => w.key)).toEqual(["web_5h_gpt_5_high"]);
+    expect(windows[0]).toMatchObject({
+      label: "对话 5小时·gpt_5_high",
+      percentUsed: 40,
+      resetAt: "2026-10-14T00:15:00.000Z",
+    });
+  });
+
+  it("maps a Cloudflare challenge on the web link to partial", async () => {
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const value = String(
+        typeof input === "string" ? input : input instanceof Request ? input.url : input,
+      );
+      if (value === "https://chatgpt.com/api/auth/session") {
+        return new Response("challenge", {
+          status: 403,
+          headers: { "cf-mitigated": "challenge" },
+        });
+      }
+      return new Response(
+        JSON.stringify({ rate_limits: { codex_5h: { used_percent: 12 } } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+
+    const result = await fetchChatgptSnapshot({
+      now: NOW,
+      fetchImpl: fetchImpl as typeof fetch,
+      config: {
+        accessToken: "fake-access-token-1",
+        accountId: "fake-account-1",
+        sessionToken: "fake-session-token",
+      },
+    });
+
+    expect(result.snapshot.status).toBe("partial");
+    expect(result.snapshot.summary).toContain("Cloudflare 拦截");
+    expect(result.snapshot.metrics.webFetchMethod).toBe("snapshot_fallback");
+  });
+
+  it("treats subscription 404 as the free plan without degrading", async () => {
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const value = String(
+        typeof input === "string" ? input : input instanceof Request ? input.url : input,
+      );
+      if (value === "https://chatgpt.com/api/auth/session") {
+        return new Response(JSON.stringify({ accessToken: "fake-web-access-token" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (value === "https://chatgpt.com/backend-api/rate_limits") {
+        return new Response(
+          JSON.stringify({ message_cap: { max_cap: 10, remaining_cap: 10, reset_at: "2026-10-14T03:00:00Z" } }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (value === "https://chatgpt.com/backend-api/accounts/check") {
+        return new Response("not found", { status: 404 });
+      }
+      throw new Error(`unexpected ${value}`);
+    });
+
+    const result = await fetchChatgptSnapshot({
+      now: NOW,
+      fetchImpl: fetchImpl as typeof fetch,
+      config: { sessionToken: "fake-session-token" },
+    });
+
+    expect(result.snapshot.status).toBe("ready");
+    expect(result.snapshot.metrics).toMatchObject({ plan: "free", planRenewAt: null });
+  });
+
+  it("merges three buckets into ready with the plus plan and renewal date", async () => {
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const value = String(
+        typeof input === "string" ? input : input instanceof Request ? input.url : input,
+      );
+      if (value === "https://chatgpt.com/backend-api/codex/rate_limits") {
+        return new Response(
+          JSON.stringify({ rate_limits: { codex_5h: { used_percent: 5 }, codex_weekly: { used_percent: 10 } } }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (value === "https://chatgpt.com/api/auth/session") {
+        return new Response(JSON.stringify({ accessToken: "fake-web-access-token" }), {
+          status: 200,
+          headers: { "content-type": "application/json" }});
+      }
+      if (value === "https://chatgpt.com/backend-api/rate_limits") {
+        return new Response(
+          JSON.stringify({ message_cap: { max_cap: 80, remaining_cap: 40, reset_at: "2026-10-14T03:00:00Z" } }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (value === "https://chatgpt.com/backend-api/accounts/check") {
+        return new Response(
+          JSON.stringify({
+            account: { plan_type: "plus" },
+            subscription: { next_renewal_date: "2026-11-01T00:00:00Z" },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      throw new Error(`unexpected ${value}`);
+    });
+
+    const result = await fetchChatgptSnapshot({
+      now: NOW,
+      fetchImpl: fetchImpl as typeof fetch,
+      config: {
+        accessToken: "fake-access-token-1",
+        accountId: "fake-account-1",
+        sessionToken: "fake-session-token",
+      },
+    });
+
+    expect(result.snapshot.status).toBe("ready");
+    expect(result.snapshot.windows.map((w) => w.key)).toEqual([
+      "codex_5h",
+      "codex_weekly",
+      "web_5h_default",
+    ]);
+    expect(result.snapshot.metrics).toMatchObject({
+      plan: "plus",
+      planRenewAt: "2026-11-01T00:00:00.000Z",
+      codexTokenRefreshed: false,
+      webFetchMethod: "direct",
+    });
+    expect(result.snapshot.summary).toContain("订阅档位 plus");
   });
 });
