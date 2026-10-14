@@ -1,4 +1,4 @@
-import { CheckCircle2, CircleDashed, ExternalLink } from "lucide-react";
+import { CheckCircle2, CircleDashed, ExternalLink, Eye, EyeOff } from "lucide-react";
 import type { ProviderCatalogItem, ProviderPreference, SafeProviderAccount } from "../api/client";
 
 interface ProviderGalleryProps {
@@ -7,6 +7,7 @@ interface ProviderGalleryProps {
   accounts: SafeProviderAccount[];
   selectedProviderKey: string | null;
   onSelectProvider: (providerKey: string) => void;
+  onToggleProvider: (providerKey: string, enabled: boolean) => void;
   draggingProviderKey: string | null;
   dragOverProviderKey: string | null;
   onProviderDragStart: (providerKey: string) => void;
@@ -37,6 +38,7 @@ export function ProviderGallery({
   accounts,
   selectedProviderKey,
   onSelectProvider,
+  onToggleProvider,
   draggingProviderKey,
   dragOverProviderKey,
   onProviderDragStart,
@@ -71,18 +73,18 @@ export function ProviderGallery({
           const Icon = state === "configured" ? CheckCircle2 : state === "entry" ? ExternalLink : CircleDashed;
 
           return (
-            <button
+            <div
               key={provider.providerKey}
-              type="button"
-              draggable
               className={`provider-gallery-card ${selectedProviderKey === provider.providerKey ? "is-selected" : ""} ${
                 draggingProviderKey === provider.providerKey ? "provider-gallery-card--dragging" : ""
+              } ${
+                enabled ? "" : "provider-gallery-card--disabled"
               } ${
                 dragOverProviderKey === provider.providerKey && draggingProviderKey !== provider.providerKey
                   ? "provider-gallery-card--drop-target"
                   : ""
               }`}
-              aria-label={`编辑 ${provider.providerName}`}
+              draggable
               onDragStart={(event) => {
                 event.dataTransfer.effectAllowed = "move";
                 event.dataTransfer.setData("text/plain", provider.providerKey);
@@ -99,13 +101,30 @@ export function ProviderGallery({
                 onProviderDrop(event.dataTransfer.getData("text/plain"), provider.providerKey);
               }}
               onDragEnd={onProviderDragEnd}
-              onClick={() => onSelectProvider(provider.providerKey)}
             >
-              <Icon size={18} aria-hidden="true" />
-              <strong>{provider.providerName}</strong>
-              <span>{stateLabel(state)}</span>
-              <small>{enabled ? "供应商启用" : "供应商停用"}</small>
-            </button>
+              <button
+                type="button"
+                className="provider-gallery-card__select"
+                aria-label={`编辑 ${provider.providerName}`}
+                onClick={() => onSelectProvider(provider.providerKey)}
+              >
+                <Icon size={18} aria-hidden="true" />
+                <strong>{provider.providerName}</strong>
+                <span>{stateLabel(state)}</span>
+              </button>
+              <div className="provider-gallery-card__footer">
+                <small>{enabled ? "供应商启用" : "供应商停用"}</small>
+                <button
+                  type="button"
+                  className="provider-gallery-card__toggle"
+                  aria-label={`${enabled ? "停用" : "启用"}供应商：${provider.providerName}`}
+                  onClick={() => onToggleProvider(provider.providerKey, !enabled)}
+                >
+                  {enabled ? <EyeOff size={13} aria-hidden="true" /> : <Eye size={13} aria-hidden="true" />}
+                  {enabled ? "停用" : "启用"}
+                </button>
+              </div>
+            </div>
           );
         })}
       </div>

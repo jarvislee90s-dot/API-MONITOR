@@ -252,6 +252,28 @@ export function SettingsPage({ api, dashboard, onBack }: SettingsPageProps) {
     );
   }
 
+  // 供应商级启停：立即持久化（与账号级「停用」一致），失败回滚本地状态避免界面与数据库不一致
+  async function toggleProviderPreference(providerKey: string, enabled: boolean) {
+    const previous = preferences;
+    const next = previous.map((preference) =>
+      preference.providerKey === providerKey ? { ...preference, enabled } : preference,
+    );
+    setPreferences(next);
+    setLoading(true);
+    try {
+      const normalized = next.map((preference, index) => ({ ...preference, displayOrder: index + 1 }));
+      await api.saveProviderPreferences(normalized);
+      setPreferences(normalized);
+      const providerName = catalog.find((provider) => provider.providerKey === providerKey)?.providerName ?? providerKey;
+      setMessage(enabled ? `已启用 ${providerName}。` : `已停用 ${providerName}，看板不再显示该卡（配置已保留）。`);
+    } catch (error) {
+      setPreferences(previous);
+      setMessage(error instanceof Error ? error.message : "供应商启停保存失败。");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function reorderHomepageAccount(draggedAccountId: string, targetAccountId: string) {
     if (draggedAccountId === targetAccountId) return;
     const draggedAccount = homepageAccounts.find((account) => account.id === draggedAccountId);
@@ -372,6 +394,7 @@ export function SettingsPage({ api, dashboard, onBack }: SettingsPageProps) {
               setIsAddingAccount(false);
               setSelectedProviderKey(providerKey);
             }}
+            onToggleProvider={(providerKey, enabled) => void toggleProviderPreference(providerKey, enabled)}
           />
           <section className="settings-panel homepage-account-panel" aria-label="首页显示账号">
             <div className="settings-panel__head">

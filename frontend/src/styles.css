@@ -247,7 +247,7 @@ button { border: 0; }
 .quota-row__scope { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
 .quota-row__value { font-family: "JetBrains Mono", monospace; font-size: 18px; font-weight: 600; }
 .quota-row__meta { font-size: 12px; color: var(--muted); }
-.quota-row__foot { font-size: 12px; color: var(--muted); }
+.quota-row__foot { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--muted); }
 
 /* 链接 */
 .link-list { display: flex; gap: 8px; flex-wrap: wrap; }
@@ -296,6 +296,13 @@ button { border: 0; }
 .provider-gallery-card strong { font-size: 14px; }
 .provider-gallery-card span { font-size: 12px; color: var(--aurora-cyan); }
 .provider-gallery-card small { font-size: 11px; color: var(--muted); }
+.provider-gallery-card__select { display: grid; gap: 6px; width: 100%; padding: 0; border: 0; background: none; color: inherit; text-align: left; cursor: grab; }
+.provider-gallery-card__footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.provider-gallery-card__toggle { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface-soft); color: var(--muted); font-size: 11px; line-height: 1.4; cursor: pointer; transition: border-color 0.2s, color 0.2s, background 0.2s; }
+.provider-gallery-card__toggle:hover { border-color: var(--accent); color: var(--accent); }
+.provider-gallery-card--disabled { opacity: 0.6; }
+.provider-gallery-card--disabled .provider-gallery-card__toggle { color: var(--success); border-color: rgba(74,222,128,0.35); }
+.provider-gallery-card--disabled .provider-gallery-card__toggle:hover { background: rgba(74,222,128,0.12); }
 
 /* 账号列表 */
 .account-list { display: grid; gap: 10px; }

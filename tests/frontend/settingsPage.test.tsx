@@ -813,4 +813,175 @@ describe("SettingsPage", () => {
       expect.objectContaining({ providerKey: "openrouter", displayOrder: 2 }),
     ]);
   });
+
+  it("toggles a provider without configured accounts to disabled and persists immediately", async () => {
+    // DeepSeek 在 catalog 中但没有任何已配置账号，也应支持供应商级停用
+    const api = {
+      getProviderSettings: vi.fn().mockResolvedValue({
+        catalog: [
+          {
+            providerKey: "deepseek",
+            providerName: "DeepSeek",
+            sourceUrl: "https://platform.deepseek.com/usage",
+            description: "DeepSeek usage",
+          },
+          {
+            providerKey: "openrouter",
+            providerName: "OpenRouter",
+            sourceUrl: "https://openrouter.ai/activity",
+            description: "OpenRouter usage",
+          },
+        ],
+        preferences: [
+          {
+            providerKey: "deepseek",
+            enabled: true,
+            displayOrder: 1,
+            activeProviderAccountId: null,
+          },
+          {
+            providerKey: "openrouter",
+            enabled: true,
+            displayOrder: 2,
+            activeProviderAccountId: null,
+          },
+        ],
+        accounts: [],
+      }),
+      saveProviderPreferences: vi.fn(async () => undefined),
+      saveProviderAccount: vi.fn(),
+      testProviderAccount: vi.fn(),
+      updateProviderAccountDisplay: vi.fn(),
+    };
+
+    render(<SettingsPage api={api as never} onBack={() => undefined} />);
+
+    const disableButton = await screen.findByRole("button", { name: "停用供应商：DeepSeek" });
+    fireEvent.click(disableButton);
+
+    await waitFor(() => expect(api.saveProviderPreferences).toHaveBeenCalledTimes(1));
+    expect(api.saveProviderPreferences).toHaveBeenCalledWith(
+      expect.arrayContaining([expect.objectContaining({ providerKey: "deepseek", enabled: false })]),
+    );
+
+    // 停用成功后按钮翻转为启用入口，卡片文案与提示同步更新
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "启用供应商：DeepSeek" })).toBeTruthy();
+    });
+    expect(screen.getByText("供应商停用")).toBeTruthy();
+    expect(screen.getByText("已停用 DeepSeek，看板不再显示该卡（配置已保留）。")).toBeTruthy();
+  });
+
+  it("rolls back the provider toggle and surfaces the API error when saving preferences fails", async () => {
+    const api = {
+      getProviderSettings: vi.fn().mockResolvedValue({
+        catalog: [
+          {
+            providerKey: "deepseek",
+            providerName: "DeepSeek",
+            sourceUrl: "https://platform.deepseek.com/usage",
+            description: "DeepSeek usage",
+          },
+          {
+            providerKey: "openrouter",
+            providerName: "OpenRouter",
+            sourceUrl: "https://openrouter.ai/activity",
+            description: "OpenRouter usage",
+          },
+        ],
+        preferences: [
+          {
+            providerKey: "deepseek",
+            enabled: true,
+            displayOrder: 1,
+            activeProviderAccountId: null,
+          },
+          {
+            providerKey: "openrouter",
+            enabled: true,
+            displayOrder: 2,
+            activeProviderAccountId: null,
+          },
+        ],
+        accounts: [],
+      }),
+      saveProviderPreferences: vi.fn().mockRejectedValue(new Error("Failed to upsert preferences: 500")),
+      saveProviderAccount: vi.fn(),
+      testProviderAccount: vi.fn(),
+      updateProviderAccountDisplay: vi.fn(),
+    };
+
+    render(<SettingsPage api={api as never} onBack={() => undefined} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "停用供应商：DeepSeek" }));
+
+    // 保存失败：显示后端错误，且本地状态回滚，卡片保持启用态
+    expect(await screen.findByText("Failed to upsert preferences: 500")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "停用供应商：DeepSeek" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "启用供应商：DeepSeek" })).toBeNull();
+    expect(screen.getAllByText("供应商启用")).toHaveLength(2);
+  });
+
+  it("re-enables a disabled provider and removes the disabled card style", async () => {
+    // 初始状态：deepseek 已被停用（无账号），openrouter 保持启用
+    const api = {
+      getProviderSettings: vi.fn().mockResolvedValue({
+        catalog: [
+          {
+            providerKey: "deepseek",
+            providerName: "DeepSeek",
+            sourceUrl: "https://platform.deepseek.com/usage",
+            description: "DeepSeek usage",
+          },
+          {
+            providerKey: "openrouter",
+            providerName: "OpenRouter",
+            sourceUrl: "https://openrouter.ai/activity",
+            description: "OpenRouter usage",
+          },
+        ],
+        preferences: [
+          {
+            providerKey: "deepseek",
+            enabled: false,
+            displayOrder: 1,
+            activeProviderAccountId: null,
+          },
+          {
+            providerKey: "openrouter",
+            enabled: true,
+            displayOrder: 2,
+            activeProviderAccountId: null,
+          },
+        ],
+        accounts: [],
+      }),
+      saveProviderPreferences: vi.fn(async () => undefined),
+      saveProviderAccount: vi.fn(),
+      testProviderAccount: vi.fn(),
+      updateProviderAccountDisplay: vi.fn(),
+    };
+
+    render(<SettingsPage api={api as never} onBack={() => undefined} />);
+
+    const enableButton = await screen.findByRole("button", { name: "启用供应商：DeepSeek" });
+    expect(screen.getByText("供应商停用")).toBeTruthy();
+    // 停用态卡片带 disabled 修饰类
+    const deepseekCard = enableButton.closest(".provider-gallery-card");
+    expect(deepseekCard?.className).toContain("provider-gallery-card--disabled");
+
+    fireEvent.click(enableButton);
+
+    await waitFor(() => expect(api.saveProviderPreferences).toHaveBeenCalledTimes(1));
+    expect(api.saveProviderPreferences).toHaveBeenCalledWith(
+      expect.arrayContaining([expect.objectContaining({ providerKey: "deepseek", enabled: true })]),
+    );
+
+    // 启用成功后按钮翻转为停用入口，disabled 样式类移除
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "停用供应商：DeepSeek" })).toBeTruthy();
+    });
+    expect(deepseekCard?.className).not.toContain("provider-gallery-card--disabled");
+    expect(screen.getByText("已启用 DeepSeek。")).toBeTruthy();
+  });
 });
