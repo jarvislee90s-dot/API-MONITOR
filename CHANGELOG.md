@@ -2,6 +2,18 @@
 
 本项目使用 Keep a Changelog 风格记录：`Added` / `Changed` / `Fixed`。版本号按日期递增（`YYYY-MM-DD`）。
 
+## [2026-10-15] - ChatGPT 双额度桶分开展示
+
+### Added
+
+- ChatGPT 卡片按额度桶分开展示：Codex 编码额度与网页对话额度两个桶独立计量（spec §2），窗口 `meta.bucket` 标记归属，前端窗口标题改用桶名（「Codex 编码额度」/「网页对话额度」）。
+- 网页对话额度无数据时（免费档 `rate_limits` 返回 404）卡片追加占位说明行，说明两桶独立、Codex 用尽不影响网页聊天；占位行不参与趋势、不画进度条，完全没有窗口时仍走通用空态文案。
+- `scripts/probe-chatgpt-endpoints.ts --browser`：用本机浏览器会话在页面内探测候选端点（`accounts/check/v4-2023-04-27`、`models`、`me`、`settings/user`、`conversation/limit`、`usage_limits` 等），用于确认免费档网页额度是否有其它数据源。
+
+### Changed
+
+- ChatGPT 主指标标签由固定「Codex 5小时」改为首个窗口的 label（免费档为 30 天窗，避免档位错标）。
+
 ## [2026-10-14] - ChatGPT 本机推送通道 + 供应商停用控件
 
 ### Added

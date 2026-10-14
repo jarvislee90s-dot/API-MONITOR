@@ -53,6 +53,25 @@ function formatLocalPushTime(capturedAt: string): string {
   }).format(new Date(capturedAt));
 }
 
+// 构造任意单卡 /api/usage 响应（非 chatgpt 供应商的回归守卫走这里）
+function buildSingleCardResponse(card: Record<string, unknown>) {
+  return new Response(
+    JSON.stringify({
+      ok: true,
+      data: {
+        kind: "usage_dashboard",
+        generatedAt: "2026-10-14T00:00:00.000Z",
+        status: "ready",
+        summary: "ready",
+        totals: { providers: 1, ready: 1, partial: 0, loginRequired: 0, error: 0 },
+        cards: [card],
+        modelSpends: [],
+      },
+    }),
+    { status: 200, headers: { "content-type": "application/json" } },
+  );
+}
+
 describe("api client mapping", () => {
   it("formats quota reset time in Beijing time and keeps one dashboard link", async () => {
     const fetcher = vi.fn(async () => {
@@ -769,4 +788,206 @@ describe("api client mapping", () => {
     expect(platform.detailMetrics).toContainEqual({ label: "抓取方式", value: "云端直连" });
   });
 
+});
+
+describe("chatgpt 双额度桶（Codex 编码 / 网页对话）映射", () => {
+  it("仅 Codex 窗口时追加「网页对话额度」占位说明行，trend 仍只含真实窗口", async () => {
+    // 免费档典型形态：rate_limits 返回 404，web 桶无任何数据 → 显式占位防误读
+    const fetcher = vi.fn(async () =>
+      buildChatgptUsageResponse({
+        windows: [
+          {
+            key: "codex_5h",
+            label: "Codex 30天",
+            used: 100,
+            limit: 100,
+            percentUsed: 100,
+            resetAt: null,
+            meta: { bucket: "codex" },
+          },
+        ],
+      }),
+    );
+
+    const dashboard = await createApiClient({ fetcher: fetcher as unknown as typeof fetch }).getUsageDashboard();
+    const platform = dashboard.platforms[0]!;
+
+    expect(platform.quotaWindows).toHaveLength(2);
+    // 第一条：真实 codex 窗口，scope 用桶名标注归属
+    expect(platform.quotaWindows[0]).toMatchObject({
+      label: "Codex 30天",
+      scope: "Codex 编码额度",
+      bucket: "codex",
+    });
+    // 第二条：web 桶占位说明行
+    expect(platform.quotaWindows[1]).toMatchObject({
+      label: "网页对话额度",
+      scope: "网页对话额度",
+      bucket: "web",
+      used: 0,
+      limit: 0,
+      percentUsed: null,
+      resetAt: "",
+    });
+    expect(platform.quotaWindows[1]?.note).toContain("独立计量");
+    // trend 只由真实窗口推导：占位行不产生 trend 点
+    expect(platform.trend).toHaveLength(1);
+    expect(platform.trend[0]?.label).toBe("Codex 30天");
+  });
+
+  it("已有 web 窗口时不追加占位行，两个桶分别以桶名作 scope", async () => {
+    const fetcher = vi.fn(async () =>
+      buildChatgptUsageResponse({
+        windows: [
+          {
+            key: "codex_5h",
+            label: "Codex 5小时",
+            used: 40,
+            limit: 100,
+            percentUsed: 40,
+            resetAt: null,
+            meta: { bucket: "codex" },
+          },
+          {
+            key: "web_5h_default",
+            label: "对话 5小时·default",
+            used: 30,
+            limit: 100,
+            percentUsed: 30,
+            resetAt: null,
+            meta: { bucket: "web" },
+          },
+        ],
+      }),
+    );
+
+    const dashboard = await createApiClient({ fetcher: fetcher as unknown as typeof fetch }).getUsageDashboard();
+    const platform = dashboard.platforms[0]!;
+
+    expect(platform.quotaWindows).toHaveLength(2);
+    expect(platform.quotaWindows.map((w) => w.scope)).toEqual(["Codex 编码额度", "网页对话额度"]);
+    // 有真实 web 窗口就不再补占位说明行
+    expect(platform.quotaWindows.every((w) => w.note === undefined)).toBe(true);
+  });
+
+  it("旧快照无 meta.bucket 时按 key 前缀兜底：codex_5h → Codex 编码额度桶", async () => {
+    // 历史快照（bucket 字段上线前持久化）无需重推也能正确分桶展示
+    const fetcher = vi.fn(async () =>
+      buildChatgptUsageResponse({
+        windows: [
+          { key: "codex_5h", label: "Codex 5小时", used: 40, limit: 100, percentUsed: 40, resetAt: null },
+        ],
+      }),
+    );
+
+    const dashboard = await createApiClient({ fetcher: fetcher as unknown as typeof fetch }).getUsageDashboard();
+    const platform = dashboard.platforms[0]!;
+
+    expect(platform.quotaWindows[0]).toMatchObject({
+      label: "Codex 5小时",
+      scope: "Codex 编码额度",
+      bucket: "codex",
+    });
+  });
+
+  it("旧快照无 meta.bucket 时按 key 前缀兜底：web_5h_default → 网页对话额度桶，且不追加占位行", async () => {
+    const fetcher = vi.fn(async () =>
+      buildChatgptUsageResponse({
+        windows: [
+          { key: "web_5h_default", label: "对话 5小时·default", used: 30, limit: 100, percentUsed: 30, resetAt: null },
+        ],
+      }),
+    );
+
+    const dashboard = await createApiClient({ fetcher: fetcher as unknown as typeof fetch }).getUsageDashboard();
+    const platform = dashboard.platforms[0]!;
+
+    expect(platform.quotaWindows[0]).toMatchObject({
+      label: "对话 5小时·default",
+      scope: "网页对话额度",
+      bucket: "web",
+    });
+    // web 桶已有真实窗口：不得再追加占位说明行
+    expect(platform.quotaWindows).toHaveLength(1);
+    expect(platform.quotaWindows.every((w) => w.note === undefined)).toBe(true);
+  });
+
+  it("账号层同样追加占位说明行（卡片与账号两层都套用）", async () => {
+    const codexOnlyWindow = {
+      key: "codex_5h",
+      label: "Codex 5小时",
+      used: 40,
+      limit: 100,
+      percentUsed: 40,
+      resetAt: null,
+      meta: { bucket: "codex" },
+    };
+    const fetcher = vi.fn(async () =>
+      buildChatgptUsageResponse({
+        windows: [codexOnlyWindow],
+        accounts: [
+          {
+            accountId: "chatgpt:main",
+            accountLabel: "主账号",
+            sourceUrl: "https://chatgpt.com",
+            status: "ready",
+            summary: "Codex 窗口已获取",
+            capturedAt: "2026-10-13T16:05:00.000Z",
+            trend: [],
+            windows: [codexOnlyWindow],
+            metrics: {},
+            meta: {},
+          },
+        ],
+      }),
+    );
+
+    const dashboard = await createApiClient({ fetcher: fetcher as unknown as typeof fetch }).getUsageDashboard();
+    const platform = dashboard.platforms[0]!;
+    const account = platform.accounts[0]!;
+
+    // 卡片层
+    expect(platform.quotaWindows.at(-1)).toMatchObject({ bucket: "web", scope: "网页对话额度" });
+    // 账号层同样追加，且账号 trend 不含占位点
+    expect(account.quotaWindows).toHaveLength(2);
+    expect(account.quotaWindows[1]).toMatchObject({ bucket: "web", scope: "网页对话额度" });
+    expect(account.quotaWindows[1]?.note).toContain("独立计量");
+    expect(account.trend).toHaveLength(1);
+  });
+
+  it("chatgpt 无窗口时主指标标签兜底为 Codex 编码额度", async () => {
+    const fetcher = vi.fn(async () => buildChatgptUsageResponse({ windows: [] }));
+
+    const dashboard = await createApiClient({ fetcher: fetcher as unknown as typeof fetch }).getUsageDashboard();
+    const platform = dashboard.platforms[0]!;
+
+    expect(platform.primaryMetricLabel).toBe("Codex 编码额度");
+  });
+
+  it("其它供应商窗口 scope 仍等于 label，不追加占位行（回归守卫）", async () => {
+    const fetcher = vi.fn(async () =>
+      buildSingleCardResponse({
+        providerId: "zhipu",
+        providerName: "智谱 BigModel",
+        sourceUrl: "https://bigmodel.cn/coding-plan/personal/usage",
+        status: "ready",
+        summary: "智谱 Coding Plan 用量已解析",
+        capturedAt: "2026-10-14T00:00:00.000Z",
+        trend: [],
+        windows: [
+          { key: "rp5h", label: "5小时", used: 2024, limit: 12000, resetAt: "2026-10-14T07:39:20.000Z" },
+          { key: "weekly", label: "每周", used: 2024, limit: 60000 },
+        ],
+        metrics: {},
+        meta: {},
+      }),
+    );
+
+    const dashboard = await createApiClient({ fetcher: fetcher as unknown as typeof fetch }).getUsageDashboard();
+    const platform = dashboard.platforms[0]!;
+
+    expect(platform.quotaWindows.map((w) => w.scope)).toEqual(["5小时", "每周"]);
+    expect(platform.quotaWindows.every((w) => w.bucket == null && w.note === undefined)).toBe(true);
+    expect(platform.quotaWindows).toHaveLength(2);
+  });
 });

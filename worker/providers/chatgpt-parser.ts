@@ -58,11 +58,14 @@ function pickResetAt(source: Record<string, unknown>, now: Date): string | null 
   return null;
 }
 
+// bucket：窗口所属额度桶（codex 编码额度 / web 网页对话额度）——两个桶独立计量，
+// 前端据此分桶展示，避免把 Codex 用尽误读成「ChatGPT 整体没额度了」（spec §2）
 function buildPercentWindow(params: {
   key: string;
   label: string;
   percentUsed: number | null;
   resetAt: string | null;
+  bucket?: "codex" | "web";
 }): ProviderWindow {
   return {
     key: params.key,
@@ -73,6 +76,7 @@ function buildPercentWindow(params: {
     percentUsed: params.percentUsed,
     percentRemaining: params.percentUsed !== null ? Math.max(0, 100 - params.percentUsed) : undefined,
     resetAt: params.resetAt,
+    ...(params.bucket ? { meta: { bucket: params.bucket } } : {}),
   };
 }
 
@@ -161,6 +165,7 @@ export function parseCodexWindows(payload: unknown, now: Date): ProviderWindow[]
         label: codexWindowLabel(source, isFiveHour),
         percentUsed,
         resetAt,
+        bucket: "codex",
       }),
     );
   }
@@ -204,6 +209,7 @@ export function parseWebRateLimitWindows(payload: unknown, now: Date): ProviderW
         label: `对话 5小时·${slug}`,
         percentUsed,
         resetAt,
+        bucket: "web",
       }),
     );
   };
@@ -238,7 +244,13 @@ export function parseWebRateLimitWindows(payload: unknown, now: Date): ProviderW
         if (seenKeys.has(windowKey)) continue;
         seenKeys.add(windowKey);
         windows.push(
-          buildPercentWindow({ key: windowKey, label: `对话 5小时·${slug}`, percentUsed, resetAt }),
+          buildPercentWindow({
+            key: windowKey,
+            label: `对话 5小时·${slug}`,
+            percentUsed,
+            resetAt,
+            bucket: "web",
+          }),
         );
       }
     }
