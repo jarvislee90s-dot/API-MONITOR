@@ -214,6 +214,7 @@ export interface WorkerEnv extends RefreshSessionEnv {
   OLLAMA_KEY?: string;
   OLLAMA_URL?: string;
   OLLAMA_PAGE_URL?: string;
+  OLLAMA_AUTH_COOKIE?: string;
   REFRESH_SESSION: DurableObjectNamespaceLike;
 }
 
