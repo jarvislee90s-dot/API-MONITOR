@@ -60,6 +60,15 @@ export function isCloudflareChallenge(response: Response): boolean {
   return response.headers.get("cf-mitigated")?.toLowerCase() === "challenge";
 }
 
+// CF 边缘出口被 chatgpt.com 整体拒绝的识别（实测：Worker 出口与 Browser Rendering 出口
+// 一律 403，且无 cf-mitigated 头、响应体是 Cloudflare 拦截 HTML 页，含 robots.txt）。
+// 这不是凭据失效，不能按 login_required 降级、也不该消耗 token 刷新
+export function isCloudflareBlockPage(response: Response): boolean {
+  if (response.status !== 403) return false;
+  if (response.headers.get("cf-mitigated")) return false;
+  return (response.headers.get("content-type") ?? "").toLowerCase().includes("text/html");
+}
+
 // 单链路网络超时（spec §6：15s）。workerd 支持 AbortSignal.timeout；
 // 测试环境（happy-dom）未实现该静态方法，缺失时退化为无超时信号
 function buildTimeoutSignal(requestTimeoutMs?: number): AbortSignal | undefined {
@@ -77,8 +86,10 @@ async function refreshCodexToken(input: {
   fetchImpl: typeof fetch;
   requestTimeoutMs?: number;
 }): Promise<{ accessToken: string; refreshToken: string } | null> {
+  // 本地绑定：workerd 的全局 fetch 做 receiver 校验，方法式调用会抛 Illegal invocation
+  const fetchImpl = input.fetchImpl ?? fetch;
   try {
-    const response = await input.fetchImpl(codexTokenUrl, {
+    const response = await fetchImpl(codexTokenUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json" },
       body: JSON.stringify({
@@ -115,11 +126,19 @@ export type ChatgptBucketOutcome = {
   windows: ProviderWindow[];
   loginRequired: boolean;
   cfChallenge: boolean;
+  egressBlocked: boolean;
   fetchFailed: boolean;
 };
 
 function notConfiguredBucket(): ChatgptBucketOutcome {
-  return { attempted: false, windows: [], loginRequired: false, cfChallenge: false, fetchFailed: false };
+  return {
+    attempted: false,
+    windows: [],
+    loginRequired: false,
+    cfChallenge: false,
+    egressBlocked: false,
+    fetchFailed: false,
+  };
 }
 
 async function requestCodexUsage(input: {
@@ -128,7 +147,8 @@ async function requestCodexUsage(input: {
   fetchImpl: typeof fetch;
   requestTimeoutMs?: number;
 }): Promise<Response> {
-  return input.fetchImpl(codexUsageUrl, {
+  const fetchImpl = input.fetchImpl ?? fetch;
+  return fetchImpl(codexUsageUrl, {
     method: "GET",
     headers: {
       Accept: "application/json",
@@ -170,10 +190,12 @@ async function fetchCodexWindows(input: {
   }
 
   let credentialUpdate: Record<string, string> | null = null;
-  // CF 质询（403 + cf-mitigated: challenge）是 IP 拦截而非凭据失效，不消耗 token 刷新
+  // CF 质询（403 + cf-mitigated: challenge）与出口封锁页（403 + HTML，无 cf-mitigated）
+  // 都是 IP/出口层面的拦截而非凭据失效，不消耗 token 刷新（实测 chatgpt.com 对 CF 出口整体 403）
   if (
     !input.skipTokenRefresh &&
-    (response.status === 401 || (response.status === 403 && !isCloudflareChallenge(response))) &&
+    (response.status === 401 ||
+      (response.status === 403 && !isCloudflareChallenge(response) && !isCloudflareBlockPage(response))) &&
     input.config.refreshToken
   ) {
     const refreshed = await refreshCodexToken({
@@ -204,6 +226,10 @@ async function fetchCodexWindows(input: {
 
   if (isCloudflareChallenge(response)) {
     return { outcome: { ...notConfiguredBucket(), attempted: true, cfChallenge: true }, credentialUpdate, plan: null };
+  }
+  // 出口整体被封：不是凭据问题，不刷新 token、不按 login_required 误导用户（实测结论）
+  if (isCloudflareBlockPage(response)) {
+    return { outcome: { ...notConfiguredBucket(), attempted: true, egressBlocked: true }, credentialUpdate, plan: null };
   }
   if (response.status === 401 || response.status === 403) {
     return { outcome: { ...notConfiguredBucket(), attempted: true, loginRequired: true }, credentialUpdate, plan: null };
@@ -244,6 +270,7 @@ function withCredentialUpdate(
 type WebSessionResult =
   | { kind: "ok"; accessToken: string }
   | { kind: "cf_challenge" }
+  | { kind: "egress_blocked" }
   | { kind: "login_required" }
   | { kind: "failed" };
 
@@ -262,8 +289,9 @@ async function fetchWebAccessToken(input: {
   requestTimeoutMs?: number;
 }): Promise<WebSessionResult> {
   if (!isTrustedChatgptUrl(webSessionUrl)) return { kind: "failed" };
+  const fetchImpl = input.fetchImpl ?? fetch;
   try {
-    const response = await input.fetchImpl(webSessionUrl, {
+    const response = await fetchImpl(webSessionUrl, {
       method: "GET",
       headers: {
         Accept: "application/json",
@@ -273,6 +301,7 @@ async function fetchWebAccessToken(input: {
       signal: buildTimeoutSignal(input.requestTimeoutMs),
     });
     if (isCloudflareChallenge(response)) return { kind: "cf_challenge" };
+    if (isCloudflareBlockPage(response)) return { kind: "egress_blocked" };
     if (response.status === 401 || response.status === 403) return { kind: "login_required" };
     if (!response.ok) return { kind: "failed" };
     const payload = (await response.json().catch(() => null)) as { accessToken?: unknown } | null;
@@ -295,8 +324,9 @@ async function fetchWebRateLimits(input: {
   if (!isTrustedChatgptUrl(webRateLimitsUrl)) {
     return { ...notConfiguredBucket(), fetchFailed: true };
   }
+  const fetchImpl = input.fetchImpl ?? fetch;
   try {
-    const response = await input.fetchImpl(webRateLimitsUrl, {
+    const response = await fetchImpl(webRateLimitsUrl, {
       method: "GET",
       headers: {
         Accept: "application/json",
@@ -306,13 +336,16 @@ async function fetchWebRateLimits(input: {
       signal: buildTimeoutSignal(input.requestTimeoutMs),
     });
     if (isCloudflareChallenge(response)) {
-      return { attempted: true, windows: [], loginRequired: false, cfChallenge: true, fetchFailed: false };
+      return { attempted: true, windows: [], loginRequired: false, cfChallenge: true, egressBlocked: false, fetchFailed: false };
+    }
+    if (isCloudflareBlockPage(response)) {
+      return { attempted: true, windows: [], loginRequired: false, cfChallenge: false, egressBlocked: true, fetchFailed: false };
     }
     if (response.status === 401 || response.status === 403) {
-      return { attempted: true, windows: [], loginRequired: true, cfChallenge: false, fetchFailed: false };
+      return { attempted: true, windows: [], loginRequired: true, cfChallenge: false, egressBlocked: false, fetchFailed: false };
     }
     if (!response.ok) {
-      return { attempted: true, windows: [], loginRequired: false, cfChallenge: false, fetchFailed: true };
+      return { attempted: true, windows: [], loginRequired: false, cfChallenge: false, egressBlocked: false, fetchFailed: true };
     }
     const payload = await response.json().catch(() => null);
     return {
@@ -320,10 +353,11 @@ async function fetchWebRateLimits(input: {
       windows: parseWebRateLimitWindows(payload, input.now),
       loginRequired: false,
       cfChallenge: false,
+      egressBlocked: false,
       fetchFailed: false,
     };
   } catch {
-    return { attempted: true, windows: [], loginRequired: false, cfChallenge: false, fetchFailed: true };
+    return { attempted: true, windows: [], loginRequired: false, cfChallenge: false, egressBlocked: false, fetchFailed: true };
   }
 }
 
@@ -337,8 +371,9 @@ async function fetchSubscription(input: {
     return { attempted: false, plan: null, planRenewAt: null, notFound: false };
   }
   const failed: ChatgptSubscriptionOutcome = { attempted: true, plan: null, planRenewAt: null, notFound: false };
+  const fetchImpl = input.fetchImpl ?? fetch;
   try {
-    const response = await input.fetchImpl(subscriptionCheckUrl, {
+    const response = await fetchImpl(subscriptionCheckUrl, {
       method: "GET",
       headers: {
         Accept: "application/json",
@@ -392,6 +427,8 @@ export function mergeChatgptBuckets(input: {
         : "snapshot_fallback",
     plan: input.subscription.plan ?? "unknown",
     planRenewAt: input.subscription.planRenewAt,
+    // 云端出口是否被 chatgpt.com 整体拒绝（403 block）：前端据此提示本机推送脚本
+    egressBlocked: Boolean(input.codex.egressBlocked || input.web.egressBlocked),
   };
 
   const base = {
@@ -408,6 +445,17 @@ export function mergeChatgptBuckets(input: {
   const anyData = windows.length > 0 || subscriptionHasData;
 
   if (!anyData) {
+    if (input.codex.egressBlocked || input.web.egressBlocked) {
+      return withCredentialUpdate(
+        createResult({
+          ...base,
+          status: "error",
+          summary:
+            "Cloudflare 出口访问 chatgpt.com 被 403 拒绝（非凭据问题）：请在本机运行 scripts/refresh-chatgpt-usage.ts 推送快照",
+        } as ProviderSnapshot),
+        input.credentialUpdate,
+      );
+    }
     const noCredentials = !input.hasCodexCredentials && !input.hasSessionToken;
     const credentialsExhausted =
       (!input.hasCodexCredentials || (input.codex.attempted && input.codex.loginRequired)) &&
@@ -452,10 +500,14 @@ export function mergeChatgptBuckets(input: {
 
   const subscriptionFailed =
     input.subscription.attempted && input.subscription.plan === null && !input.subscription.notFound;
-  const degraded = input.codex.cfChallenge || input.web.cfChallenge || subscriptionFailed;
+  const egressBlocked = input.codex.egressBlocked || input.web.egressBlocked;
+  const degraded = input.codex.cfChallenge || input.web.cfChallenge || egressBlocked || subscriptionFailed;
 
   if (input.codex.cfChallenge || input.web.cfChallenge) {
-    summaryParts.push("Cloudflare 拦截，请稍后重试或运行本地脚本（第二期）");
+    summaryParts.push("Cloudflare 质询，可稍后重试或用本机脚本补齐（scripts/refresh-chatgpt-usage.ts）");
+  }
+  if (egressBlocked) {
+    summaryParts.push("云端出口被 403 拒绝，缺失窗口请用本机脚本补齐（scripts/refresh-chatgpt-usage.ts）");
   }
   if (subscriptionFailed) {
     summaryParts.push("订阅信息获取失败");
@@ -525,13 +577,16 @@ export async function fetchChatgptSnapshot(input: ProviderFetchInput): Promise<P
         requestTimeoutMs: input.requestTimeoutMs,
       });
     } else if (session.kind === "cf_challenge") {
-      web = { attempted: true, windows: [], loginRequired: false, cfChallenge: true, fetchFailed: false };
+      web = { attempted: true, windows: [], loginRequired: false, cfChallenge: true, egressBlocked: false, fetchFailed: false };
+      subscription = { attempted: true, plan: null, planRenewAt: null, notFound: false };
+    } else if (session.kind === "egress_blocked") {
+      web = { attempted: true, windows: [], loginRequired: false, cfChallenge: false, egressBlocked: true, fetchFailed: false };
       subscription = { attempted: true, plan: null, planRenewAt: null, notFound: false };
     } else if (session.kind === "login_required") {
-      web = { attempted: true, windows: [], loginRequired: true, cfChallenge: false, fetchFailed: false };
+      web = { attempted: true, windows: [], loginRequired: true, cfChallenge: false, egressBlocked: false, fetchFailed: false };
       subscription = { attempted: true, plan: null, planRenewAt: null, notFound: false };
     } else {
-      web = { attempted: true, windows: [], loginRequired: false, cfChallenge: false, fetchFailed: true };
+      web = { attempted: true, windows: [], loginRequired: false, cfChallenge: false, egressBlocked: false, fetchFailed: true };
       subscription = { attempted: true, plan: null, planRenewAt: null, notFound: false };
     }
   }
@@ -542,7 +597,7 @@ export async function fetchChatgptSnapshot(input: ProviderFetchInput): Promise<P
     subscription = { attempted: true, plan: codexResult.plan, planRenewAt: null, notFound: true };
   }
 
-  return mergeChatgptBuckets({
+  const merged = mergeChatgptBuckets({
     codex: codexResult.outcome,
     web,
     subscription,
@@ -552,6 +607,8 @@ export async function fetchChatgptSnapshot(input: ProviderFetchInput): Promise<P
     sourceUrl: defaultSourceUrl,
     credentialUpdate: codexResult.credentialUpdate,
   });
+
+  return merged;
 }
 
 export const chatgpt: ProviderDefinition = {

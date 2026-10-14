@@ -6,7 +6,12 @@ import { RefreshSessionDurableObject } from "./durable-object/refresh-session";
 import { handleSettingsRequest } from "./settings/routes";
 import { getActiveProviderAccountConfig, getProviderAccountConfigById, listProviderSettings, updateProviderAccountCredentials } from "./settings/repository";
 import { requireUser } from "./auth";
-import { handleIngestDeepSeek, handleIngestOpenCodeGo, handleIngestZhipu } from "./ingest";
+import {
+  handleIngestChatgpt,
+  handleIngestDeepSeek,
+  handleIngestOpenCodeGo,
+  handleIngestZhipu,
+} from "./ingest";
 import type {
   ProviderFetchInput,
   ProviderDefinition,
@@ -960,6 +965,9 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
   }
   if (request.method === "POST" && url.pathname === "/api/ingest/zhipu") {
     return handleIngestZhipu(request, env);
+  }
+  if (request.method === "POST" && url.pathname === "/api/ingest/chatgpt") {
+    return handleIngestChatgpt(request, env);
   }
 
   if (request.method === "POST" && url.pathname === "/api/refresh") {

@@ -321,7 +321,10 @@ async function requestJson<T>(
 }
 
 function resolveLoginState(status: ServerProviderStatus, meta?: Record<string, unknown>): string {
-  if (meta?.isFallback === true) return "使用缓存数据";
+  if (meta?.isFallback === true) {
+    // 本机推送是 ChatGPT 的既定数据通道（云端出口被 403 封锁）：按正常同步措辞，而非「使用缓存数据」
+    return meta.fetchMethod === "local_ingest" ? "本机推送同步" : "使用缓存数据";
+  }
   if (meta?.fetchMethod === "browser_rendered") return "云端浏览器同步";
   if (status === "login_required") return "需要登录";
   if (status === "error") return "抓取失败";
@@ -331,6 +334,8 @@ function resolveLoginState(status: ServerProviderStatus, meta?: Record<string, u
 
 function mapStatus(status: ServerProviderStatus, meta?: Record<string, unknown>): PlatformStatus {
   if (meta?.isFallback === true) {
+    // 本机推送的 ready 快照：数据来自既定通道且是最近一次成功抓取，不挂常驻警告徽标
+    if (meta.fetchMethod === "local_ingest" && status === "ready") return "healthy";
     const liveStatus = typeof meta.liveStatus === "string" ? (meta.liveStatus as ServerProviderStatus) : null;
     if (liveStatus === "login_required" || liveStatus === "error" || liveStatus === "disabled") {
       return "warning";
@@ -514,15 +519,32 @@ function buildDetailMetrics(
     });
     items.push({ label: "续费日期", value: formatChatgptPlanRenewAt(metrics.planRenewAt) });
     items.push({ label: "Token 刷新", value: metrics.codexTokenRefreshed === true ? "本轮已刷新" : "未刷新" });
+    // 云端出口被 chatgpt.com 403 整体拒绝（实测），数据由本机脚本推送 → 明确标注来源
+    const chatgptFetchMethod = typeof card.meta?.fetchMethod === "string" ? card.meta.fetchMethod : null;
     items.push({
       label: "抓取方式",
       value:
-        metrics.webFetchMethod === "snapshot_fallback"
-          ? "快照回退"
-          : metrics.webFetchMethod === "unconfigured"
-            ? "未配置"
-            : "云端直连",
+        chatgptFetchMethod === "local_ingest"
+          ? "本机推送"
+          : metrics.webFetchMethod === "snapshot_fallback"
+            ? "快照回退"
+            : metrics.webFetchMethod === "unconfigured"
+              ? "未配置"
+              : "云端直连",
     });
+    // 本机推送通道下，推送时间即数据新鲜度（云端无法刷新，卡片其余指标不体现时间）
+    if (chatgptFetchMethod === "local_ingest" && capturedAt) {
+      items.push({
+        label: "推送时间",
+        value: new Intl.DateTimeFormat("zh-CN", {
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+        }).format(new Date(capturedAt)),
+      });
+    }
     return items;
   }
   if (providerId !== "zhipu") return [];

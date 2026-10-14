@@ -69,4 +69,11 @@ describe("PlatformCard account switching", () => {
     expect(screen.getByText("备用账号 loaded")).toBeTruthy();
     expect(screen.getByText("20 / 100")).toBeTruthy();
   });
+
+  it("renders healthy platform status as 健康 badge", () => {
+    // healthy 状态（本机推送 fallback 快照映射结果）在卡片头部显示「健康」badge
+    render(<PlatformCard platform={createPlatform()} />);
+
+    expect(screen.getByText("健康")).toBeTruthy();
+  });
 });

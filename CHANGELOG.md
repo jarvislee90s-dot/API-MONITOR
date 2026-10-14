@@ -2,6 +2,25 @@
 
 本项目使用 Keep a Changelog 风格记录：`Added` / `Changed` / `Fixed`。版本号按日期递增（`YYYY-MM-DD`）。
 
+## [2026-10-14] - ChatGPT 本机推送通道 + 供应商停用控件
+
+### Added
+
+- 新增 `POST /api/ingest/chatgpt`：接收本机浏览器抓到的原始 payload（codex/usage、rate_limits、accounts/check），Worker 侧复用同一套解析器组装快照并落库，`meta.fetchMethod="local_ingest"`；免费档无窗口但有订阅档位时也接受。
+- 新增 `scripts/refresh-chatgpt-usage.ts`（本机抓取 + 推送）与共享工具模块 `scripts/chatgpt-browser.ts`（持久 Profile、代理自适配、页面内同源 fetch、分片 cookie 拼接）。
+- 设置页 Level 1 供应商卡片新增「停用 / 启用」按钮（立即持久化 `provider_preferences.enabled`），未配置账号的供应商（如 DeepSeek）也能停用/隐藏；停用卡片降透明度并保留配置。
+- 前端 ChatGPT 卡「抓取方式」新增第四态：`meta.fetchMethod="local_ingest"` → 显示「本机推送」。
+
+### Changed
+
+- ChatGPT provider 失败分类细化：403 + HTML + 无 `cf-mitigated`（Cloudflare 出口封锁页）单独判为 `egressBlocked`，不再误报「登录态已失效」，summary 指向本机推送脚本；封锁/质询时不再触发无意义的 token 刷新（避免 refresh token 轮换后无法写回）。
+- `scripts/import-chatgpt-credentials.ts` 的浏览器/代理/页面内 fetch 工具改为从 `scripts/chatgpt-browser.ts` 引入（行为不变）。
+
+### Fixed
+
+- 修复 ChatGPT provider 内 `input.fetchImpl(...)` 以方法形式调用全局 fetch 导致 workerd 抛 `TypeError: Illegal invocation`——三链路请求实际从未发出（被通用错误文案掩盖），现按其它 provider 的本地绑定写法调用。
+- 修复供应商级启停控件缺失：`ProviderOrderList` 在分层设置页重构（e9e1c7a）后成为死代码，`provider_preferences.enabled` 只剩只读文案「供应商启用」，导致 DeepSeek 等供应商无法停用。
+
 ## [2026-08-24] - Ollama Pro 看板
 
 ### Added
