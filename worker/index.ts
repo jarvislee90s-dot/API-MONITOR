@@ -292,7 +292,9 @@ async function fetchProviderSnapshot(
   try {
     const result = await provider.fetchSnapshot(fetchInput);
     // chatgpt token 轮换写回：失败仅 warning，不阻塞快照（spec §4）；
-    // 仅带 accountId 的账号刷新链路写回，调试路径（handleProviderSnapshot）无账号上下文不写回
+    // 仅带 accountId 的账号刷新链路写回，调试路径（handleProviderSnapshot）无账号上下文不写回。
+    // 凭据表是整 payload 单加密块（on_conflict 全量覆盖），须以解密后的完整凭据为底
+    // merge 轮换字段，否则首次轮换就会抹掉 accountId/sessionToken 等未轮换字段
     if (
       result.credentialUpdate &&
       account?.accountId &&
@@ -300,12 +302,20 @@ async function fetchProviderSnapshot(
       env.SUPABASE_SERVICE_ROLE_KEY &&
       env.SUPABASE_USER_ID
     ) {
+      const mergedCredentials: Record<string, string> = {};
+      for (const field of ["accessToken", "refreshToken", "accountId", "sessionToken", "codexClientId"]) {
+        const value = configOverride?.[field];
+        if (typeof value === "string" && value.length > 0) {
+          mergedCredentials[field] = value;
+        }
+      }
+      Object.assign(mergedCredentials, result.credentialUpdate);
       try {
         await updateProviderAccountCredentials(
           env,
           env.SUPABASE_USER_ID,
           account.accountId,
-          result.credentialUpdate,
+          mergedCredentials,
           fetch,
         );
       } catch (error) {
