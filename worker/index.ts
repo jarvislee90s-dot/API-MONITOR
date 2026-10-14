@@ -694,6 +694,9 @@ async function handleProviderSnapshot(request: Request, providerId: string, env:
   if (providerId === "opencode-go" || providerId === "chatgpt") {
     fetchInput.requestTimeoutMs = 15_000;
   }
+  // GET 端点必须无副作用（M-2）：禁用「401/403 → 刷新 token → 重试」。
+  // 该调试路径不写回轮换后的凭据，若允许刷新，外部反复 GET 会把存储的 refresh token 烧毁
+  fetchInput.skipTokenRefresh = true;
   const result = await provider.fetchSnapshot(fetchInput);
 
   if (request.headers.get("x-api-monitor-persist") === "1") {
