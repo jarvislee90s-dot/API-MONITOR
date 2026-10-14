@@ -517,6 +517,34 @@ export function backfillPartialWindows(
   });
 }
 
+// M-1：usage 读取 / dashboard 刷新 / 单 provider 刷新三链路共用的后处理：
+// 条件预取上一份 ready（惰性门控：仅存在 chatgpt partial 才查询，全 ready 零 Supabase 查询）
+// → chatgpt partial 桶级补齐 → applyLatestReadyFallback 整卡回退，补齐与回退复用同一 Map。
+// 返回 persisted 为补齐后、回退前的快照（整卡回退只影响展示，不落库）；
+// display 用于构建响应（GET /api/usage 场景补齐同样只影响响应，不改变持久化内容）。
+async function postProcessSnapshots(
+  env: WorkerEnv,
+  userId: string | null,
+  snapshots: ProviderSnapshot[],
+): Promise<{ display: ProviderSnapshot[]; persisted: ProviderSnapshot[] }> {
+  const needsBackfill = snapshots.some(
+    (snapshot) => snapshot.providerId === "chatgpt" && snapshot.status === "partial",
+  );
+  if (!needsBackfill) {
+    return {
+      display: await applyLatestReadyFallback(env, userId, snapshots),
+      persisted: snapshots,
+    };
+  }
+
+  const latestReadySnapshots = await fetchLatestReadySnapshots(env, userId);
+  const persisted = backfillPartialWindows(snapshots, latestReadySnapshots);
+  return {
+    display: await applyLatestReadyFallback(env, userId, persisted, latestReadySnapshots),
+    persisted,
+  };
+}
+
 export async function persistSnapshot(env: WorkerEnv, userId: string | null, snapshot: ProviderSnapshot, decision: RefreshDecision | null): Promise<void> {
   if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY || !userId) return;
 
@@ -694,7 +722,9 @@ async function handleUsage(request: Request, env: WorkerEnv): Promise<Response> 
   const resolved = await resolveRequestUserId(request, env);
   if ("response" in resolved) return resolved.response;
   const { userId } = resolved;
-  const snapshots = await applyLatestReadyFallback(env, userId, await collectUsageSnapshots(env, userId));
+  // M-1：主显示路径与刷新链路共用后处理——chatgpt partial 先桶级补齐再考虑整卡回退，
+  // 补齐只影响本次响应，不改变已持久化内容
+  const { display: snapshots } = await postProcessSnapshots(env, userId, await collectUsageSnapshots(env, userId));
   const dashboard = buildUsageDashboard(snapshots, {
     providerPreferences: await readDashboardPreferences(env, userId),
   });
@@ -718,16 +748,12 @@ async function handleDashboardRefresh(request: Request, env: WorkerEnv, userId: 
   const decision = decisionPayload.data ?? null;
   const shouldPersist = body.persist !== false && Boolean(env.SUPABASE_URL && env.SUPABASE_SERVICE_ROLE_KEY && userId);
   const liveSnapshots = await collectUsageSnapshots(env, userId);
-  // 仅存在 chatgpt partial 快照时才预取上一份 ready（补齐/回退共用同一 Map）；
-  // 其余情况传 undefined，applyLatestReadyFallback 保持原有惰性（全 ready 零查询）
-  const needsBackfill = liveSnapshots.some(
-    (snapshot) => snapshot.providerId === "chatgpt" && snapshot.status === "partial",
+  // 与 handleUsage/handleRefresh 共用后处理（M-1）：条件预取 → 桶级补齐 → 整卡回退
+  const { display: displaySnapshots, persisted: backfilledSnapshots } = await postProcessSnapshots(
+    env,
+    userId,
+    liveSnapshots,
   );
-  const latestReadySnapshots = needsBackfill ? await fetchLatestReadySnapshots(env, userId) : undefined;
-  const backfilledSnapshots = latestReadySnapshots
-    ? backfillPartialWindows(liveSnapshots, latestReadySnapshots)
-    : liveSnapshots;
-  const displaySnapshots = await applyLatestReadyFallback(env, userId, backfilledSnapshots, latestReadySnapshots);
 
   if (shouldPersist && decision?.allowed) {
     for (const snapshot of backfilledSnapshots) {
@@ -794,14 +820,12 @@ async function handleRefresh(request: Request, env: WorkerEnv): Promise<Response
   }
 
   const snapshots = await collectUsageSnapshots(env, userId, body.providerId);
-  // 同 handleDashboardRefresh：仅 chatgpt partial 才预取上一份 ready，避免无谓 Supabase 查询
-  const needsBackfill = snapshots.some(
-    (snapshot) => snapshot.providerId === "chatgpt" && snapshot.status === "partial",
+  // 与 handleUsage/handleDashboardRefresh 共用后处理（M-1）：条件预取 → 桶级补齐 → 整卡回退
+  const { display: displaySnapshots, persisted: backfilledSnapshots } = await postProcessSnapshots(
+    env,
+    userId,
+    snapshots,
   );
-  const latestReadySnapshots = needsBackfill ? await fetchLatestReadySnapshots(env, userId) : undefined;
-  const backfilledSnapshots = latestReadySnapshots
-    ? backfillPartialWindows(snapshots, latestReadySnapshots)
-    : snapshots;
   const hasAccountSnapshots = backfilledSnapshots.some(
     (snapshot) => typeof snapshot.meta.accountId === "string",
   );
@@ -813,7 +837,7 @@ async function handleRefresh(request: Request, env: WorkerEnv): Promise<Response
       }
     }
 
-    const dashboard = buildUsageDashboard(backfilledSnapshots, {
+    const dashboard = buildUsageDashboard(displaySnapshots, {
       providerPreferences: await readDashboardPreferences(env, userId),
       refresh: {
         scope: "single",

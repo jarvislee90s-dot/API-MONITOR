@@ -2271,4 +2271,122 @@ describe("chatgpt 集成", () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it("GET /api/usage 主显示路径：chatgpt partial 缺失窗口桶级补齐展示，不被整卡回退遮蔽", async () => {
+    const previousReadyPayload: ProviderSnapshot = {
+      providerId: "chatgpt",
+      providerName: "ChatGPT",
+      sourceUrl: "https://chatgpt.com",
+      status: "ready",
+      capturedAt: "2026-10-12T00:00:00.000Z",
+      summary: "Codex 窗口已获取；网页对话额度已获取",
+      windows: [
+        { key: "codex_5h", label: "Codex 5小时", used: 20, limit: 100, percentUsed: 20 },
+        { key: "web_5h_default", label: "对话 5小时·default", used: 30, limit: 100, percentUsed: 30 },
+      ],
+      metrics: {},
+      meta: {},
+    };
+    // 上一轮已持久化的 partial 快照（仅 codex_5h）：回退查询只认 ready，该行应被忽略
+    const persistedPartialPayload: ProviderSnapshot = {
+      ...previousReadyPayload,
+      status: "partial",
+      capturedAt: "2026-10-13T00:00:00.000Z",
+      summary: "Codex 窗口已获取；订阅信息获取失败",
+      windows: [{ key: "codex_5h", label: "Codex 5小时", used: 25, limit: 100, percentUsed: 25 }],
+    };
+
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+      const method = init?.method ?? "GET";
+      if (url.startsWith("https://supabase.test/rest/v1/provider_preferences")) {
+        return new Response(
+          JSON.stringify([{ provider_key: "chatgpt", enabled: true, display_order: 1, active_provider_account_id: null }]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.startsWith("https://supabase.test/rest/v1/provider_accounts")) {
+        return new Response(JSON.stringify([]), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      // 持久化快照（created_at 倒序）：最新一份 partial 行 + 更早一份 ready 行（含 web_5h_default）
+      if (url.startsWith("https://supabase.test/rest/v1/usage_snapshots") && method === "GET") {
+        return new Response(
+          JSON.stringify([
+            {
+              provider_account_id: null,
+              source_url: "https://chatgpt.com",
+              payload: persistedPartialPayload,
+              created_at: "2026-10-13T00:00:00.000Z",
+            },
+            {
+              provider_account_id: null,
+              source_url: "https://chatgpt.com",
+              payload: previousReadyPayload,
+              created_at: "2026-10-12T00:00:00.000Z",
+            },
+          ]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      // codex 链路：本轮实取到新值 40%
+      if (url === "https://chatgpt.com/backend-api/codex/rate_limits") {
+        return new Response(
+          JSON.stringify({ rate_limits: { codex_5h: { used_percent: 40 } } }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      // 网页 session 可用，但 web 额度为空、订阅 502 → 本轮 partial（只缺 web_5h_default）
+      if (url === "https://chatgpt.com/api/auth/session") {
+        return new Response(JSON.stringify({ accessToken: "web-access-token" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url === "https://chatgpt.com/backend-api/rate_limits") {
+        return new Response(JSON.stringify({}), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url === "https://chatgpt.com/backend-api/accounts/check") {
+        return new Response("bad gateway", { status: 502 });
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+
+    vi.stubGlobal("fetch", fetchImpl as unknown as typeof fetch);
+    try {
+      const env = {
+        ...createEnv(fetchImpl as typeof fetch),
+        SUPABASE_URL: "https://supabase.test",
+        SUPABASE_SERVICE_ROLE_KEY: "service-role-test",
+        SUPABASE_USER_ID: "user-1",
+        CHATGPT_ACCESS_TOKEN: "fake-access-token-1",
+        CHATGPT_ACCOUNT_ID: "fake-account-1",
+        CHATGPT_SESSION_TOKEN: "fake-session-token-1",
+      };
+      const response = await handleApiRequest(new Request("https://api.monitor.local/api/usage"), env);
+      const payload = (await response.json()) as {
+        ok: boolean;
+        data: { cards: Array<{ providerId: string; status: string; windows: ProviderSnapshot["windows"]; meta: Record<string, unknown> }> };
+      };
+
+      expect(response.status).toBe(200);
+      expect(payload.ok).toBe(true);
+      const card = payload.data.cards.find((candidate) => candidate.providerId === "chatgpt");
+      // partial 保留：不被整卡回退成 ready
+      expect(card?.status).toBe("partial");
+      expect(card?.meta.isFallback).toBeUndefined();
+      // 实取窗口带新值 + 缺失窗口由最近 ready 补齐并打 stale 标记
+      expect(card?.windows).toHaveLength(2);
+      expect(card?.windows.find((window) => window.key === "codex_5h")).toMatchObject({ percentUsed: 40 });
+      expect(card?.windows.find((window) => window.key === "web_5h_default")).toMatchObject({
+        meta: { stale: true },
+      });
+      expect(card?.meta.staleWindowKeys).toEqual(["web_5h_default"]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
