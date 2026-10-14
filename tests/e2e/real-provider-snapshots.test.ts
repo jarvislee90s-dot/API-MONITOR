@@ -54,6 +54,7 @@ const requiredEnvByProvider: Record<ProviderId, string[]> = {
   "volc-ark": ["VOLC_ARK_AUTH_COOKIE"],
   "zhipu": ["ZHIPU_AUTH_COOKIE"],
   "ollama": ["OLLAMA_KEY"],
+  "chatgpt": ["CHATGPT_ACCESS_TOKEN"],
 };
 
 describe.skipIf(process.env.RUN_REAL_E2E !== "1")("real provider snapshot e2e", () => {
