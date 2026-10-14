@@ -458,6 +458,11 @@ async function applyLatestReadyFallback(
     const fallback = fallbacks.get(accountId ?? "") ?? fallbacks.get(snapshot.sourceUrl);
     if (!fallback) return snapshot;
     if (snapshot.status === "ready" && snapshot.windows.length > 0) return snapshot;
+    // 桶级补齐后的 chatgpt partial 快照（带 staleWindowKeys 标记）豁免整卡回退：
+    // 保留本轮实取窗口 + stale 补齐窗口（spec §6）；只有全失败（error 等）才整卡回退
+    if (Array.isArray(snapshot.meta?.staleWindowKeys) && snapshot.meta.staleWindowKeys.length > 0) {
+      return snapshot;
+    }
     return {
       ...fallback,
       summary: withFallbackSummary(fallback.summary),
