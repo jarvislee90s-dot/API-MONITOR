@@ -1,4 +1,6 @@
 .env
+.dev.vars
+.dev-wrangler.toml
 .wrangler/
 node_modules/
 dist/
