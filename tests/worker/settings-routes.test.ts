@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { handleSettingsRequest } from "../../worker/settings/routes";
+import { updateProviderAccountCredentials } from "../../worker/settings/repository";
+import { decryptCredentialPayload } from "../../worker/security/credentials";
 
 describe("provider settings migration", () => {
   it("stores preferences separately from encrypted credentials", () => {
@@ -941,5 +943,88 @@ describe("settings routes", () => {
       ok: true,
       status: "ready",
     });
+  });
+});
+
+describe("updateProviderAccountCredentials", () => {
+  const encryptionKey = "0123456789abcdef0123456789abcdef"; // 32 字节测试密钥
+  const env = {
+    SUPABASE_URL: "https://supabase.test",
+    SUPABASE_SERVICE_ROLE_KEY: "service-role-test",
+    CREDENTIAL_ENCRYPTION_KEY: encryptionKey,
+  };
+
+  it("加密覆盖写入凭据行并同步脱敏 hint", async () => {
+    const calls: Array<{ url: string; method: string; body: Record<string, unknown> | null }> = [];
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+      calls.push({
+        url,
+        method: init?.method ?? "GET",
+        body: init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : null,
+      });
+      return new Response("{}", { status: 201 });
+    });
+
+    const result = await updateProviderAccountCredentials(
+      env,
+      "user-1",
+      "acc-1",
+      { accessToken: "fake-access-token-2", refreshToken: "fake-refresh-token-2" },
+      fetchImpl as unknown as typeof fetch,
+    );
+
+    expect(result).toEqual({ id: "acc-1" });
+    // 1. 覆盖写入 provider_account_credentials（on_conflict=provider_account_id）
+    expect(calls[0]?.url).toBe(
+      "https://supabase.test/rest/v1/provider_account_credentials?on_conflict=provider_account_id",
+    );
+    expect(calls[0]?.method).toBe("POST");
+    expect(calls[0]?.body).toMatchObject({ user_id: "user-1", provider_account_id: "acc-1", key_version: "v1" });
+    // 密文走同一 AES-GCM 通道，可用原密钥解回
+    const decrypted = await decryptCredentialPayload(
+      {
+        encryptedPayload: String(calls[0]?.body?.encrypted_payload),
+        nonce: String(calls[0]?.body?.nonce),
+        keyVersion: "v1",
+      },
+      encryptionKey,
+    );
+    expect(decrypted).toEqual({ accessToken: "fake-access-token-2", refreshToken: "fake-refresh-token-2" });
+    // 2. PATCH provider_accounts 同步脱敏 hint
+    expect(calls[1]?.url).toBe("https://supabase.test/rest/v1/provider_accounts?id=eq.acc-1&user_id=eq.user-1");
+    expect(calls[1]?.method).toBe("PATCH");
+    expect(calls[1]?.body?.credential_hint).toEqual({
+      accessToken: "fake-...en-2",
+      refreshToken: "fake-...en-2",
+    });
+  });
+
+  it("凭据写入失败时抛错", async () => {
+    const fetchImpl = vi.fn(async () => new Response("boom", { status: 500 }));
+    await expect(
+      updateProviderAccountCredentials(
+        env,
+        "user-1",
+        "acc-1",
+        { accessToken: "fake-access-token-2" },
+        fetchImpl as unknown as typeof fetch,
+      ),
+    ).rejects.toThrow("Failed to update provider account credentials: 500");
+  });
+
+  it("缺少加密密钥时抛错", async () => {
+    const fetchImpl = vi.fn(async () => new Response("{}", { status: 201 }));
+    await expect(
+      updateProviderAccountCredentials(
+        { SUPABASE_URL: env.SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY: env.SUPABASE_SERVICE_ROLE_KEY },
+        "user-1",
+        "acc-1",
+        { accessToken: "fake-access-token-2" },
+        fetchImpl as unknown as typeof fetch,
+      ),
+    ).rejects.toThrow("Credential encryption key is required to update credentials");
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
