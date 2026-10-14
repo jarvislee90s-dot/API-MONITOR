@@ -324,12 +324,245 @@ function notConfiguredSubscription(): ChatgptSubscriptionOutcome {
   return { attempted: false, plan: null, planRenewAt: null, notFound: false };
 }
 
+// 深度查找字符串键，兼容订阅端点响应结构漂移
+function deepFindString(value: unknown, keyPattern: RegExp): string | null {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = deepFindString(item, keyPattern);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (value && typeof value === "object") {
+    for (const [key, entry] of Object.entries(value)) {
+      if (keyPattern.test(key) && typeof entry === "string" && entry.length > 0) return entry;
+      const found = deepFindString(entry, keyPattern);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+// 订阅信息：plan 取 plan_type/plan 等键，续费时间取 renewal/current_period_end 等键
+export function parseSubscriptionPayload(
+  payload: unknown,
+): { plan: string; planRenewAt: string | null } | null {
+  const plan = deepFindString(payload, /^(plan_type|plantype|plan|subscription_plan)$/i);
+  if (!plan) return null;
+  const renewRaw = deepFindString(
+    payload,
+    /(next_renewal|renewal_date|plan_renewal|current_period_end|renews_at)/i,
+  );
+  let planRenewAt: string | null = null;
+  if (renewRaw) {
+    const date = new Date(renewRaw);
+    planRenewAt = Number.isNaN(date.getTime()) ? null : date.toISOString();
+  }
+  return { plan: plan.toLowerCase(), planRenewAt };
+}
+
+// 网页对话额度宽容解析：旧 message_cap 键值形态 + 新分组形态（数组或对象），组名透传不枚举（spec §2）
+export function parseWebRateLimitWindows(payload: unknown, now: Date): ProviderWindow[] {
+  const windows: ProviderWindow[] = [];
+  const seenKeys = new Set<string>();
+
+  const pushGroupWindow = (params: { slug: string; source: Record<string, unknown> }) => {
+    const key = `web_5h_${params.slug}`;
+    if (seenKeys.has(key)) return;
+    let percentUsed = toPercentValue(
+      pickNumber(params.source, [
+        "used_percent",
+        "used_pct",
+        "percent_used",
+        "percentUsed",
+        "usage",
+      ]),
+    );
+    if (percentUsed === null) {
+      const used = pickNumber(params.source, ["used", "used_messages", "requests"]);
+      const limit = pickNumber(params.source, ["max_cap", "limit", "total", "window_limit"]);
+      if (used !== null && limit !== null && limit > 0) {
+        percentUsed = Math.round((used / limit) * 1000) / 10;
+      }
+    }
+    const resetAt = pickResetAt(params.source, now);
+    if (percentUsed === null && resetAt === null) return;
+    seenKeys.add(key);
+    windows.push(
+      buildPercentWindow({
+        key,
+        label: `对话 5小时·${params.slug}`,
+        percentUsed,
+        resetAt,
+      }),
+    );
+  };
+
+  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+    for (const [key, value] of Object.entries(payload as Record<string, unknown>)) {
+      // 旧形态：[<slug>_]message_cap = { max_cap, remaining_cap, reset_at }；裸 message_cap 即 default 桶
+      const messageCapMatch = /^(?:([a-z0-9_]+)_)?message_cap$/i.exec(key);
+      if (messageCapMatch && value && typeof value === "object") {
+        const source = value as Record<string, unknown>;
+        const max = pickNumber(source, ["max_cap", "max", "limit"]);
+        const remaining = pickNumber(source, ["remaining_cap", "remaining", "remaining_messages"]);
+        if (max === null || max <= 0) continue;
+        const used = remaining !== null ? Math.max(0, max - remaining) : null;
+        const percentUsed = used !== null ? Math.round((used / max) * 1000) / 10 : null;
+        const resetAt = pickResetAt(source, now);
+        if (percentUsed === null && resetAt === null) continue;
+        const slug = messageCapMatch[1] ?? "default";
+        const windowKey = `web_5h_${slug}`;
+        if (seenKeys.has(windowKey)) continue;
+        seenKeys.add(windowKey);
+        windows.push(
+          buildPercentWindow({ key: windowKey, label: `对话 5小时·${slug}`, percentUsed, resetAt }),
+        );
+      }
+    }
+    if (windows.length > 0) return windows;
+
+    // 新形态（对象分组）：值对象里带百分比/用量字段
+    for (const [key, value] of Object.entries(payload as Record<string, unknown>)) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+      pushGroupWindow({ slug: key.length > 0 ? key : "default", source: value as Record<string, unknown> });
+    }
+    return windows;
+  }
+
+  if (Array.isArray(payload)) {
+    for (const item of payload) {
+      if (!item || typeof item !== "object") continue;
+      const source = item as Record<string, unknown>;
+      const slugRaw = source.slug ?? source.group ?? source.model_family ?? source.name;
+      const slug = typeof slugRaw === "string" && slugRaw.length > 0 ? slugRaw : "default";
+      pushGroupWindow({ slug, source });
+    }
+  }
+  return windows;
+}
+
 function withCredentialUpdate(
   result: ProviderFetchResult,
   credentialUpdate: Record<string, string> | null,
 ): ProviderFetchResult {
   if (!credentialUpdate) return result;
   return { ...result, credentialUpdate };
+}
+
+// session cookie → accessToken（约 10 天有效）；网页与订阅两条链路共用（spec §2）
+type WebSessionResult =
+  | { kind: "ok"; accessToken: string }
+  | { kind: "cf_challenge" }
+  | { kind: "login_required" }
+  | { kind: "failed" };
+
+async function fetchWebAccessToken(input: {
+  sessionToken: string;
+  fetchImpl: typeof fetch;
+  requestTimeoutMs?: number;
+}): Promise<WebSessionResult> {
+  if (!isTrustedChatgptUrl(webSessionUrl)) return { kind: "failed" };
+  try {
+    const response = await input.fetchImpl(webSessionUrl, {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        Cookie: `__Secure-next-auth.session-token=${input.sessionToken}`,
+        "User-Agent": webUserAgent,
+      },
+      signal: buildTimeoutSignal(input.requestTimeoutMs),
+    });
+    if (isCloudflareChallenge(response)) return { kind: "cf_challenge" };
+    if (response.status === 401 || response.status === 403) return { kind: "login_required" };
+    if (!response.ok) return { kind: "failed" };
+    const payload = (await response.json().catch(() => null)) as { accessToken?: unknown } | null;
+    // 200 但无 accessToken：视为登录态失效
+    if (!payload || typeof payload.accessToken !== "string" || payload.accessToken.length === 0) {
+      return { kind: "login_required" };
+    }
+    return { kind: "ok", accessToken: payload.accessToken };
+  } catch {
+    return { kind: "failed" };
+  }
+}
+
+async function fetchWebRateLimits(input: {
+  accessToken: string;
+  now: Date;
+  fetchImpl: typeof fetch;
+  requestTimeoutMs?: number;
+}): Promise<ChatgptBucketOutcome> {
+  if (!isTrustedChatgptUrl(webRateLimitsUrl)) {
+    return { ...notConfiguredBucket(), fetchFailed: true };
+  }
+  try {
+    const response = await input.fetchImpl(webRateLimitsUrl, {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${input.accessToken}`,
+        "User-Agent": webUserAgent,
+      },
+      signal: buildTimeoutSignal(input.requestTimeoutMs),
+    });
+    if (isCloudflareChallenge(response)) {
+      return { attempted: true, windows: [], loginRequired: false, cfChallenge: true, fetchFailed: false };
+    }
+    if (response.status === 401 || response.status === 403) {
+      return { attempted: true, windows: [], loginRequired: true, cfChallenge: false, fetchFailed: false };
+    }
+    if (!response.ok) {
+      return { attempted: true, windows: [], loginRequired: false, cfChallenge: false, fetchFailed: true };
+    }
+    const payload = await response.json().catch(() => null);
+    return {
+      attempted: true,
+      windows: parseWebRateLimitWindows(payload, input.now),
+      loginRequired: false,
+      cfChallenge: false,
+      fetchFailed: false,
+    };
+  } catch {
+    return { attempted: true, windows: [], loginRequired: false, cfChallenge: false, fetchFailed: true };
+  }
+}
+
+// 订阅链路：候选端点 accounts/check；404/无 plan 结构 → 免费档（正常数据不降级，spec §6）
+async function fetchSubscription(input: {
+  accessToken: string;
+  fetchImpl: typeof fetch;
+  requestTimeoutMs?: number;
+}): Promise<ChatgptSubscriptionOutcome> {
+  if (!isTrustedChatgptUrl(subscriptionCheckUrl)) {
+    return { attempted: false, plan: null, planRenewAt: null, notFound: false };
+  }
+  const failed: ChatgptSubscriptionOutcome = { attempted: true, plan: null, planRenewAt: null, notFound: false };
+  try {
+    const response = await input.fetchImpl(subscriptionCheckUrl, {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${input.accessToken}`,
+        "User-Agent": webUserAgent,
+      },
+      signal: buildTimeoutSignal(input.requestTimeoutMs),
+    });
+    if (response.status === 404) {
+      return { attempted: true, plan: "free", planRenewAt: null, notFound: true };
+    }
+    if (!response.ok) {
+      return failed;
+    }
+    const payload = await response.json().catch(() => null);
+    const parsed = parseSubscriptionPayload(payload);
+    if (!parsed) {
+      return { attempted: true, plan: "free", planRenewAt: null, notFound: true };
+    }
+    return { attempted: true, plan: parsed.plan, planRenewAt: parsed.planRenewAt, notFound: false };
+  } catch {
+    return failed;
+  }
 }
 
 // 三桶状态合并（spec §5 状态机，纯函数）：
@@ -375,13 +608,24 @@ export function mergeChatgptBuckets(input: {
       (!input.hasCodexCredentials || (input.codex.attempted && input.codex.loginRequired)) &&
       (!input.hasSessionToken || (input.web.attempted && input.web.loginRequired));
     if (noCredentials || credentialsExhausted) {
+      // 按 hasSessionToken 分支措辞：未配置 sessionToken 时不指责"网页 session 无效"
+      let exhaustedSummary: string;
+      if (input.hasCodexCredentials && input.hasSessionToken) {
+        exhaustedSummary =
+          "ChatGPT 登录态已失效：Codex token 刷新失败且网页 session 无效，请重新运行 scripts/import-chatgpt-credentials.ts";
+      } else if (input.hasSessionToken) {
+        exhaustedSummary = "ChatGPT 网页 session 已失效，请重新运行 scripts/import-chatgpt-credentials.ts";
+      } else {
+        exhaustedSummary =
+          "ChatGPT Codex 登录态已失效（token 刷新失败），请重新运行 scripts/import-chatgpt-credentials.ts";
+      }
       return withCredentialUpdate(
         createResult({
           ...base,
           status: "login_required",
           summary: noCredentials
             ? "ChatGPT 需要 Codex OAuth 凭据（accessToken + accountId）或网页 session cookie"
-            : "ChatGPT 登录态已失效：Codex token 刷新失败且网页 session 无效，请重新运行 scripts/import-chatgpt-credentials.ts",
+            : exhaustedSummary,
         } as ProviderSnapshot),
         input.credentialUpdate,
       );
@@ -453,9 +697,38 @@ export async function fetchChatgptSnapshot(input: ProviderFetchInput): Promise<P
       })
     : { outcome: notConfiguredBucket(), credentialUpdate: null };
 
-  // 网页/订阅链路（Task 4 接入）：当前仅有 sessionToken 时按未配置桶处理
-  const web = notConfiguredBucket();
-  const subscription = notConfiguredSubscription();
+  // 网页/订阅链路：session cookie 换 accessToken 后串行拉取额度与订阅（spec §2）
+  let web = notConfiguredBucket();
+  let subscription = notConfiguredSubscription();
+  if (hasSessionToken) {
+    const session = await fetchWebAccessToken({
+      sessionToken: config.sessionToken ?? "",
+      fetchImpl,
+      requestTimeoutMs: input.requestTimeoutMs,
+    });
+    if (session.kind === "ok") {
+      web = await fetchWebRateLimits({
+        accessToken: session.accessToken,
+        now: input.now,
+        fetchImpl,
+        requestTimeoutMs: input.requestTimeoutMs,
+      });
+      subscription = await fetchSubscription({
+        accessToken: session.accessToken,
+        fetchImpl,
+        requestTimeoutMs: input.requestTimeoutMs,
+      });
+    } else if (session.kind === "cf_challenge") {
+      web = { attempted: true, windows: [], loginRequired: false, cfChallenge: true, fetchFailed: false };
+      subscription = { attempted: true, plan: null, planRenewAt: null, notFound: false };
+    } else if (session.kind === "login_required") {
+      web = { attempted: true, windows: [], loginRequired: true, cfChallenge: false, fetchFailed: false };
+      subscription = { attempted: true, plan: null, planRenewAt: null, notFound: false };
+    } else {
+      web = { attempted: true, windows: [], loginRequired: false, cfChallenge: false, fetchFailed: true };
+      subscription = { attempted: true, plan: null, planRenewAt: null, notFound: false };
+    }
+  }
 
   return mergeChatgptBuckets({
     codex: codexResult.outcome,
