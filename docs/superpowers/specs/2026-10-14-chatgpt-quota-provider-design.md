@@ -78,7 +78,6 @@ Edge Profile cookie ┴→ import-chatgpt-   POST /api/refresh ──→ DO 节�
 | 网页对话模型组 | 每组一条 `windows[] {key:"web_5h_<slug>", label:"对话 5小时·<组名>", percentUsed, resetAt}`，组名透传 |
 | 订阅档位 | `metrics.plan`（字符串透传："free"/"plus"/…） |
 | 续费日期 | `metrics.planRenewAt`（string\|null，免费/未知为 null） |
-| 模型组汇总 | `metrics.webModelGroups`（JSON string，照 ollama `weeklyModels` 模式） |
 | 诊断 | `metrics.codexTokenRefreshed`、`metrics.webFetchMethod`（"direct"/"snapshot_fallback"） |
 
 状态语义：三分桶**任一有数据即不为 error**；codex 或 web 至少一桶 ready 且无降级 → `ready`；有数据但存在 CF 质询降级、或订阅端点获取失败（免费档 `plan:"free"` 属正常数据，不降级）→ `partial`；无任何凭据、或 OAuth 刷新失败且 session cookie 失效 → `login_required`；三链路全失败 → `error`。免费账号：codex 窗口缺失 → 对应 window 不产出（windows 数组可为空不报错，区别于 ingest 校验），summary 注明"当前免费档，无 Codex 窗口数据"；`planRenewAt=null` → 前端显示"订阅前无数据"。
@@ -91,7 +90,7 @@ Edge Profile cookie ┴→ import-chatgpt-   POST /api/refresh ──→ DO 节�
 
 ### 7.1 改动清单
 
-改动四处：`frontend/src/settings/provider-catalog.ts` 加 chatgpt 条目；`frontend/src/settings/credential-form.tsx:16-25` 的 `credentialFields` 加分支返回 `["accessToken","refreshToken","accountId","sessionToken"]` 并补 `fieldLabel`；`frontend/src/api/client.ts` 的 `resolveAccent`、`resolveTagline`、`resolvePrimaryMetricLabel` 加分支；`resolveModelSpends` 加 chatgpt 分支解析 `metrics.webModelGroups` 渲染模型组列表（照 ollama weeklyModels 模式）。卡片 windows 通用渲染已支持多窗口分桶，无需改 platform-card。
+改动三处：`frontend/src/settings/provider-catalog.ts` 加 chatgpt 条目；`frontend/src/settings/credential-form.tsx:16-25` 的 `credentialFields` 加分支返回 `["accessToken","refreshToken","accountId","sessionToken"]` 并补 `fieldLabel`；`frontend/src/api/client.ts` 的 `resolveAccent`、`resolveTagline`、`resolvePrimaryMetricLabel` 加分支。对话模型组以配额窗口进度条直接呈现（组数少，不单建模型组列表，用户已确认）；卡片 windows 通用渲染已支持多窗口分桶，无需改 platform-card。
 
 ### 7.2 前端参考要素表（已确认）
 
@@ -100,7 +99,7 @@ Edge Profile cookie ┴→ import-chatgpt-   POST /api/refresh ──→ DO 节�
 | 三桶窗口渲染 | 复用 QuotaWindowList 通用渲染三桶 windows（Codex 5h / Codex 周 / 网页对话各组），不做专有组件 |
 | accent | OpenAI 绿 `#10a37f` |
 | tagline | "Codex / 对话额度 / 订阅状态" |
-| 模型组列表 | 照 Ollama `weeklyModels` JSON 还原模式（`metrics.webModelGroups` → 模型组行） |
+| 对话模型组呈现 | 直接作为配额窗口进度条展示（组数少，不建独立列表，用户已确认） |
 | 明细指标区 | 显示订阅档位（plan）、续费倒计时（planRenewAt）、token 刷新标记（codexTokenRefreshed）、抓取方式（webFetchMethod） |
 | resetAt 缺失兜底 | 显示"滚动窗口"（仿 `formatOllamaResetAt` 的 per-provider 兜底写法） |
 | 续费日期 null 兜底 | 显示"订阅前无数据"（免费档/未知档位） |
