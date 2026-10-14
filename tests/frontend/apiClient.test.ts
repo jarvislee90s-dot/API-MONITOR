@@ -501,4 +501,55 @@ describe("api client mapping", () => {
     ]);
   });
 
+  it("maps chatgpt webFetchMethod=unconfigured to 未配置 instead of 快照回退", async () => {
+    // 仅 codex 凭据（未配置 sessionToken）：web 桶未尝试，前端不得误显「快照回退」
+    const fetcher = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          ok: true,
+          data: {
+            kind: "usage_dashboard",
+            generatedAt: "2026-10-14T00:00:00.000Z",
+            status: "ready",
+            summary: "ready",
+            totals: { providers: 1, ready: 1, partial: 0, loginRequired: 0, error: 0 },
+            cards: [
+              {
+                providerId: "chatgpt",
+                providerName: "ChatGPT",
+                sourceUrl: "https://chatgpt.com",
+                status: "ready",
+                summary: "Codex 窗口已获取",
+                capturedAt: "2026-10-14T00:00:00.000Z",
+                trend: [],
+                windows: [
+                  { key: "codex_5h", label: "Codex 5小时", used: 40, limit: 100, percentUsed: 40, resetAt: null },
+                ],
+                metrics: {
+                  plan: "plus",
+                  planRenewAt: null,
+                  codexTokenRefreshed: false,
+                  webFetchMethod: "unconfigured",
+                },
+                meta: {},
+              },
+            ],
+            modelSpends: [],
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const dashboard = await createApiClient({ fetcher: fetcher as unknown as typeof fetch }).getUsageDashboard();
+    const platform = dashboard.platforms[0]!;
+
+    expect(platform.detailMetrics).toEqual([
+      { label: "订阅档位", value: "plus" },
+      { label: "续费日期", value: "订阅前无数据" },
+      { label: "Token 刷新", value: "未刷新" },
+      { label: "抓取方式", value: "未配置" },
+    ]);
+  });
+
 });

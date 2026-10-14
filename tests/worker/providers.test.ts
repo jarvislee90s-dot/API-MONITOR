@@ -1514,6 +1514,8 @@ describe("chatgpt adapter (codex 链路)", () => {
     });
 
     expect(result.snapshot.status).toBe("ready");
+    // 仅配置 codex 凭据（未配置 sessionToken）：web 桶未尝试 → 抓取方式应为「未配置」而非「快照回退」
+    expect(result.snapshot.metrics.webFetchMethod).toBe("unconfigured");
     expect(result.snapshot.windows.map((w) => w.key)).toEqual(["codex_5h", "codex_weekly"]);
     expect(result.snapshot.windows[0]).toMatchObject({
       label: "Codex 5小时",

@@ -371,7 +371,13 @@ export function mergeChatgptBuckets(input: {
     hasCodexCredentials: input.hasCodexCredentials,
     hasSessionToken: input.hasSessionToken,
     codexTokenRefreshed: input.credentialUpdate !== null,
-    webFetchMethod: input.web.windows.length > 0 ? "direct" : "snapshot_fallback",
+    // 抓取方式三态：web 桶未尝试（未配置 sessionToken）→ unconfigured；
+    // 尝试过且有窗口 → direct；尝试过但没取到（CF 质询等）→ snapshot_fallback
+    webFetchMethod: !input.web.attempted
+      ? "unconfigured"
+      : input.web.windows.length > 0
+        ? "direct"
+        : "snapshot_fallback",
     plan: input.subscription.plan ?? "unknown",
     planRenewAt: input.subscription.planRenewAt,
   };
