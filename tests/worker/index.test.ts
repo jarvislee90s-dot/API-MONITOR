@@ -2060,12 +2060,20 @@ describe("chatgpt 集成", () => {
         refreshToken: "fake-...en-2",
         accountId: "fake-account-1",
       });
+
+      // M1 惰性化：无 chatgpt partial 时不应预取回退快照（usage_snapshots 零 GET 查询）
+      const usageSnapshotQueries = fetchImpl.mock.calls.filter(
+        (call) =>
+          String(call[0]).startsWith("https://supabase.test/rest/v1/usage_snapshots") &&
+          ((call[1] as RequestInit | undefined)?.method ?? "GET") === "GET",
+      );
+      expect(usageSnapshotQueries).toHaveLength(0);
     } finally {
       vi.unstubAllGlobals();
     }
   });
 
-  it("Supabase usage_snapshots 查询网络异常时刷新不 500，login_required 快照正常返回", async () => {
+  it("Supabase usage_snapshots 查询网络异常时刷新不 500，实取快照正常返回", async () => {
     const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url =
         typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
@@ -2079,12 +2087,34 @@ describe("chatgpt 集成", () => {
       if (url.startsWith("https://supabase.test/rest/v1/provider_accounts")) {
         return new Response(JSON.stringify([]), { status: 200, headers: { "content-type": "application/json" } });
       }
-      // 回退快照查询直接网络级抛错（reject），模拟 Supabase 传输抖动
+      // 回退快照查询直接网络级抛错（reject），模拟 Supabase 传输抖动；
+      // 用例构造 chatgpt partial 快照，确保 M1 惰性化后该查询仍会被预取触发
       if (url.startsWith("https://supabase.test/rest/v1/usage_snapshots") && method === "GET") {
         throw new Error("supabase network unreachable");
       }
       if (url.startsWith("https://supabase.test/")) {
         return new Response("{}", { status: 201 });
+      }
+      if (url === "https://chatgpt.com/backend-api/codex/rate_limits") {
+        return new Response(
+          JSON.stringify({ rate_limits: { codex_5h: { used_percent: 40 } } }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url === "https://chatgpt.com/api/auth/session") {
+        return new Response(JSON.stringify({ accessToken: "web-access-token" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url === "https://chatgpt.com/backend-api/rate_limits") {
+        return new Response(JSON.stringify({}), {
+          status: 200,
+          headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url === "https://chatgpt.com/backend-api/accounts/check") {
+        return new Response("bad gateway", { status: 502 });
       }
       throw new Error(`unexpected ${url}`);
     });
@@ -2096,6 +2126,9 @@ describe("chatgpt 集成", () => {
         SUPABASE_URL: "https://supabase.test",
         SUPABASE_SERVICE_ROLE_KEY: "service-role-test",
         SUPABASE_USER_ID: "user-1",
+        CHATGPT_ACCESS_TOKEN: "fake-access-token-1",
+        CHATGPT_ACCOUNT_ID: "fake-account-1",
+        CHATGPT_SESSION_TOKEN: "fake-session-token-1",
       };
       const response = await handleApiRequest(
         new Request("https://api.monitor.local/api/refresh", {
@@ -2107,15 +2140,19 @@ describe("chatgpt 集成", () => {
       );
       const payload = (await response.json()) as {
         ok: boolean;
-        data: { snapshot: { snapshot: { providerId: string; status: string } } };
+        data: { snapshot: { snapshot: { providerId: string; status: string; windows: ProviderSnapshot["windows"] } } };
       };
 
       expect(response.status).toBe(200);
       expect(payload.ok).toBe(true);
+      // 网络异常只影响回退/补齐（返回空 Map），实取的 partial 快照原样返回
       expect(payload.data.snapshot.snapshot).toMatchObject({
         providerId: "chatgpt",
-        status: "login_required",
+        status: "partial",
       });
+      expect(
+        payload.data.snapshot.snapshot.windows.find((window) => window.key === "codex_5h"),
+      ).toMatchObject({ percentUsed: 40 });
     } finally {
       vi.unstubAllGlobals();
     }
