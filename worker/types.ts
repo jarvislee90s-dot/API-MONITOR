@@ -6,7 +6,8 @@
   | "volc-ark"
   | "deepseek"
   | "zhipu"
-  | "ollama";
+  | "ollama"
+  | "chatgpt";
 
 export type ProviderStatus = "ready" | "partial" | "login_required" | "disabled" | "error";
 
@@ -19,6 +20,7 @@ export type ProviderWindow = {
   percentUsed?: number | null;
   percentRemaining?: number | null;
   resetAt?: string | null;
+  meta?: Record<string, unknown>;
 };
 
 export type ProviderSnapshot = {
@@ -119,6 +121,7 @@ export type ProviderFetchInput = {
 export type ProviderFetchResult = {
   snapshot: ProviderSnapshot;
   warnings: string[];
+  credentialUpdate?: Record<string, string>;
 };
 
 export type ProviderDefinition = {
@@ -215,6 +218,10 @@ export interface WorkerEnv extends RefreshSessionEnv {
   OLLAMA_URL?: string;
   OLLAMA_PAGE_URL?: string;
   OLLAMA_AUTH_COOKIE?: string;
+  CHATGPT_ACCESS_TOKEN?: string;
+  CHATGPT_REFRESH_TOKEN?: string;
+  CHATGPT_ACCOUNT_ID?: string;
+  CHATGPT_SESSION_TOKEN?: string;
   REFRESH_SESSION: DurableObjectNamespaceLike;
 }
 
