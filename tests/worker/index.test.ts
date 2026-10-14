@@ -219,6 +219,7 @@ describe("worker api", () => {
       "deepseek",
       "zhipu",
       "ollama",
+      "chatgpt",
     ]);
   });
 
@@ -327,13 +328,13 @@ describe("worker api", () => {
       expect(response.status).toBe(200);
       expect(payload.ok).toBe(true);
       expect(payload.data.kind).toBe("usage_dashboard");
-      expect(payload.data.cards).toHaveLength(8);
+      expect(payload.data.cards).toHaveLength(9);
       expect(payload.data.modelSpends).toEqual([]);
       expect(payload.data.totals).toMatchObject({
-        providers: 8,
+        providers: 9,
         ready: 3,
         partial: 1,
-        loginRequired: 4,
+        loginRequired: 5,
         error: 0,
       });
       expect(payload.data.cards[0]).toMatchObject({
@@ -682,7 +683,7 @@ describe("worker api", () => {
         sessionKey: "dashboard",
         refreshed: true,
       });
-      expect(payload.data.cards).toHaveLength(8);
+      expect(payload.data.cards).toHaveLength(9);
     } finally {
       vi.unstubAllGlobals();
     }

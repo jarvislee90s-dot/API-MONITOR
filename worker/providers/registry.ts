@@ -6,6 +6,7 @@ import { volcArk } from "./volc-ark";
 import { deepseek } from "./deepseek";
 import { zhipu } from "./zhipu";
 import { ollama } from "./ollama";
+import { chatgpt } from "./chatgpt";
 import type { ProviderDefinition, ProviderId } from "../types";
 
 const PROVIDERS: ProviderDefinition[] = [
@@ -17,6 +18,7 @@ const PROVIDERS: ProviderDefinition[] = [
   deepseek,
   zhipu,
   ollama,
+  chatgpt,
 ];
 
 export function listProviders(): ProviderDefinition[] {
