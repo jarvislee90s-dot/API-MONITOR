@@ -1819,6 +1819,69 @@ describe("chatgpt adapter (网页/订阅链路)", () => {
     });
   });
 
+  it("parses the new grouped object shape with slug pass-through", () => {
+    const windows = parseWebRateLimitWindows(
+      { gpt_5_high: { used_percent: 0.4, resets_in_seconds: 900 } },
+      NOW,
+    );
+
+    expect(windows.map((w) => w.key)).toEqual(["web_5h_gpt_5_high"]);
+    expect(windows[0]).toMatchObject({
+      label: "对话 5小时·gpt_5_high",
+      percentUsed: 40,
+      resetAt: "2026-10-14T00:15:00.000Z",
+    });
+  });
+
+  it("maps a 401 on the web session link to login_required with session wording", async () => {
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const value = String(
+        typeof input === "string" ? input : input instanceof Request ? input.url : input,
+      );
+      if (value === "https://chatgpt.com/api/auth/session") {
+        return new Response("unauthorized", { status: 401 });
+      }
+      throw new Error(`unexpected ${value}`);
+    });
+
+    const result = await fetchChatgptSnapshot({
+      now: NOW,
+      fetchImpl: fetchImpl as typeof fetch,
+      config: { sessionToken: "fake-session-token" },
+    });
+
+    expect(result.snapshot.status).toBe("login_required");
+    // 仅配置 sessionToken 时按"网页 session 已失效"措辞，不指责 Codex
+    expect(result.snapshot.summary).toContain("网页 session");
+    expect(result.snapshot.summary).toContain("已失效");
+    expect(result.snapshot.summary).toContain("import-chatgpt-credentials");
+  });
+
+  it("treats a 200 empty session payload as login_required", async () => {
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const value = String(
+        typeof input === "string" ? input : input instanceof Request ? input.url : input,
+      );
+      if (value === "https://chatgpt.com/api/auth/session") {
+        // 200 但响应体无 accessToken：视为登录态失效
+        return new Response(JSON.stringify({}), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected ${value}`);
+    });
+
+    const result = await fetchChatgptSnapshot({
+      now: NOW,
+      fetchImpl: fetchImpl as typeof fetch,
+      config: { sessionToken: "fake-session-token" },
+    });
+
+    expect(result.snapshot.status).toBe("login_required");
+    expect(result.snapshot.summary).toContain("网页 session");
+  });
+
   it("maps a Cloudflare challenge on the web link to partial", async () => {
     const fetchImpl = vi.fn(async (input: string | URL | Request) => {
       const value = String(
