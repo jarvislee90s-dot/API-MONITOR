@@ -10,6 +10,12 @@ import { fetchVolcArkSnapshot } from "../../worker/providers/volc-ark";
 import { fetchDeepSeekSnapshot } from "../../worker/providers/deepseek";
 import { fetchZhipuSnapshot } from "../../worker/providers/zhipu";
 import { fetchOllamaSnapshot } from "../../worker/providers/ollama";
+import {
+  fetchChatgptSnapshot,
+  isTrustedChatgptUrl,
+  mergeChatgptBuckets,
+  parseCodexWindows,
+} from "../../worker/providers/chatgpt";
 
 describe("provider registry", () => {
   it("exposes the cloud adapters", () => {
@@ -1463,5 +1469,177 @@ describe("ollama settings page (cookie path)", () => {
 
     expect(result.snapshot.status).toBe("partial");
     expect(result.snapshot.summary).toContain("cookie");
+  });
+});
+
+describe("chatgpt adapter (codex 链路)", () => {
+  const NOW = new Date("2026-10-14T00:00:00.000Z");
+
+  it("returns login_required when no codex or session credentials are configured", async () => {
+    const result = await fetchChatgptSnapshot({ now: NOW, config: {} });
+
+    expect(result.snapshot.status).toBe("login_required");
+    expect(result.snapshot.metrics).toMatchObject({ hasCodexCredentials: false, hasSessionToken: false });
+  });
+
+  it("仅放行 chatgpt.com 系与 auth.openai.com 的 https 域名", () => {
+    expect(isTrustedChatgptUrl("https://chatgpt.com/backend-api/codex/rate_limits")).toBe(true);
+    expect(isTrustedChatgptUrl("https://auth.openai.com/oauth/token")).toBe(true);
+    expect(isTrustedChatgptUrl("https://evil.example.com/oauth/token")).toBe(false);
+    expect(isTrustedChatgptUrl("http://chatgpt.com/api/auth/session")).toBe(false);
+    expect(isTrustedChatgptUrl("https://notchatgpt.com/backend-api")).toBe(false);
+  });
+
+  it("sends Bearer and chatgpt-account-id headers and parses codex windows", async () => {
+    const fetchImpl = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          rate_limits: {
+            codex_5h: { used_percent: 42.5, resets_in_seconds: 3600 },
+            codex_weekly: { used_percent: 0.25, reset_at: "2026-10-19T00:00:00Z" },
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const result = await fetchChatgptSnapshot({
+      now: NOW,
+      fetchImpl: fetchImpl as typeof fetch,
+      config: { accessToken: "fake-access-token-1", accountId: "fake-account-1" },
+    });
+
+    expect(result.snapshot.status).toBe("ready");
+    expect(result.snapshot.windows.map((w) => w.key)).toEqual(["codex_5h", "codex_weekly"]);
+    expect(result.snapshot.windows[0]).toMatchObject({
+      label: "Codex 5小时",
+      percentUsed: 42.5,
+      resetAt: "2026-10-14T01:00:00.000Z",
+    });
+    expect(result.snapshot.windows[1]).toMatchObject({
+      label: "Codex 每周",
+      percentUsed: 25,
+      resetAt: "2026-10-19T00:00:00.000Z",
+    });
+
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(String(url)).toBe("https://chatgpt.com/backend-api/codex/rate_limits");
+    expect(init.headers).toMatchObject({
+      Authorization: "Bearer fake-access-token-1",
+      "chatgpt-account-id": "fake-account-1",
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("tolerates used/limit 形态的 codex 响应", () => {
+    const windows = parseCodexWindows(
+      {
+        rate_limits: {
+          primary: { used: 40, limit: 200, resets_in_seconds: 7200 },
+          secondary: { used: 30, limit: 1000, reset_at: "2026-10-16T00:00:00Z" },
+        },
+      },
+      NOW,
+    );
+
+    expect(windows.map((w) => w.key)).toEqual(["codex_5h", "codex_weekly"]);
+    expect(windows[0]).toMatchObject({ percentUsed: 20, resetAt: "2026-10-14T02:00:00.000Z" });
+    expect(windows[1]).toMatchObject({ percentUsed: 3 });
+  });
+
+  it("refreshes the codex token on 401 and carries credentialUpdate", async () => {
+    let rateLimitsCalls = 0;
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const value = String(
+        typeof input === "string" ? input : input instanceof Request ? input.url : input,
+      );
+      if (value === "https://auth.openai.com/oauth/token") {
+        return new Response(
+          JSON.stringify({ access_token: "fake-access-token-2", refresh_token: "fake-refresh-token-2" }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      rateLimitsCalls += 1;
+      if (rateLimitsCalls === 1) {
+        return new Response("{}", { status: 401 });
+      }
+      return new Response(
+        JSON.stringify({ rate_limits: { codex_5h: { used_percent: 10 } } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+
+    const result = await fetchChatgptSnapshot({
+      now: NOW,
+      fetchImpl: fetchImpl as typeof fetch,
+      config: {
+        accessToken: "fake-access-token-1",
+        refreshToken: "fake-refresh-token-1",
+        accountId: "fake-account-1",
+      },
+    });
+
+    expect(result.snapshot.status).toBe("ready");
+    expect(result.snapshot.metrics.codexTokenRefreshed).toBe(true);
+    expect(result.credentialUpdate).toEqual({
+      accessToken: "fake-access-token-2",
+      refreshToken: "fake-refresh-token-2",
+    });
+
+    // 刷新请求体：grant_type + refresh_token + codex CLI 公开 client_id
+    const tokenCall = fetchImpl.mock.calls.find(([url]) =>
+      String(url).includes("auth.openai.com"),
+    ) as unknown as [string, RequestInit];
+    expect(JSON.parse(String(tokenCall[1].body))).toMatchObject({
+      grant_type: "refresh_token",
+      refresh_token: "fake-refresh-token-1",
+      client_id: "app_EMoamEEZ73f0CkXaXp7hrann",
+    });
+
+    // 重试必须用新 token（调用序列：rate_limits(401) → token 刷新 → rate_limits 重试）
+    const retryCall = fetchImpl.mock.calls[2] as unknown as [string, RequestInit];
+    expect((retryCall[1].headers as Record<string, string>).Authorization).toBe("Bearer fake-access-token-2");
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  it("returns login_required when token refresh fails and no session cookie", async () => {
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const value = String(
+        typeof input === "string" ? input : input instanceof Request ? input.url : input,
+      );
+      if (value === "https://auth.openai.com/oauth/token") {
+        return new Response("invalid_grant", { status: 400 });
+      }
+      return new Response("{}", { status: 401 });
+    });
+
+    const result = await fetchChatgptSnapshot({
+      now: NOW,
+      fetchImpl: fetchImpl as typeof fetch,
+      config: {
+        accessToken: "fake-access-token-1",
+        refreshToken: "fake-refresh-token-1",
+        accountId: "fake-account-1",
+      },
+    });
+
+    expect(result.snapshot.status).toBe("login_required");
+    expect(result.snapshot.summary).toContain("登录态已失效");
+    expect(result.snapshot.windows).toEqual([]);
+  });
+
+  it("mergeChatgptBuckets：三链路全失败且凭据未耗尽时为 error", () => {
+    const result = mergeChatgptBuckets({
+      codex: { attempted: true, windows: [], loginRequired: false, cfChallenge: false, fetchFailed: true },
+      web: { attempted: true, windows: [], loginRequired: false, cfChallenge: true, fetchFailed: false },
+      subscription: { attempted: true, plan: null, planRenewAt: null, notFound: false },
+      hasCodexCredentials: true,
+      hasSessionToken: true,
+      capturedAt: "2026-10-14T00:00:00.000Z",
+      sourceUrl: "https://chatgpt.com",
+      credentialUpdate: null,
+    });
+
+    expect(result.snapshot.status).toBe("error");
   });
 });
