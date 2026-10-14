@@ -65,7 +65,7 @@ Edge Profile cookie ┴→ import-chatgpt-   POST /api/refresh ──→ DO 节�
 
 凭据四字段：`accessToken`、`refreshToken`、`accountId`、`sessionToken`。存储走既有 `provider_account_credentials`（AES-GCM，`worker/security/credentials.ts:13-27`）；字段名含 token/cookie 自动命中 `maskCredentialPayload` 脱敏正则（`credentials.ts:11`），hint 天然脱敏。读取路径复用 `getProviderAccountConfigById`（`worker/settings/repository.ts:962`）：解密后 merge 进 config，`fetchSnapshot` 收到的 config 直接含明文凭据——与 ollama 的 authCookie 一致，不新增机制。安全规则：凭据不进日志/快照/测试 fixture（测试用假 token）；域名白名单仅放行 `chatgpt.com`/`*.chatgpt.com`/`auth.openai.com`；导入脚本读 `~/.codex/auth.json` 仅在内存中转，不复制进项目目录、不进 git。
 
-**token 写回通道（新增）**：`ProviderFetchResult` 增加可选 `credentialUpdate?: Record<string,string>`，provider 刷新 token 后经此返回，`index.ts` 调新增的 `updateProviderAccountCredentials` 覆盖凭据行；写回失败仅记 warning 不阻塞快照。权衡：曾考虑让 provider 直接持 env 调 Supabase，但那会把 service role 边界打穿到 provider 层并破坏纯函数可测性，故选结果带出、集中写回。
+**token 写回通道（新增）**：`ProviderFetchResult` 增加可选 `credentialUpdate?: Record<string,string>`，provider 刷新 token 后经此返回，`index.ts` 调新增的 `updateProviderAccountCredentials` 覆盖凭据行；写回失败仅记 warning 不阻塞快照。写回前以 DB 解密凭据为底 merge（未轮换字段不被抹掉）；语义注：若某字段仅存在于 env 兜底而 DB payload 没有，首次轮换会把它固化进 DB 凭据行（此后 DB 优先于 env）。权衡：曾考虑让 provider 直接持 env 调 Supabase，但那会把 service role 边界打穿到 provider 层并破坏纯函数可测性，故选结果带出、集中写回。
 
 ## 5 Worker Provider 设计
 
@@ -126,6 +126,15 @@ Edge Profile cookie ┴→ import-chatgpt-   POST /api/refresh ──→ DO 节�
 **第一期**：`worker/types.ts`（ProviderId + WorkerEnv + `credentialUpdate` 字段）、`worker/providers/chatgpt.ts`、`registry.ts`、`index.ts`（buildProviderConfig 分支 + credentialUpdate 写回 + CF 降级时的桶级窗口补齐）、`worker/settings/repository.ts` 新增 `updateProviderAccountCredentials`、前端四处、`scripts/import-chatgpt-credentials.ts`、`scripts/probe-chatgpt-endpoints.ts`、tests。
 
 **第二期（视第一期 CF 直连表现决定）**：cookie 续期脚本（`refresh-chatgpt-cookie.ts`，长 token 过期时复用 Profile 重取）、`POST /api/ingest/chatgpt` 兜底端点（复用 `worker/ingest.ts:25` 的 `handleProviderIngest` 泛型，注意其 windows 非空校验需放宽或 chatgpt 快照保证至少一窗）、Cloudflare Browser Rendering 备选链路。
+
+**第一期终审沉淀的技术债（二期候选，按优先级）**：
+1. chatgpt partial 但无缺失窗口（窗口全在、仅订阅降级）时不满足 staleWindowKeys 豁免条件，会被整卡回退用旧 ready 卡替换、遮蔽实取新值——豁免条件可放宽为「chatgpt 且 partial 且 windows 非空」（`worker/index.ts` applyLatestReadyFallback）。
+2. handleRefresh 无账号分支（入口型 env 配置）绕过 postProcessSnapshots，不享受桶级补齐。
+3. `GET /api/providers/:id/snapshot` 路由本身仍无鉴权（既有问题；一期已通过 skipTokenRefresh 消除凭据烧毁副作用）。
+4. stale 窗口目前仅 label「（历史）」后缀，视觉降权样式待与 isFallback 机制统一。
+5. accountId 不命中 `maskCredentialPayload` 的脱敏正则（hint 中明文回显，属账号标识符，风险低）。
+6. 真实端点探测回填：codex rate_limits 结构、`accounts/check`、新分组 rate_limits 形态与 `defaultCodexClientId` 待真实环境核对（probe 脚本可复跑）。
+7. 导入脚本可选同步 `.env` CHATGPT_* 与 Worker secret（spec §8 第 (5) 条，一期已 descope）。
 
 明确不做：多账号管理、Google 登录自动化、专项趋势图。
 
