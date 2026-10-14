@@ -125,7 +125,14 @@ Edge Profile cookie ┴→ import-chatgpt-   POST /api/refresh ──→ DO 节�
 
 **第一期**：`worker/types.ts`（ProviderId + WorkerEnv + `credentialUpdate` 字段）、`worker/providers/chatgpt.ts`、`registry.ts`、`index.ts`（buildProviderConfig 分支 + credentialUpdate 写回 + CF 降级时的桶级窗口补齐）、`worker/settings/repository.ts` 新增 `updateProviderAccountCredentials`、前端四处、`scripts/import-chatgpt-credentials.ts`、`scripts/probe-chatgpt-endpoints.ts`、tests。
 
-**第二期（视第一期 CF 直连表现决定）**：cookie 续期脚本（`refresh-chatgpt-cookie.ts`，长 token 过期时复用 Profile 重取）、`POST /api/ingest/chatgpt` 兜底端点（复用 `worker/ingest.ts:25` 的 `handleProviderIngest` 泛型，注意其 windows 非空校验需放宽或 chatgpt 快照保证至少一窗）、Cloudflare Browser Rendering 备选链路。
+**第二期（2026-10-14 已实施 ingest；Browser Rendering 经实测否决）**：`POST /api/ingest/chatgpt`（已实现：接收本机浏览器抓到的原始 payload，Worker 侧复用同一套解析器组装快照）+ `scripts/refresh-chatgpt-usage.ts` 本机推送脚本（已实现，与 `scripts/chatgpt-browser.ts` 共享登录/代理/页面内 fetch 工具）。cookie 续期脚本（`refresh-chatgpt-cookie.ts`）仍待做：可并入推送脚本，每次推送顺带写回新 cookie。
+
+**2026-10-14 第二轮实测结论（部署后线上验证，替代"部署后验证"标注）**：
+- 云端出口对 chatgpt.com **整体 403 封锁**：`robots.txt`、`/api/auth/session`、`/backend-api/codex/usage`、`/backend-api/rate_limits` 在 Cloudflare Worker 出口一律 403，且**无** `cf-mitigated` 头、响应体是 CF 拦截 HTML 页；换 UA / 加 `originator: codex_cli_rs` / 浏览器风格请求头均无效（`cdn-cgi/trace` 200、`example.com` 200，说明子请求本身正常）。
+- **Browser Rendering 出口同样被封**：生产实测浏览器农场访问 `robots.txt` 403、页面内同源 fetch 亦 403 → 云端两条路均不可行，Browser Rendering 备选链路正式否决。
+- 数据唯一可行来源是本机浏览器会话（住宅 IP + 真实浏览器指纹 + cf_clearance），即本项目对 OpenCode Go 已采用的"本机抓取 + ingest 推送"模式；推送快照 `meta.fetchMethod="local_ingest"`，前端「抓取方式」显示**本机推送**。
+- 附带修复的真实缺陷：provider 内 `input.fetchImpl(...)` 以**方法形式**调用全局 fetch，在 workerd 下抛 `TypeError: Illegal invocation`（fetch 做 receiver 校验），三链路请求实际从未发出；已改为其它 provider 的本地绑定写法。此前该缺陷被通用错误文案（"（含 Cloudflare 拦截）"）掩盖，误导首轮排查——通用文案现按桶级分类替换（质询 / 封锁 / 凭据失效分开措辞）。
+- 403 封锁页（403 + HTML + 无 cf-mitigated）单独分类为 `egressBlocked`：不按 `login_required` 误报凭据失效、**不消耗 token 刷新**（避免 refresh token 轮换后无法写回），summary 指向 `scripts/refresh-chatgpt-usage.ts`。
 
 **第一期终审沉淀的技术债（二期候选，按优先级）**：
 1. chatgpt partial 但无缺失窗口（窗口全在、仅订阅降级）时不满足 staleWindowKeys 豁免条件，会被整卡回退用旧 ready 卡替换、遮蔽实取新值——豁免条件可放宽为「chatgpt 且 partial 且 windows 非空」（`worker/index.ts` applyLatestReadyFallback）。
@@ -151,6 +158,6 @@ Edge Profile cookie ┴→ import-chatgpt-   POST /api/refresh ──→ DO 节�
 | --- | --- |
 | `chatgpt.com/backend-api/codex/rate_limits` 响应结构未验证 | 实现期先跑 `scripts/probe-chatgpt-endpoints.ts` 探测（输出脱敏结构）；解析器按多形态宽容提取 |
 | OAuth refresh 端点与参数未确认 | 实现期对照开源 codex CLI 源码确认；若被阻塞，第一期末降级为"手动重跑导入脚本"更新 token |
-| Cloudflare 对 Worker 出口 IP 的质询概率未知 | 设计即按"直连尝试 + partial 降级 + 最近快照回退"；第二期以 cookie 续期脚本 / ingest / Browser Rendering 兜底 |
+| ~~Cloudflare 对 Worker 出口 IP 的质询概率未知~~（已实测：出口被 403 整体封锁，Browser Rendering 亦然） | 云端取数不可行，改用本机抓取 + `POST /api/ingest/chatgpt` 推送（已实现）；Worker 侧保留直连尝试与快照回退，封锁时 summary 指向本机脚本 |
 | 上游端点结构漂移（OpenAI 迭代频繁） | 宽容解析 + 单桶 `partial` + summary 提示，其余桶不受影响；探测脚本可复跑 |
 | 免费账号无 Codex 窗口/续费数据 | 设计已定义缺失语义：窗口不产出、`planRenewAt=null`、前端兜底文案，不视为错误 |

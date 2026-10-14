@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { handleIngestOpenCodeGo, handleIngestDeepSeek, handleIngestZhipu } from "../../worker/ingest";
+import {
+  handleIngestChatgpt,
+  handleIngestDeepSeek,
+  handleIngestOpenCodeGo,
+  handleIngestZhipu,
+} from "../../worker/ingest";
 import type { ProviderSnapshot, WorkerEnv } from "../../worker/types";
 
 function makeSnapshot(overrides: Partial<ProviderSnapshot> = {}): ProviderSnapshot {
@@ -250,5 +255,175 @@ describe("handleIngestZhipu", () => {
     });
     const response = await handleIngestZhipu(request, env);
     expect(response.status).toBe(401);
+  });
+});
+
+describe("handleIngestChatgpt", () => {
+  // 实测 codex/usage 结构（rate_limit 单数 + primary/secondary_window + 顶层 plan_type）
+  const realCodexPayload = {
+    plan_type: "plus",
+    rate_limit: {
+      allowed: true,
+      limit_reached: false,
+      primary_window: { used_percent: 42.5, limit_window_seconds: 18000, reset_after_seconds: 3600 },
+      secondary_window: { used_percent: 25, limit_window_seconds: 604800, reset_at: 1794844800 },
+    },
+  };
+
+  function makeChatgptRequest(body: unknown, headers: Record<string, string> = {}) {
+    return new Request("https://api.monitor.local/api/ingest/chatgpt", {
+      method: "POST",
+      headers: { "content-type": "application/json", "X-Ingest-Key": "ingest-secret", ...headers },
+      body: JSON.stringify(body),
+    });
+  }
+
+  // Supabase REST mock：listProviderSettings 读账号 + persistSnapshot 落库（沿用 index.test.ts 的表 mock 方式）
+  function makeSupabaseFetch(accounts: unknown[] = []) {
+    const writes: { path: string; method: string; search: string; body: any }[] = [];
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+      const parsed = new URL(url);
+      const method = init?.method ?? "GET";
+      if (parsed.pathname === "/rest/v1/provider_preferences" && method === "GET") {
+        return Response.json([]);
+      }
+      if (parsed.pathname === "/rest/v1/provider_accounts" && method === "GET") {
+        return Response.json(accounts);
+      }
+      if (parsed.pathname === "/rest/v1/provider_accounts") {
+        writes.push({ path: parsed.pathname, method, search: parsed.search, body: JSON.parse(String(init?.body ?? "null")) });
+        return new Response("", { status: 201 });
+      }
+      if (parsed.pathname === "/rest/v1/usage_snapshots" && method === "POST") {
+        writes.push({ path: parsed.pathname, method, search: parsed.search, body: JSON.parse(String(init?.body)) });
+        return new Response("", { status: 201 });
+      }
+      if (parsed.pathname === "/rest/v1/quota_windows" && method === "POST") {
+        return new Response("", { status: 201 });
+      }
+      throw new Error(`unexpected fetch ${method} ${url}`);
+    });
+    return { fetchImpl, writes };
+  }
+
+  const chatgptAccountRow = {
+    id: "account-chatgpt-1",
+    provider_key: "chatgpt",
+    account_label: "ChatGPT 主账号",
+    source_url: "https://chatgpt.com",
+    status: "ready",
+  };
+
+  it("returns 401 when x-ingest-key is missing or wrong", async () => {
+    const env = makeEnv();
+    const missing = await handleIngestChatgpt(makeChatgptRequest({ codex: realCodexPayload }, { "X-Ingest-Key": "" }), env);
+    expect(missing.status).toBe(401);
+    const wrong = await handleIngestChatgpt(makeChatgptRequest({ codex: realCodexPayload }, { "X-Ingest-Key": "not-the-key" }), env);
+    expect(wrong.status).toBe(401);
+  });
+
+  it("returns 503 when INGEST_API_KEY is not configured", async () => {
+    const env = makeEnv({ INGEST_API_KEY: undefined });
+    const response = await handleIngestChatgpt(makeChatgptRequest({ codex: realCodexPayload }), env);
+    expect(response.status).toBe(503);
+  });
+
+  it("returns 400 when the body has no codex/rateLimits/subscription payload", async () => {
+    const env = makeEnv();
+    const response = await handleIngestChatgpt(makeChatgptRequest({}), env);
+    expect(response.status).toBe(400);
+  });
+
+  it("returns 400 when the codex payload yields neither windows nor a subscription plan", async () => {
+    const env = makeEnv();
+    const response = await handleIngestChatgpt(makeChatgptRequest({ codex: { foo: 1 } }), env);
+    expect(response.status).toBe(400);
+  });
+
+  it("parses the real codex payload, attaches the chatgpt account and persists a local_ingest snapshot", async () => {
+    const { fetchImpl, writes } = makeSupabaseFetch([chatgptAccountRow]);
+    vi.stubGlobal("fetch", fetchImpl as unknown as typeof fetch);
+    try {
+      const env = makeEnv();
+      const response = await handleIngestChatgpt(
+        makeChatgptRequest({ capturedAt: "2026-10-14T00:00:00.000Z", codex: realCodexPayload }),
+        env,
+      );
+      const payload = (await response.json()) as any;
+
+      expect(response.status).toBe(200);
+      expect(payload.ok).toBe(true);
+      expect(payload.data).toMatchObject({
+        providerId: "chatgpt",
+        capturedAt: "2026-10-14T00:00:00.000Z",
+        status: "ready",
+        windows: 2,
+        plan: "plus",
+      });
+
+      const usageWrite = writes.find((w) => w.path === "/rest/v1/usage_snapshots");
+      expect(usageWrite).toBeTruthy();
+      expect(usageWrite!.body.provider_key).toBe("chatgpt");
+      // 挂到 listProviderSettings 找到的 chatgpt 账号行
+      expect(usageWrite!.body.provider_account_id).toBe("account-chatgpt-1");
+      expect(usageWrite!.body.payload.meta.fetchMethod).toBe("local_ingest");
+      expect(usageWrite!.body.payload.meta.accountId).toBe("account-chatgpt-1");
+      expect(usageWrite!.body.payload.metrics.plan).toBe("plus");
+      expect(usageWrite!.body.payload.windows.map((w: any) => w.key)).toEqual(["codex_5h", "codex_weekly"]);
+      // 已知账号时按 id PATCH 账号行，而非 source_url upsert
+      const accountWrite = writes.find((w) => w.path === "/rest/v1/provider_accounts");
+      expect(accountWrite!.method).toBe("PATCH");
+      expect(accountWrite!.search).toContain("id=eq.account-chatgpt-1");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("accepts a free-plan subscription payload without windows", async () => {
+    const { fetchImpl, writes } = makeSupabaseFetch([chatgptAccountRow]);
+    vi.stubGlobal("fetch", fetchImpl as unknown as typeof fetch);
+    try {
+      const env = makeEnv();
+      const response = await handleIngestChatgpt(
+        makeChatgptRequest({ subscription: { account: { plan_type: "free" } } }),
+        env,
+      );
+      const payload = (await response.json()) as any;
+
+      // 免费档无窗口：只要有订阅档位即可入库（status=partial）
+      expect(response.status).toBe(200);
+      expect(payload.data).toMatchObject({ providerId: "chatgpt", status: "partial", windows: 0, plan: "free" });
+
+      const usageWrite = writes.find((w) => w.path === "/rest/v1/usage_snapshots");
+      expect(usageWrite!.body.payload.windows).toEqual([]);
+      expect(usageWrite!.body.payload.metrics.plan).toBe("free");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("parses a rateLimits payload into web windows with direct fetch method", async () => {
+    const { fetchImpl, writes } = makeSupabaseFetch([chatgptAccountRow]);
+    vi.stubGlobal("fetch", fetchImpl as unknown as typeof fetch);
+    try {
+      const env = makeEnv();
+      const response = await handleIngestChatgpt(
+        makeChatgptRequest({
+          rateLimits: [{ slug: "gpt_5_high", used_percent: 0.4, resets_in_seconds: 900 }],
+        }),
+        env,
+      );
+      const payload = (await response.json()) as any;
+
+      expect(response.status).toBe(200);
+      expect(payload.data).toMatchObject({ providerId: "chatgpt", status: "ready", windows: 1 });
+
+      const usageWrite = writes.find((w) => w.path === "/rest/v1/usage_snapshots");
+      expect(usageWrite!.body.payload.windows.map((w: any) => w.key)).toEqual(["web_5h_gpt_5_high"]);
+      expect(usageWrite!.body.payload.metrics.webFetchMethod).toBe("direct");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

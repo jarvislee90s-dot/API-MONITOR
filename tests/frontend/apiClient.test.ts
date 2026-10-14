@@ -1,6 +1,58 @@
 import { describe, expect, it, vi } from "vitest";
 import { createApiClient } from "../../frontend/src/api/client";
 
+// 构造 chatgpt 卡的 /api/usage 响应，cardOverrides 覆盖卡字段以便聚焦断言
+function buildChatgptUsageResponse(cardOverrides: Record<string, unknown> = {}) {
+  return new Response(
+    JSON.stringify({
+      ok: true,
+      data: {
+        kind: "usage_dashboard",
+        generatedAt: "2026-10-14T00:00:00.000Z",
+        status: "ready",
+        summary: "ready",
+        totals: { providers: 1, ready: 1, partial: 0, loginRequired: 0, error: 0 },
+        cards: [
+          {
+            providerId: "chatgpt",
+            providerName: "ChatGPT",
+            sourceUrl: "https://chatgpt.com",
+            status: "ready",
+            summary: "Codex 窗口已获取",
+            capturedAt: "2026-10-13T16:05:00.000Z",
+            trend: [],
+            windows: [
+              { key: "codex_5h", label: "Codex 5小时", used: 40, limit: 100, percentUsed: 40, resetAt: null },
+            ],
+            metrics: {
+              plan: "plus",
+              planRenewAt: null,
+              codexTokenRefreshed: false,
+              webFetchMethod: "direct",
+            },
+            meta: {},
+            ...cardOverrides,
+          },
+        ],
+        modelSpends: [],
+      },
+    }),
+    { status: 200, headers: { "content-type": "application/json" } },
+  );
+}
+
+// 「推送时间」按查看者本地时区渲染（未固定 timeZone），期望值用同一 Intl 规则动态生成，
+// 避免测试绑定运行机器时区而 flaky
+function formatLocalPushTime(capturedAt: string): string {
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(new Date(capturedAt));
+}
+
 describe("api client mapping", () => {
   it("formats quota reset time in Beijing time and keeps one dashboard link", async () => {
     const fetcher = vi.fn(async () => {
@@ -550,6 +602,171 @@ describe("api client mapping", () => {
       { label: "Token 刷新", value: "未刷新" },
       { label: "抓取方式", value: "未配置" },
     ]);
+  });
+
+  it("maps chatgpt meta.fetchMethod=local_ingest to 本机推送 ahead of webFetchMethod states", async () => {
+    // 本机脚本推送的快照：即使 web 通道未配置（codex-only 推送），抓取方式也必须显示本机推送
+    const fetcher = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          ok: true,
+          data: {
+            kind: "usage_dashboard",
+            generatedAt: "2026-10-14T00:00:00.000Z",
+            status: "ready",
+            summary: "ready",
+            totals: { providers: 1, ready: 1, partial: 0, loginRequired: 0, error: 0 },
+            cards: [
+              {
+                providerId: "chatgpt",
+                providerName: "ChatGPT",
+                sourceUrl: "https://chatgpt.com",
+                status: "ready",
+                summary: "Codex 窗口已获取；订阅档位 plus",
+                capturedAt: "2026-10-14T00:00:00.000Z",
+                trend: [],
+                windows: [
+                  { key: "codex_5h", label: "Codex 5小时", used: 40, limit: 100, percentUsed: 40, resetAt: null },
+                ],
+                metrics: {
+                  plan: "plus",
+                  planRenewAt: null,
+                  codexTokenRefreshed: false,
+                  webFetchMethod: "unconfigured",
+                },
+                meta: { fetchMethod: "local_ingest" },
+              },
+            ],
+            modelSpends: [],
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const dashboard = await createApiClient({ fetcher: fetcher as unknown as typeof fetch }).getUsageDashboard();
+    const platform = dashboard.platforms[0]!;
+
+    expect(platform.detailMetrics).toEqual([
+      { label: "订阅档位", value: "plus" },
+      { label: "续费日期", value: "订阅前无数据" },
+      { label: "Token 刷新", value: "未刷新" },
+      { label: "抓取方式", value: "本机推送" },
+      // 本机推送快照在「抓取方式」后追加「推送时间」（capturedAt 存在时）
+      { label: "推送时间", value: formatLocalPushTime("2026-10-14T00:00:00.000Z") },
+    ]);
+  });
+
+  it("maps chatgpt webFetchMethod=snapshot_fallback to 快照回退 when meta has no fetchMethod", async () => {
+    const fetcher = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          ok: true,
+          data: {
+            kind: "usage_dashboard",
+            generatedAt: "2026-10-14T00:00:00.000Z",
+            status: "ready",
+            summary: "ready",
+            totals: { providers: 1, ready: 1, partial: 0, loginRequired: 0, error: 0 },
+            cards: [
+              {
+                providerId: "chatgpt",
+                providerName: "ChatGPT",
+                sourceUrl: "https://chatgpt.com",
+                status: "ready",
+                summary: "Codex 窗口已获取",
+                capturedAt: "2026-10-14T00:00:00.000Z",
+                trend: [],
+                windows: [
+                  { key: "codex_5h", label: "Codex 5小时", used: 40, limit: 100, percentUsed: 40, resetAt: null },
+                ],
+                metrics: {
+                  plan: "plus",
+                  planRenewAt: null,
+                  codexTokenRefreshed: false,
+                  webFetchMethod: "snapshot_fallback",
+                },
+                meta: {},
+              },
+            ],
+            modelSpends: [],
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const dashboard = await createApiClient({ fetcher: fetcher as unknown as typeof fetch }).getUsageDashboard();
+    const platform = dashboard.platforms[0]!;
+
+    expect(platform.detailMetrics).toEqual([
+      { label: "订阅档位", value: "plus" },
+      { label: "续费日期", value: "订阅前无数据" },
+      { label: "Token 刷新", value: "未刷新" },
+      { label: "抓取方式", value: "快照回退" },
+    ]);
+  });
+
+  it("maps local_ingest fallback snapshots to healthy with 本机推送同步 login state", async () => {
+    // 本机推送是既定数据通道：即使云端 live 通道 error，ready 快照也不挂常驻 warning
+    const fetcher = vi.fn(async () =>
+      buildChatgptUsageResponse({
+        meta: { isFallback: true, fetchMethod: "local_ingest", liveStatus: "error" },
+      }),
+    );
+
+    const dashboard = await createApiClient({ fetcher: fetcher as unknown as typeof fetch }).getUsageDashboard();
+    const platform = dashboard.platforms[0]!;
+
+    // status "healthy" 在 PlatformCard 中渲染为「健康」badge
+    expect(platform.status).toBe("healthy");
+    expect(platform.loginState).toBe("本机推送同步");
+  });
+
+  it("keeps non-local-ingest fallback snapshots on warning with 使用缓存数据", async () => {
+    // 回归守卫：普通 fallback（live 通道 error）仍保持 warning / 使用缓存数据
+    const fetcher = vi.fn(async () =>
+      buildChatgptUsageResponse({
+        meta: { isFallback: true, liveStatus: "error" },
+      }),
+    );
+
+    const dashboard = await createApiClient({ fetcher: fetcher as unknown as typeof fetch }).getUsageDashboard();
+    const platform = dashboard.platforms[0]!;
+
+    expect(platform.status).toBe("warning");
+    expect(platform.loginState).toBe("使用缓存数据");
+  });
+
+  it("appends 推送时间 metric after 抓取方式 for local_ingest snapshots with capturedAt", async () => {
+    const fetcher = vi.fn(async () =>
+      buildChatgptUsageResponse({ meta: { fetchMethod: "local_ingest" } }),
+    );
+
+    const dashboard = await createApiClient({ fetcher: fetcher as unknown as typeof fetch }).getUsageDashboard();
+    const platform = dashboard.platforms[0]!;
+
+    const labels = platform.detailMetrics.map((metric) => metric.label);
+    expect(labels).toContain("抓取方式");
+    expect(labels).toContain("推送时间");
+    // 「推送时间」追加在「抓取方式」之后，两条同时存在
+    expect(labels.indexOf("推送时间")).toBeGreaterThan(labels.indexOf("抓取方式"));
+
+    const pushTime = platform.detailMetrics.find((metric) => metric.label === "推送时间");
+    // 形状守卫：中文短日期 + 24 小时制时分（独立于动态期望值，防止格式退化）
+    expect(pushTime?.value).toMatch(/^\d+月\d+日 \d{2}:\d{2}$/);
+    expect(pushTime?.value).toBe(formatLocalPushTime("2026-10-13T16:05:00.000Z"));
+  });
+
+  it("does not add 推送时间 metric for non-local-ingest chatgpt snapshots", async () => {
+    // 云端直连快照：即使 capturedAt 存在，也不出现「推送时间」指标
+    const fetcher = vi.fn(async () => buildChatgptUsageResponse());
+
+    const dashboard = await createApiClient({ fetcher: fetcher as unknown as typeof fetch }).getUsageDashboard();
+    const platform = dashboard.platforms[0]!;
+
+    expect(platform.detailMetrics.some((metric) => metric.label === "推送时间")).toBe(false);
+    expect(platform.detailMetrics).toContainEqual({ label: "抓取方式", value: "云端直连" });
   });
 
 });

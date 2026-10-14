@@ -12,6 +12,7 @@ import { fetchZhipuSnapshot } from "../../worker/providers/zhipu";
 import { fetchOllamaSnapshot } from "../../worker/providers/ollama";
 import {
   fetchChatgptSnapshot,
+  isCloudflareBlockPage,
   isTrustedChatgptUrl,
   mergeChatgptBuckets,
   parseCodexWindows,
@@ -1476,6 +1477,40 @@ describe("ollama settings page (cookie path)", () => {
   });
 });
 
+describe("chatgpt 出口封锁页判定（isCloudflareBlockPage）", () => {
+  it("403 + text/html 且无 cf-mitigated → 识别为封锁页", () => {
+    const response = new Response("<html>Access denied | chatgpt.com</html>", {
+      status: 403,
+      headers: { "content-type": "text/html; charset=utf-8" },
+    });
+    expect(isCloudflareBlockPage(response)).toBe(true);
+  });
+
+  it("403 + application/json（无 cf-mitigated）→ 不是封锁页", () => {
+    const response = new Response(JSON.stringify({ error: "forbidden" }), {
+      status: 403,
+      headers: { "content-type": "application/json" },
+    });
+    expect(isCloudflareBlockPage(response)).toBe(false);
+  });
+
+  it("403 + text/html 但带 cf-mitigated 头 → 不是封锁页（归 CF 质询识别）", () => {
+    const response = new Response("<html>challenge</html>", {
+      status: 403,
+      headers: { "content-type": "text/html", "cf-mitigated": "challenge" },
+    });
+    expect(isCloudflareBlockPage(response)).toBe(false);
+  });
+
+  it("200 + text/html → 不是封锁页", () => {
+    const response = new Response("<html>ok</html>", {
+      status: 200,
+      headers: { "content-type": "text/html" },
+    });
+    expect(isCloudflareBlockPage(response)).toBe(false);
+  });
+});
+
 describe("chatgpt adapter (codex 链路)", () => {
   const NOW = new Date("2026-10-14T00:00:00.000Z");
 
@@ -1761,6 +1796,175 @@ describe("chatgpt adapter (codex 链路)", () => {
     expect(result.snapshot.summary).toContain("Cloudflare 拦截");
   });
 
+  it("codex 与 web 均被 403 HTML 阻断（凭据齐全）→ error 并提示本机脚本，不按登录态失效", async () => {
+    const blockPage = () =>
+      new Response("<html>Access denied | chatgpt.com robots.txt</html>", {
+        status: 403,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const value = String(
+        typeof input === "string" ? input : input instanceof Request ? input.url : input,
+      );
+      if (value === "https://chatgpt.com/api/auth/session") {
+        // session 端点可用（换 token 成功），后续 backend-api 整体 403：覆盖 rate_limits 链路的封锁分支
+        return new Response(JSON.stringify({ accessToken: "fake-web-access-token" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return blockPage();
+    });
+
+    const result = await fetchChatgptSnapshot({
+      now: NOW,
+      fetchImpl: fetchImpl as typeof fetch,
+      config: {
+        accessToken: "fake-access-token-1",
+        refreshToken: "fake-refresh-token-1",
+        accountId: "fake-account-1",
+        sessionToken: "fake-session-token",
+      },
+    });
+
+    expect(result.snapshot.status).toBe("error");
+    expect(result.snapshot.summary).toContain("403");
+    expect(result.snapshot.summary).toContain("refresh-chatgpt-usage.ts");
+    // 出口封锁不是凭据问题：不得按登录态失效误导用户
+    expect(result.snapshot.summary).not.toContain("登录态已失效");
+    expect(result.snapshot.metrics.egressBlocked).toBe(true);
+    expect(result.snapshot.metrics.codexTokenRefreshed).toBe(false);
+    expect(result.credentialUpdate).toBeUndefined();
+  });
+
+  // 刷新守卫同时排除 CF 质询与出口封锁页：block page 是出口层拦截而非凭据失效，
+  // 不得消耗 token 刷新（否则封锁期间每轮刷新都会白打一次 auth.openai.com 并可能轮换 refresh token）
+  it("block page 阻断时不应发起 token 刷新（与 CF 质询同策略）", async () => {
+    const blockPage = () =>
+      new Response("<html>Access denied | chatgpt.com</html>", {
+        status: 403,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const value = String(
+        typeof input === "string" ? input : input instanceof Request ? input.url : input,
+      );
+      if (value === "https://chatgpt.com/api/auth/session") {
+        return new Response(JSON.stringify({ accessToken: "fake-web-access-token" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return blockPage();
+    });
+
+    await fetchChatgptSnapshot({
+      now: NOW,
+      fetchImpl: fetchImpl as typeof fetch,
+      config: {
+        accessToken: "fake-access-token-1",
+        refreshToken: "fake-refresh-token-1",
+        accountId: "fake-account-1",
+        sessionToken: "fake-session-token",
+      },
+    });
+
+    // 未发起 token 刷新：总调用数等于链路请求数（codex/usage、session、rate_limits、accounts/check 共 4 次）
+    expect(fetchImpl.mock.calls.some(([url]) => String(url).includes("auth.openai.com"))).toBe(false);
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+  });
+
+  it("codex 成功（实测 rate_limit 结构）+ web 被 403 HTML 阻断 → partial 且 summary 提示 403 补齐", async () => {
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const value = String(
+        typeof input === "string" ? input : input instanceof Request ? input.url : input,
+      );
+      if (value === "https://chatgpt.com/backend-api/codex/usage") {
+        return new Response(
+          JSON.stringify({
+            plan_type: "plus",
+            rate_limit: {
+              allowed: true,
+              limit_reached: false,
+              primary_window: {
+                used_percent: 42.5,
+                limit_window_seconds: 18000,
+                reset_after_seconds: 3600,
+              },
+              secondary_window: {
+                used_percent: 25,
+                limit_window_seconds: 604800,
+                reset_at: 1794844800,
+              },
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (value === "https://chatgpt.com/api/auth/session") {
+        return new Response(JSON.stringify({ accessToken: "fake-web-access-token" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      // web 额度与订阅链路整体被 403 HTML 拒绝
+      return new Response("<html>Access denied | chatgpt.com</html>", {
+        status: 403,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    });
+
+    const result = await fetchChatgptSnapshot({
+      now: NOW,
+      fetchImpl: fetchImpl as typeof fetch,
+      config: {
+        accessToken: "fake-access-token-1",
+        refreshToken: "fake-refresh-token-1",
+        accountId: "fake-account-1",
+        sessionToken: "fake-session-token",
+      },
+    });
+
+    expect(result.snapshot.status).toBe("partial");
+    expect(result.snapshot.windows.map((w) => w.key)).toEqual(["codex_5h", "codex_weekly"]);
+    expect(result.snapshot.summary).toContain("403");
+    expect(result.snapshot.summary).toContain("refresh-chatgpt-usage.ts");
+    expect(result.snapshot.metrics.egressBlocked).toBe(true);
+  });
+
+  it("回归守卫：403 + application/json（无 cf-mitigated）仍按登录态失效处理并触发 token 刷新", async () => {
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const value = String(
+        typeof input === "string" ? input : input instanceof Request ? input.url : input,
+      );
+      if (value === "https://auth.openai.com/oauth/token") {
+        return new Response("invalid_grant", { status: 400 });
+      }
+      // JSON 403 是凭据/权限语义，不得被 block page 判定吞掉
+      return new Response(JSON.stringify({ error: "forbidden" }), {
+        status: 403,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    const result = await fetchChatgptSnapshot({
+      now: NOW,
+      fetchImpl: fetchImpl as typeof fetch,
+      config: {
+        accessToken: "fake-access-token-1",
+        refreshToken: "fake-refresh-token-1",
+        accountId: "fake-account-1",
+      },
+    });
+
+    // 仍按凭据问题走「刷新 → 重试」链路（此处刷新失败）
+    expect(fetchImpl.mock.calls.some(([url]) => String(url).includes("auth.openai.com"))).toBe(true);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(result.snapshot.status).toBe("login_required");
+    expect(result.snapshot.summary).toContain("登录态已失效");
+    expect(result.snapshot.metrics.egressBlocked).toBe(false);
+  });
+
   it("returns login_required when token refresh fails and no session cookie", async () => {
     const fetchImpl = vi.fn(async (input: string | URL | Request) => {
       const value = String(
@@ -1792,8 +1996,8 @@ describe("chatgpt adapter (codex 链路)", () => {
 
   it("mergeChatgptBuckets：三链路全失败且凭据未耗尽时为 error", () => {
     const result = mergeChatgptBuckets({
-      codex: { attempted: true, windows: [], loginRequired: false, cfChallenge: false, fetchFailed: true },
-      web: { attempted: true, windows: [], loginRequired: false, cfChallenge: true, fetchFailed: false },
+      codex: { attempted: true, windows: [], loginRequired: false, cfChallenge: false, egressBlocked: false, fetchFailed: true },
+      web: { attempted: true, windows: [], loginRequired: false, cfChallenge: true, egressBlocked: false, fetchFailed: false },
       subscription: { attempted: true, plan: null, planRenewAt: null, notFound: false },
       hasCodexCredentials: true,
       hasSessionToken: true,
@@ -2056,8 +2260,33 @@ describe("chatgpt adapter (网页/订阅链路)", () => {
     });
 
     expect(result.snapshot.status).toBe("partial");
-    expect(result.snapshot.summary).toContain("Cloudflare 拦截");
+    // 新文案：质询提示指向本机补齐脚本（原「Cloudflare 拦截，请稍后重试」已下线）
+    expect(result.snapshot.summary).toContain("Cloudflare 质询");
+    expect(result.snapshot.summary).toContain("refresh-chatgpt-usage.ts");
     expect(result.snapshot.metrics.webFetchMethod).toBe("snapshot_fallback");
+  });
+
+  it("session 链路被 403 HTML 阻断 → egressBlocked 而非 login_required", async () => {
+    const fetchImpl = vi.fn(async () =>
+      new Response("<html>Access denied | chatgpt.com</html>", {
+        status: 403,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      }),
+    );
+
+    const result = await fetchChatgptSnapshot({
+      now: NOW,
+      fetchImpl: fetchImpl as typeof fetch,
+      config: { sessionToken: "fake-session-token" },
+    });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(result.snapshot.status).toBe("error");
+    expect(result.snapshot.summary).toContain("403");
+    expect(result.snapshot.summary).toContain("refresh-chatgpt-usage.ts");
+    // 出口封锁不是 session 失效：不得走 login_required 措辞
+    expect(result.snapshot.summary).not.toContain("已失效");
+    expect(result.snapshot.metrics.egressBlocked).toBe(true);
   });
 
   it("treats subscription 404 as the free plan without degrading", async () => {

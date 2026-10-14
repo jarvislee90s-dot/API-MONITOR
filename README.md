@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-API 与 Coding Plan 用量聚合看板。它把 OpenRouter、OpenCode Go、讯飞 MaaS Coding Plan、阿里云百炼 Coding Plan、火山方舟 Coding Plan、智谱 BigModel Coding Plan、Ollama Pro 的用量状态聚合到一个响应式网页里，并用 Supabase 保存刷新快照和云端配置。
+API 与 Coding Plan 用量聚合看板。它把 OpenRouter、OpenCode Go、讯飞 MaaS Coding Plan、阿里云百炼 Coding Plan、火山方舟 Coding Plan、智谱 BigModel Coding Plan、Ollama Pro、DeepSeek 平台、ChatGPT（Codex / 对话额度 / 订阅状态）的用量状态聚合到一个响应式网页里，并用 Supabase 保存刷新快照和云端配置。
 
 线上示例：
 
@@ -16,17 +16,18 @@ https://apimonitor.bondtoolbox.asia
 
 ## 功能亮点
 
-- 统一展示 OpenRouter、OpenCode Go、讯飞 MaaS、阿里云百炼、火山方舟、智谱 BigModel、Ollama Pro 七个平台状态。
+- 统一展示 OpenRouter、OpenCode Go、讯飞 MaaS、阿里云百炼、火山方舟、智谱 BigModel、Ollama Pro、DeepSeek、ChatGPT 九个平台状态。
 - 支持 5 小时、每周、套餐总量等不同 quota window。
 - 独立配置页支持"供应商 → 多账号 → 账号配置"的单页多层工作台。
 - 首页保持一个供应商一个大卡片；多账号通过卡片内账号子卡片切换显示。
-- 账号可单独控制是否在首页显示，停用不会删除配置或凭据。
+- 供应商卡片可整体停用/启用（未配置账号的供应商也能隐藏），账号可单独控制是否在首页显示，停用都不会删除配置或凭据。
 - 前端活跃时最多每 2 分钟刷新一次；10 分钟无交互后停止自动刷新，避免 cron 高频轮询。
 - Cloudflare Durable Object 做刷新节流。
 - Supabase Postgres 保存用量快照、窗口数据和刷新事件。
 - Supabase 保存配置，Worker 使用 AES-GCM 加密第三方凭据。
 - OpenCode Go 支持双账号，分别登录在 Edge 不同 Profile，本地脚本串行刷新推送。
-- OpenCode Go 支持“最近成功快照”回退，降低云端抓取不稳定时的页面空窗。
+- OpenCode Go 与 ChatGPT 支持"最近成功快照"回退，降低云端抓取不稳定时的页面空窗。
+- ChatGPT 因 chatgpt.com 整体拒绝 Cloudflare 出口，改由本机脚本抓取并推送快照（卡片标注"本机推送"与推送时间）。
 
 ## 当前状态
 
@@ -42,6 +43,8 @@ https://apimonitor.bondtoolbox.asia
 | 火山方舟 | 已接入 `GetCodingPlanUsage` 用量接口（5小时/周/月百分比） |
 | 智谱 BigModel | 已接入 `monitor/usage/quota/limit` + `credit-usage/usage-detail` 用量接口（5小时/周配额、Cache 命中率、积分） |
 | Ollama Pro | 已接入网页登录态抓取 `settings` 页（5小时/周额度百分比、重置时间、模型请求数、预计总请求）；API Key 保留为兜底 |
+| DeepSeek | 已接入余额与近 30 天用量（请求数 / Tokens / 消费、按模型聚合） |
+| ChatGPT | 已接入 Codex 额度窗口与订阅档位；因 chatgpt.com 拒绝 Cloudflare 出口，数据由本机脚本 `refresh-chatgpt-usage.ts` 推送（卡片标注"本机推送"） |
 | 配置页 | 已接入 `#/settings` |
 
 ## 架构
@@ -65,7 +68,7 @@ flowchart LR
 
 ## OpenCode Go 用量抓取机制
 
-OpenCode Go 与其他供应商（讯飞 MaaS、OpenRouter）的抓取方式有本质区别，源于一个核心矛盾：**opencode.ai 屏蔽数据中心 IP**。Cloudflare Worker 的出口 IP 属于数据中心 IP，直连 opencode 用量页会被 302 重定向到登录页；而讯飞、OpenRouter 不屏蔽，Worker 云端能实时抓到。
+OpenCode Go 与 ChatGPT 属于"本地脚本抓取 + 推送"，与其他供应商的抓取方式有本质区别，源于一个核心矛盾：**opencode.ai 与 chatgpt.com 都屏蔽 Cloudflare 出口**。Cloudflare Worker 的出口 IP 属于数据中心 IP，直连 opencode 用量页会被 302 重定向到登录页，直连 chatgpt.com 更会被整体 403 拒绝（详见下文 ChatGPT 小节）；而讯飞、OpenRouter 不屏蔽，Worker 云端能实时抓到。
 
 ### 数据通路对比
 
@@ -116,6 +119,8 @@ flowchart TB
 | OpenCode Go | 本地脚本抓取 + 推送 | ❌ 无效（云端 IP 被封） | 手动跑 `refresh-opencode-usage.ts` |
 | 智谱 BigModel | Worker 云端直抓（持久化 cookie/token） | ✅ 实时刷新 | 本地脚本刷新 cookie 后点同步 |
 | Ollama Pro | Worker 云端直抓（网页登录态 cookie） | ✅ 实时刷新 | 本地脚本刷新 cookie 后点同步 |
+| DeepSeek | Worker 云端直抓（登录态有效时） | ✅ 云端直抓 | 登录态过期时跑 `refresh-deepseek-usage.ts` |
+| ChatGPT | 本地脚本抓取 + 推送 | ❌ 无效（chatgpt.com 拒绝 Cloudflare 出口） | 手动跑 `refresh-chatgpt-usage.ts` |
 
 ### 注意事项
 
@@ -193,6 +198,40 @@ node --experimental-strip-types scripts/refresh-ollama-cookie.ts --relogin
 
 Worker 端的抓取逻辑（`worker/providers/ollama.ts`）：优先用 `authCookie` 请求 `ollama.com/settings` 并解析 HTML 中的额度百分比、重置时间（`data-time`，页面权威值）与模型请求列表；cookie 不可用时自动回退 API Key 通道并在摘要中提示需要刷新登录态。
 
+#### DeepSeek 用量刷新
+
+DeepSeek 用账号密码登录平台后抓取余额与近 30 天用量（请求数 / Tokens / 消费 / 按模型聚合），推送快照并把新 token / WAF cookie 写回 `.env` 供云端直抓使用：
+
+```powershell
+node --experimental-strip-types scripts/refresh-deepseek-usage.ts
+```
+
+脚本读取 `.env` 中的 `DEEPSEEK_USER` / `DEEPSEEK_PASS`，打开可见浏览器登录 `platform.deepseek.com`（若出现滑块验证码需人工完成），推送到 `/api/ingest/deepseek`，并刷新 `.env` 的 `DEEPSEEK_USER_TOKEN` / `DEEPSEEK_AUTH_COOKIE`。
+
+#### ChatGPT 用量刷新（本机推送）
+
+**为什么 ChatGPT 必须走本机推送**：2026-10-14 实测确认，`chatgpt.com` 对 Cloudflare 出口**整体 403 拒绝**——不只是用量接口，连 `robots.txt` 都是 403，且响应里没有 `cf-mitigated` 头（是 CF 的拦截页而非质询）；换 UA、加 `originator: codex_cli_rs`、浏览器风格请求头都无效。Cloudflare Browser Rendering（浏览器农场出口）经生产实测同样被拒（页面内同源 fetch 也是 403）。因此**云端两条路都不可能取到 ChatGPT 数据**，唯一可行的是本机浏览器会话（住宅 IP + 真实指纹 + cf_clearance）。
+
+```powershell
+node --experimental-strip-types scripts/refresh-chatgpt-usage.ts
+```
+
+脚本做三件事，全部在打开的浏览器页面内同源执行（借用项目专用 Profile `output/chatgpt-browser-profile/`，已 gitignore）：
+
+1. 读 `~/.codex/auth.json` 的 accessToken，抓 `backend-api/codex/usage`（Codex 额度窗口 + 顶层 `plan_type` 订阅档位）；
+2. 用 Profile 登录态换 `api/auth/session` 的 accessToken，抓 `backend-api/rate_limits`（网页对话额度）与 `backend-api/accounts/check`（订阅与续费日期）；
+3. 把**原始 payload** POST 到 `/api/ingest/chatgpt`（`X-Ingest-Key` 鉴权），由 Worker 侧复用同一套解析器组装快照落库，脚本与云端不会出现两份解析逻辑。
+
+看板表现：ChatGPT 卡的「抓取方式」显示**本机推送**，并附带「推送时间」（数据新鲜度）；卡片数据来自最近一次成功推送（云端刷新失败时回退到该快照，摘要会注明"使用最近成功快照"）。
+
+注意事项：
+
+- `.env` 需要 `INGEST_API_KEY` 与 `APIMONITOR_INGEST_URL`（与其它 refresh 脚本共用）。
+- 首次运行或登录态失效时，脚本会打开浏览器等待人工 Google 登录（最长 300 秒）；**登录一次后 cookie 持久化在专用 Profile 中，后续直接复用**。
+- 云端封禁不代表登录态失效：Worker 侧已把「403 + 拦截页 + 无 `cf-mitigated`」单独归类为出口封锁，不会误报"登录态已失效"，也不会消耗 Codex token 刷新（避免 refresh token 轮换后无法写回）。
+- 免费档目前只返回 Codex 30 天窗口（网页 `rate_limits` 返回 404、`accounts/check` 返回 405），订阅档位取自 codex 响应的 `plan_type`；购买 Plus 后重跑脚本可复核网页 5 小时额度与续费日期。
+- 想自动刷新可把该命令挂到 Windows 任务计划程序，与其它 refresh 脚本相同。
+
 ## 目录结构
 
 ```text
@@ -205,6 +244,7 @@ Worker 端的抓取逻辑（`worker/providers/ollama.ts`）：优先用 `authCoo
 │   ├── providers/
 │   ├── durable-object/
 │   └── index.ts
+├── scripts/               # 本机抓取 / 推送 / cookie 刷新脚本（Node + Playwright）
 ├── supabase/migrations/   # Supabase 数据库迁移
 ├── tests/                 # 前端 hook、Worker、真实 e2e 测试
 ├── docs/                  # 计划、部署说明、README 图片资源
@@ -322,7 +362,9 @@ not_found_handling = "single-page-application"
 | `OLLAMA_KEY` | Ollama API Key（兜底通道，仅提供请求数统计） |
 | `OLLAMA_AUTH_COOKIE` | Ollama 网页登录态 cookie（额度百分比与模型请求明细的必需项） |
 | `CLOUDFLARE_API_TOKEN` | 本地 Wrangler 部署使用 |
-| `INGEST_API_KEY` | 本地脚本推送 opencode 快照的共享密钥（Worker 端需配置同名 secret） |
+| `DEEPSEEK_USER` / `DEEPSEEK_PASS` | DeepSeek 平台登录账号密码（仅脚本使用，不写入 Worker） |
+| `DEEPSEEK_USER_TOKEN` / `DEEPSEEK_AUTH_COOKIE` | DeepSeek 云端抓取登录态（脚本自动刷新并写回） |
+| `INGEST_API_KEY` | 本地脚本推送快照的共享密钥（opencode / deepseek / zhipu / chatgpt 共用，Worker 端需配置同名 secret） |
 | `APIMONITOR_INGEST_URL` | 本地脚本推送目标（Worker 线上地址，已配置为自定义域名） |
 
 ## 安全说明
@@ -330,6 +372,8 @@ not_found_handling = "single-page-application"
 - `.env`、cookie、service role key 不进入 Git。
 - 配置页只把第三方凭据发给 Worker，Worker 加密后写入 Supabase `provider_account_credentials` 表；前端只读取脱敏 `credential_hint`。在新 schema migration 部署前的过渡期，账号级配置和凭据 JSONB 会以兼容模式存到 `provider_accounts.config`（未加密）；迁移完成后此兼容模式自动失效。
 - 账号级停用只影响首页展示，不删除 Supabase 中的账号元数据和加密凭据。
+- 供应商级停用（配置页供应商卡片上的「停用」）只改 `provider_preferences.enabled`，看板不再显示该卡片，同样不删除配置或凭据。
+- ChatGPT 推送脚本与导入脚本使用项目专用浏览器 Profile（`output/chatgpt-browser-profile/`），只在本机复用登录态，cookie 不落盘到项目目录、不进 git；脚本运行日志只输出脱敏 hint。
 - 阿里云百炼默认只保存原网页入口；实验性云端抓取字段默认不填写、不启用。
 - `output/`、`.wrangler/`、`node_modules/`、`frontend/dist/` 已被忽略。
 - README 截图只展示用量，不包含密钥。
@@ -362,6 +406,6 @@ not_found_handling = "single-page-application"
 
 - 模型级花费明细。
 - 更稳定的 OpenCode Go 云端抓取策略。
-- Cloudflare Browser Rendering 辅助登录态修复。
+- 把 ChatGPT cookie 续期并入 `refresh-chatgpt-usage.ts`（每次推送顺带写回新 session cookie），并按需挂任务计划自动推送。
 - 手机端交互细节优化。
 - 用量预测和阈值告警。
