@@ -81,4 +81,37 @@ describe("CredentialForm", () => {
       ),
     );
   });
+
+  it("shows four chatgpt credential fields as password inputs", async () => {
+    const onSave = vi.fn(async () => undefined);
+    render(
+      <CredentialForm
+        provider={{
+          providerKey: "chatgpt",
+          providerName: "ChatGPT",
+          sourceUrl: "https://chatgpt.com",
+          description: "Codex / 对话额度 / 订阅状态",
+        }}
+        onSave={onSave}
+      />,
+    );
+
+    for (const field of ["accessToken", "refreshToken", "accountId", "sessionToken"]) {
+      const input = screen.getByLabelText(field) as HTMLInputElement;
+      expect(input.type).toBe("password");
+    }
+
+    fireEvent.change(screen.getByLabelText("accessToken"), { target: { value: "fake-access-token-1" } });
+    fireEvent.change(screen.getByLabelText("accountId"), { target: { value: "fake-account-1" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存账号" }));
+
+    await waitFor(() =>
+      expect(onSave).toHaveBeenCalledWith(
+        expect.objectContaining({
+          providerKey: "chatgpt",
+          credentials: { accessToken: "fake-access-token-1", accountId: "fake-account-1" },
+        }),
+      ),
+    );
+  });
 });

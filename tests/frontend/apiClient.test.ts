@@ -429,4 +429,76 @@ describe("api client mapping", () => {
     expect(estimated?.value).toBe("1,721"); // 117 / (6.8/100) = 1720.6 -> 1721
   });
 
+  it("maps the chatgpt card with plan metrics and per-provider fallbacks", async () => {
+    const fetcher = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          ok: true,
+          data: {
+            kind: "usage_dashboard",
+            generatedAt: "2026-10-14T00:00:00.000Z",
+            status: "ready",
+            summary: "ready",
+            totals: { providers: 1, ready: 1, partial: 0, loginRequired: 0, error: 0 },
+            cards: [
+              {
+                providerId: "chatgpt",
+                providerName: "ChatGPT",
+                sourceUrl: "https://chatgpt.com",
+                status: "ready",
+                summary: "Codex 窗口已获取；订阅档位 plus",
+                capturedAt: "2026-10-14T00:00:00.000Z",
+                trend: [],
+                windows: [
+                  {
+                    key: "codex_5h",
+                    label: "Codex 5小时",
+                    used: 40,
+                    limit: 100,
+                    percentUsed: 40,
+                    resetAt: null,
+                  },
+                  {
+                    key: "web_5h_default",
+                    label: "对话 5小时·default",
+                    used: 30,
+                    limit: 100,
+                    percentUsed: 30,
+                    resetAt: "2026-10-14T03:00:00.000Z",
+                    meta: { stale: true },
+                  },
+                ],
+                metrics: {
+                  plan: "plus",
+                  planRenewAt: null,
+                  codexTokenRefreshed: true,
+                  webFetchMethod: "direct",
+                },
+                meta: {},
+              },
+            ],
+            modelSpends: [],
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const dashboard = await createApiClient({ fetcher: fetcher as typeof fetch }).getUsageDashboard();
+    const platform = dashboard.platforms[0]!;
+
+    expect(platform.accent).toBe("#10a37f");
+    expect(platform.tagline).toBe("Codex / 对话额度 / 订阅状态");
+    expect(platform.primaryMetricLabel).toBe("Codex 5小时");
+    // resetAt 缺失 → 滚动窗口；补齐窗口 label 加（历史）后缀
+    expect(platform.quotaWindows[0]?.resetAt).toBe("滚动窗口");
+    expect(platform.quotaWindows[1]?.label).toBe("对话 5小时·default（历史）");
+    expect(platform.detailMetrics).toEqual([
+      { label: "订阅档位", value: "plus" },
+      { label: "续费日期", value: "订阅前无数据" },
+      { label: "Token 刷新", value: "本轮已刷新" },
+      { label: "抓取方式", value: "云端直连" },
+    ]);
+  });
+
 });

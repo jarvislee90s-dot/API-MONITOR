@@ -21,6 +21,8 @@ function credentialFields(providerKey: string | undefined): string[] {
   if (providerKey === "volc-ark") return ["authCookie", "apiUrl"];
   if (providerKey === "zhipu") return ["authCookie", "authToken"];
   if (providerKey === "ollama") return ["authCookie", "apiKey", "apiUrl"];
+  // chatgpt 四凭据字段；codexClientId 是高级可选字段不进表单，由 worker 写回 merge 白名单处理
+  if (providerKey === "chatgpt") return ["accessToken", "refreshToken", "accountId", "sessionToken"];
   return ["authCookie"];
 }
 
@@ -32,6 +34,10 @@ function fieldLabel(field: string): string {
     authCookie: "authCookie",
     authToken: "登录 Token",
     apiUrl: "endpoint / baseUrl",
+    accessToken: "Access Token",
+    refreshToken: "Refresh Token",
+    accountId: "账号 ID（chatgpt-account-id）",
+    sessionToken: "网页 Session Token",
   };
   return labels[field] ?? field;
 }
@@ -97,7 +103,7 @@ export function CredentialForm({ provider, account, onSave }: CredentialFormProp
           <input
             aria-label={field}
             value={credentials[field] ?? ""}
-            type={field.toLowerCase().includes("cookie") || field.toLowerCase().includes("key") ? "password" : "text"}
+            type={field.toLowerCase().includes("cookie") || field.toLowerCase().includes("key") || field.toLowerCase().includes("token") || field.toLowerCase().includes("account") ? "password" : "text"}
             onChange={(event) => setCredentials((current) => ({ ...current, [field]: event.target.value }))}
           />
         </label>

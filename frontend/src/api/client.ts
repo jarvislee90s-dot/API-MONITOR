@@ -176,6 +176,7 @@ type ServerProviderWindow = {
   percentUsed?: number | null;
   percentRemaining?: number | null;
   resetAt?: string | null;
+  meta?: Record<string, unknown>;
 };
 
 type ServerUsageCard = {
@@ -353,6 +354,7 @@ function resolveAccent(providerId: string): string {
   if (providerId === "deepseek") return "#0369a1";
   if (providerId === "zhipu") return "#0ea5e9";
   if (providerId === "ollama") return "#7c3aed";
+  if (providerId === "chatgpt") return "#10a37f";
   return "#b45309";
 }
 
@@ -364,6 +366,7 @@ function resolveTagline(providerId: string): string {
   if (providerId === "deepseek") return "API 余额 / 近30天用量";
   if (providerId === "zhipu") return "Coding Plan 用量 / 5小时周配额";
   if (providerId === "ollama") return "Ollama Pro 用量 / 5小时周额度";
+  if (providerId === "chatgpt") return "Codex / 对话额度 / 订阅状态";
   return "Activity 聚合 / 花费拆分";
 }
 
@@ -375,6 +378,7 @@ function resolvePrimaryMetricLabel(providerId: string, windows: ServerProviderWi
   if (providerId === "deepseek") return "充值余额";
   if (providerId === "zhipu") return "5小时配额";
   if (providerId === "ollama") return "5小时额度";
+  if (providerId === "chatgpt") return "Codex 5小时";
   return windows[0]?.label ?? "当前状态";
 }
 
@@ -390,9 +394,9 @@ function formatWindowValue(window: ServerProviderWindow): string {
   return "待同步";
 }
 
-// Ollama 无重置时间字段，显示"滚动窗口"；其他 provider 走既有逻辑
+// Ollama/ChatGPT 无重置时间字段，显示"滚动窗口"；其他 provider 走既有逻辑
 function formatOllamaResetAt(providerId: string, value: string | null | undefined): string {
-  if (providerId !== "ollama") return formatResetAt(value);
+  if (providerId !== "ollama" && providerId !== "chatgpt") return formatResetAt(value);
   return value ? formatResetAt(value) : "滚动窗口";
 }
 
@@ -411,9 +415,17 @@ function formatResetAt(value: string | null | undefined): string {
   }).format(date);
 }
 
+// 续费日期 null（免费档/未知档位）显示"订阅前无数据"（spec §7.2）
+function formatChatgptPlanRenewAt(value: unknown): string {
+  if (typeof value !== "string" || !value) return "订阅前无数据";
+  return formatResetAt(value);
+}
+
 function toQuotaWindow(providerId: string, status: PlatformStatus, window: ServerProviderWindow): QuotaWindow {
+  // worker 桶级补齐的历史窗口打 stale 标记，label 加后缀提示
+  const stale = window.meta?.stale === true;
   return {
-    label: window.label,
+    label: stale ? `${window.label}（历史）` : window.label,
     scope: window.label,
     used: window.used ?? 0,
     limit: window.limit ?? 0,
@@ -493,6 +505,19 @@ function buildDetailMetrics(
     push("5小时请求数", requests5h, (n) => new Intl.NumberFormat("zh-CN").format(n));
     push("本周请求数", metrics.weeklyRequestCount, (n) => new Intl.NumberFormat("zh-CN").format(n));
     push("5小时预计总请求", estimated5h, (n) => new Intl.NumberFormat("zh-CN").format(n));
+    return items;
+  }
+  if (providerId === "chatgpt") {
+    items.push({
+      label: "订阅档位",
+      value: typeof metrics.plan === "string" && metrics.plan ? metrics.plan : "未知",
+    });
+    items.push({ label: "续费日期", value: formatChatgptPlanRenewAt(metrics.planRenewAt) });
+    items.push({ label: "Token 刷新", value: metrics.codexTokenRefreshed === true ? "本轮已刷新" : "未刷新" });
+    items.push({
+      label: "抓取方式",
+      value: metrics.webFetchMethod === "snapshot_fallback" ? "快照回退" : "云端直连",
+    });
     return items;
   }
   if (providerId !== "zhipu") return [];
