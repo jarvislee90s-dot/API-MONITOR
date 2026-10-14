@@ -265,7 +265,11 @@ async function fetchCodexWindows(input: {
   }
 
   let credentialUpdate: Record<string, string> | null = null;
-  if ((response.status === 401 || response.status === 403) && input.config.refreshToken) {
+  // CF 质询（403 + cf-mitigated: challenge）是 IP 拦截而非凭据失效，不消耗 token 刷新
+  if (
+    (response.status === 401 || (response.status === 403 && !isCloudflareChallenge(response))) &&
+    input.config.refreshToken
+  ) {
     const refreshed = await refreshCodexToken({
       refreshToken: input.config.refreshToken,
       clientId: input.config.codexClientId?.trim() || defaultCodexClientId,
