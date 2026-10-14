@@ -1836,6 +1836,55 @@ describe("chatgpt adapter (网页/订阅链路)", () => {
     });
   });
 
+  it("unwraps a rate_limits wrapper object before parsing group windows", () => {
+    // 一层包装（如 { rate_limits: {...} }）不能静默解析成 0 窗口
+    const windows = parseWebRateLimitWindows(
+      { rate_limits: { gpt_5_high: { used_percent: 0.4, resets_in_seconds: 900 } } },
+      NOW,
+    );
+
+    expect(windows.map((w) => w.key)).toEqual(["web_5h_gpt_5_high"]);
+    expect(windows[0]).toMatchObject({
+      label: "对话 5小时·gpt_5_high",
+      percentUsed: 40,
+      resetAt: "2026-10-14T00:15:00.000Z",
+    });
+  });
+
+  it("unwraps a groups array wrapper before parsing group windows", () => {
+    const windows = parseWebRateLimitWindows(
+      { groups: [{ slug: "x", used_percent: 50 }] },
+      NOW,
+    );
+
+    expect(windows.map((w) => w.key)).toEqual(["web_5h_x"]);
+    expect(windows[0]).toMatchObject({ percentUsed: 50 });
+  });
+
+  it("normalizes message_cap slug case so mixed-case keys collapse into one window", () => {
+    // 旧形态两个仅大小写不同的键必须归一为同一 slug，只产出一个窗口
+    const windows = parseWebRateLimitWindows(
+      {
+        GPT_5X_message_cap: { max_cap: 40, remaining_cap: 30, reset_at: "2026-10-14T03:00:00Z" },
+        gpt_5x_message_cap: { max_cap: 80, remaining_cap: 40, reset_at: "2026-10-14T03:00:00Z" },
+      },
+      NOW,
+    );
+
+    expect(windows.map((w) => w.key)).toEqual(["web_5h_gpt_5x"]);
+    expect(windows[0].label).toBe("对话 5小时·gpt_5x");
+    expect(windows[0]).toMatchObject({ percentUsed: 25 });
+  });
+
+  it("normalizes group slug case for object and array shapes", () => {
+    const objectWindows = parseWebRateLimitWindows({ GPT_5_High: { used_percent: 12 } }, NOW);
+    const arrayWindows = parseWebRateLimitWindows([{ slug: "GPT_5_High", used_percent: 12 }], NOW);
+
+    expect(objectWindows.map((w) => w.key)).toEqual(["web_5h_gpt_5_high"]);
+    expect(arrayWindows.map((w) => w.key)).toEqual(["web_5h_gpt_5_high"]);
+    expect(objectWindows[0].label).toBe("对话 5小时·gpt_5_high");
+  });
+
   it("maps a 401 on the web session link to login_required with session wording", async () => {
     const fetchImpl = vi.fn(async (input: string | URL | Request) => {
       const value = String(
