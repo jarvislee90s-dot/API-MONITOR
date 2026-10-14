@@ -1027,4 +1027,31 @@ describe("updateProviderAccountCredentials", () => {
     ).rejects.toThrow("Credential encryption key is required to update credentials");
     expect(fetchImpl).not.toHaveBeenCalled();
   });
+
+  it("hint PATCH 静默失败不影响写回", async () => {
+    const urls: string[] = [];
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url =
+        typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+      urls.push(url);
+      if (urls.length === 1) {
+        return new Response("{}", { status: 201 });
+      }
+      throw new Error("hint patch network failure");
+    });
+
+    const result = await updateProviderAccountCredentials(
+      env,
+      "user-1",
+      "acc-1",
+      { accessToken: "fake-access-token-3", refreshToken: "fake-refresh-token-3" },
+      fetchImpl as unknown as typeof fetch,
+    );
+
+    expect(result).toEqual({ id: "acc-1" });
+    expect(urls[0]).toBe(
+      "https://supabase.test/rest/v1/provider_account_credentials?on_conflict=provider_account_id",
+    );
+    expect(urls).toHaveLength(2);
+  });
 });
