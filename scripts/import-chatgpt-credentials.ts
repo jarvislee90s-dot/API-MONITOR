@@ -31,8 +31,9 @@ const LOGIN_WAIT_MS = 300_000;
 // 与真实浏览器一致的 UA，避免服务端接口按自动化 UA 拒绝
 const BROWSER_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-// 登录入口文案：英文 "Log in" / 中文「登录」均视为未登录
-const LOGIN_ENTRY_SELECTOR = "text=/Log in|登录/i";
+// 登录入口文案：英文 "Log in" / 中文「登录」均视为未登录。
+// 必须整词锚定，避免子串误伤已登录页面的「退出登录」等文案
+const LOGIN_ENTRY_SELECTOR = "text=/^(Log in|登录)$/i";
 
 function loadEnv(): Record<string, string> {
   const envPath = resolve(process.cwd(), ".env");
@@ -160,6 +161,7 @@ async function extractSessionToken(forceRelogin: boolean): Promise<string | null
     console.log(`  登录成功后自动继续，最长等待 ${LOGIN_WAIT_MS / 1000} 秒`);
     console.log("═════════════════════════════════════════════════");
     const deadline = Date.now() + LOGIN_WAIT_MS;
+    let staleCookieWarned = false;
     while (Date.now() < deadline) {
       try {
         const token = await readToken();
@@ -168,6 +170,10 @@ async function extractSessionToken(forceRelogin: boolean): Promise<string | null
           const validation = await validateSessionCookie(token);
           if (validation.valid) return token;
           console.warn(`[WARN] session cookie 服务端验证未通过（${validation.error}），继续等待人工登录`);
+        } else if (token && !staleCookieWarned) {
+          // 有 cookie 但页面仍显示登录入口：多为残留死值；只提示一次避免刷屏
+          staleCookieWarned = true;
+          console.warn("[WARN] 检测到残留 session cookie 但页面仍显示登录入口，若长时间无进展请加 --relogin 重试");
         }
       } catch {
         // 人工登录涉及多次跳转，页面导航瞬间 locator 可能暂时失效，下一轮重试
