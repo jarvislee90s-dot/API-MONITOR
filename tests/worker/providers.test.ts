@@ -29,6 +29,7 @@ describe("provider registry", () => {
       "deepseek",
       "zhipu",
       "ollama",
+      "chatgpt",
     ]);
     expect(getProvider("openrouter")?.name).toBe("OpenRouter");
     expect(getProvider("opencode-go")?.name).toBe("OpenCode Go");
@@ -38,12 +39,14 @@ describe("provider registry", () => {
     expect(getProvider("deepseek")?.name).toBe("DeepSeek");
     expect(getProvider("zhipu")?.name).toBe("智谱 BigModel");
     expect(getProvider("ollama")?.name).toBe("Ollama Pro");
+    expect(getProvider("chatgpt")?.name).toBe("ChatGPT");
     expect(isProviderId("openrouter")).toBe(true);
     expect(isProviderId("aliyun-bailian")).toBe(true);
     expect(isProviderId("volc-ark")).toBe(true);
     expect(isProviderId("deepseek")).toBe(true);
     expect(isProviderId("zhipu")).toBe(true);
     expect(isProviderId("ollama")).toBe(true);
+    expect(isProviderId("chatgpt")).toBe(true);
     expect(isProviderId("unknown")).toBe(false);
   });
 });
