@@ -637,6 +637,67 @@ export async function upsertProviderAccount(
   return { id: accountId };
 }
 
+// 覆盖写入指定账号的加密凭据（chatgpt token 轮换写回通道）；
+// credential_hint 为展示用，同步失败不影响写回结果
+export async function updateProviderAccountCredentials(
+  env: SettingsEnv & { CREDENTIAL_ENCRYPTION_KEY?: string },
+  userId: string,
+  accountId: string,
+  credentials: CredentialPayload,
+  fetchImpl: typeof fetch,
+): Promise<{ id: string }> {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
+    throw new Error("Supabase configuration missing");
+  }
+
+  const encryptionKey = env.CREDENTIAL_ENCRYPTION_KEY;
+  if (!encryptionKey) {
+    throw new Error("Credential encryption key is required to update credentials");
+  }
+
+  const headers = createSupabaseHeaders(env.SUPABASE_SERVICE_ROLE_KEY);
+  const encrypted = await encryptCredentialPayload(credentials, encryptionKey);
+
+  const credUrl = new URL("/rest/v1/provider_account_credentials", env.SUPABASE_URL);
+  credUrl.searchParams.set("on_conflict", "provider_account_id");
+
+  const credResponse = await fetchImpl(credUrl, {
+    method: "POST",
+    headers: {
+      ...headers,
+      Prefer: "resolution=merge-duplicates,return=minimal",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      user_id: userId,
+      provider_account_id: accountId,
+      encrypted_payload: encrypted.encryptedPayload,
+      nonce: encrypted.nonce,
+      key_version: encrypted.keyVersion,
+    }),
+  });
+
+  if (!credResponse.ok) {
+    throw new Error(`Failed to update provider account credentials: ${credResponse.status}`);
+  }
+
+  const hintUrl = new URL("/rest/v1/provider_accounts", env.SUPABASE_URL);
+  hintUrl.searchParams.set("id", `eq.${accountId}`);
+  hintUrl.searchParams.set("user_id", `eq.${userId}`);
+
+  await fetchImpl(hintUrl, {
+    method: "PATCH",
+    headers: {
+      ...headers,
+      Prefer: "return=minimal",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ credential_hint: maskCredentialPayload(credentials) }),
+  }).catch(() => undefined);
+
+  return { id: accountId };
+}
+
 export async function updateProviderAccount(
   env: SettingsEnv & { CREDENTIAL_ENCRYPTION_KEY?: string },
   userId: string,
