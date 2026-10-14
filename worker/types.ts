@@ -116,6 +116,10 @@ export type ProviderFetchInput = {
   browser?: Fetcher;
   browserRenderer?: OpenCodeBrowserRenderer;
   config?: Record<string, unknown>;
+  // GET 调试端点（handleProviderSnapshot）必须无副作用：置 true 后 provider 跳过
+  // 「401/403 → 刷新 token → 重试」。refresh token 刷新即轮换，而该路径不写回，
+  // 若允许刷新，外部反复 GET 就会烧毁存储凭据
+  skipTokenRefresh?: boolean;
 };
 
 export type ProviderFetchResult = {

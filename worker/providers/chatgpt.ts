@@ -140,11 +140,14 @@ async function requestCodexRateLimits(input: {
 }
 
 // codex 链路：Bearer + chatgpt-account-id；401/403（非质询）→ 刷新 → 重试一次 → credentialUpdate 带出（spec §6）
+// skipTokenRefresh（GET 调试端点）：跳过「刷新 → 重试」，401/403 直接按 loginRequired 桶降级，
+// 避免轮换出的新 refresh token 因调用方不写回而烧毁存储凭据
 async function fetchCodexWindows(input: {
   config: ChatgptConfig;
   now: Date;
   fetchImpl: typeof fetch;
   requestTimeoutMs?: number;
+  skipTokenRefresh?: boolean;
 }): Promise<{ outcome: ChatgptBucketOutcome; credentialUpdate: Record<string, string> | null }> {
   if (!isTrustedChatgptUrl(codexRateLimitsUrl) || !isTrustedChatgptUrl(codexTokenUrl)) {
     return { outcome: { ...notConfiguredBucket(), fetchFailed: true }, credentialUpdate: null };
@@ -168,6 +171,7 @@ async function fetchCodexWindows(input: {
   let credentialUpdate: Record<string, string> | null = null;
   // CF 质询（403 + cf-mitigated: challenge）是 IP 拦截而非凭据失效，不消耗 token 刷新
   if (
+    !input.skipTokenRefresh &&
     (response.status === 401 || (response.status === 403 && !isCloudflareChallenge(response))) &&
     input.config.refreshToken
   ) {
@@ -477,6 +481,7 @@ export async function fetchChatgptSnapshot(input: ProviderFetchInput): Promise<P
         now: input.now,
         fetchImpl,
         requestTimeoutMs: input.requestTimeoutMs,
+        skipTokenRefresh: input.skipTokenRefresh,
       })
     : { outcome: notConfiguredBucket(), credentialUpdate: null };
 

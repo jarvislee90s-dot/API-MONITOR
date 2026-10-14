@@ -1682,6 +1682,28 @@ describe("chatgpt adapter (codex 链路)", () => {
     });
   });
 
+  it("skipTokenRefresh：401 直接按 login_required 处理，不请求 auth.openai.com（GET 调试端点无副作用）", async () => {
+    const fetchImpl = vi.fn(async (_input: string | URL | Request) => new Response("{}", { status: 401 }));
+
+    const result = await fetchChatgptSnapshot({
+      now: NOW,
+      fetchImpl: fetchImpl as typeof fetch,
+      skipTokenRefresh: true,
+      config: {
+        accessToken: "fake-access-token-1",
+        refreshToken: "fake-refresh-token-1",
+        accountId: "fake-account-1",
+      },
+    });
+
+    // 只有 codex rate_limits 一次调用：不触发「401 → 刷新 → 重试」，不消耗 refresh token
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(String(fetchImpl.mock.calls[0][0])).toBe("https://chatgpt.com/backend-api/codex/rate_limits");
+    expect(fetchImpl.mock.calls.some(([url]) => String(url).includes("auth.openai.com"))).toBe(false);
+    expect(result.snapshot.status).toBe("login_required");
+    expect(result.credentialUpdate).toBeUndefined();
+  });
+
   it("does not refresh the codex token on a Cloudflare challenge (403 + cf-mitigated)", async () => {
     const fetchImpl = vi.fn(
       async () => new Response("challenge", { status: 403, headers: { "cf-mitigated": "challenge" } }),
