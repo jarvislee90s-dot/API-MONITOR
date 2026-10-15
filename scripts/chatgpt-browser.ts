@@ -218,14 +218,20 @@ export async function readWebPlanType(page: import("playwright").Page): Promise<
   return parseWebPlanType(result?.body);
 }
 
-// 会话是否属于已登录的真实账号：session 里有 user.email，或档位不是 guest
+// 会话是否属于已登录的真实账号：以 /api/auth/session 为准（user.email + account.planType）。
+// 注意：accounts/check 用 cookie-only 请求会退化成访客视图（plan_type=guest），不能用来判断登录态；
+// 真实档位/续费时间需要 cookie + session Bearer 一起带（见 refresh-chatgpt-usage.ts）。
 export async function readWebSessionIdentity(
   page: import("playwright").Page,
 ): Promise<{ hasEmail: boolean; plan: string | null }> {
   const sessionResult = await fetchInPage(page, AUTH_SESSION_URL, { Accept: "application/json" });
-  const user = (sessionResult?.body as { user?: { email?: unknown } } | null)?.user;
-  const plan = await readWebPlanType(page);
-  return { hasEmail: typeof user?.email === "string" && user.email.length > 0, plan };
+  const body = sessionResult?.body as
+    | { user?: { email?: unknown }; account?: { planType?: unknown } }
+    | null;
+  return {
+    hasEmail: typeof body?.user?.email === "string" && body.user.email.length > 0,
+    plan: typeof body?.account?.planType === "string" ? body.account.planType.toLowerCase() : null,
+  };
 }
 
 export type BrowserSession = {

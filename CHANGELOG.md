@@ -10,6 +10,12 @@
 - 网页对话额度无数据时（免费档 `rate_limits` 返回 404）卡片追加占位说明行，说明两桶独立、Codex 用尽不影响网页聊天；占位行不参与趋势、不画进度条，完全没有窗口时仍走通用空态文案。
 - `scripts/probe-chatgpt-endpoints.ts --browser`：用本机浏览器会话在页面内探测候选端点（`accounts/check/v4-2023-04-27`、`models`、`me`、`settings/user`、`conversation/limit`、`usage_limits` 等），用于确认免费档网页额度是否有其它数据源。
 
+### Fixed
+
+- ChatGPT 网页链路鉴权按真实 Plus 会话定论修正：`codex/usage` 用 Codex Bearer 且 `credentials:"omit"`（带 session cookie 会被判 `token_expired`）；网页/订阅端点反过来必须 **cookie + session Bearer 一起带**——cookie-only 会退化成访客视图（`accounts/check` 返回 `plan_type=guest`、`renews_at=null`），bearer-only 直接 403。此前的"cookie-only 可用、session token 一律过期"结论只对访客会话成立（第三轮误判已修正）。
+- 续费日期接入：`accounts/check/v4-2023-04-27` 的 `accounts.<id>.entitlement.renews_at` → 看板「续费日期」现显示 11月15日 13:15。
+- 登录态判定以 `/api/auth/session` 的 `user.email` + `account.planType` 为准（`accounts/check` 的 cookie-only 视图不能用于判断登录态，否则会出现"登录成功却永远等待"的假象）。
+
 ### Changed
 
 - ChatGPT 主指标标签由固定「Codex 5小时」改为首个窗口的 label（免费档为 30 天窗，避免档位错标）。

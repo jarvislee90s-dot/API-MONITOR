@@ -33,6 +33,7 @@
 
 import { resolve } from "node:path";
 import {
+  AUTH_SESSION_URL,
   CODEX_USAGE_URL,
   ensureProxyOrRespawn,
   extractSessionToken,
@@ -169,14 +170,31 @@ async function main(): Promise<void> {
     }
 
     if (session.cookieHeader) {
-      // 网页端点一律 cookie-only（session 换来的 accessToken 已不被 backend-api 接受，实测 401 token_expired）
-      const rateLimits = await fetchInPage(session.page, WEB_RATE_LIMITS_URL, { Accept: "application/json" });
+      // 网页端点需要 **cookie + session Bearer** 同时带上（实测 2026-10-15：
+      // 真实会话下 cookie-only 会退化成访客视图，bearer-only 直接 403；
+      // 只有 cookie+bearer 才能拿到 accounts/check 的 plus 档位与 renews_at）
+      const sessionResult = await fetchInPage(session.page, AUTH_SESSION_URL, { Accept: "application/json" });
+      const sessionPayload = sessionResult?.body as {
+        accessToken?: string;
+        user?: { email?: string };
+        account?: { planType?: string };
+      } | null;
+      const webToken = sessionPayload?.accessToken ?? "";
+      console.log(
+        `auth/session: HTTP ${sessionResult?.status ?? "?"}，user.email=${sessionPayload?.user?.email ? "有" : "无"}，account.planType=${sessionPayload?.account?.planType ?? "(无)"}，accessToken=${webToken ? "有" : "无"}`,
+      );
+      const webHeaders: Record<string, string> = {
+        Accept: "application/json",
+        ...(webToken ? { Authorization: `Bearer ${webToken}` } : {}),
+      };
+
+      const rateLimits = await fetchInPage(session.page, WEB_RATE_LIMITS_URL, webHeaders);
       console.log(describeFetch("rate_limits", rateLimits));
       if (rateLimits && rateLimits.status >= 200 && rateLimits.status < 300 && rateLimits.body) {
         payloads.rateLimits = rateLimits.body;
       }
 
-      const subscription = await fetchInPage(session.page, SUBSCRIPTION_CHECK_URL, { Accept: "application/json" });
+      const subscription = await fetchInPage(session.page, SUBSCRIPTION_CHECK_URL, webHeaders);
       console.log(describeFetch("accounts/check(v4)", subscription));
       if (subscription && subscription.status >= 200 && subscription.status < 300 && subscription.body) {
         // 访客会话的 accounts/check 会返回 plan_type=guest，不能覆盖真实档位，交由 codex plan_type 兜底
