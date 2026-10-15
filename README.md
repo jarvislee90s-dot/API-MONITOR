@@ -218,18 +218,33 @@ node --experimental-strip-types scripts/refresh-chatgpt-usage.ts
 
 脚本做三件事，全部在打开的浏览器页面内同源执行（借用项目专用 Profile `output/chatgpt-browser-profile/`，已 gitignore）：
 
-1. 读 `~/.codex/auth.json` 的 accessToken，抓 `backend-api/codex/usage`（Codex 额度窗口 + 顶层 `plan_type` 订阅档位）；
-2. 用 Profile 登录态换 `api/auth/session` 的 accessToken，抓 `backend-api/rate_limits`（网页对话额度）与 `backend-api/accounts/check`（订阅与续费日期）；
+1. 取 Codex 链路：用凭据里的 accessToken 抓 `backend-api/codex/usage`（Codex 额度窗口 + 顶层 `plan_type` 订阅档位）。该请求**不带** session cookie（cookie 与 Bearer 同时出现会被服务端判 `token_expired`）；
+2. 用 Profile 登录态（cookie-only）抓 `backend-api/rate_limits`（网页对话额度）与 `backend-api/accounts/check/v4-2023-04-27`（订阅与续费日期）；
 3. 把**原始 payload** POST 到 `/api/ingest/chatgpt`（`X-Ingest-Key` 鉴权），由 Worker 侧复用同一套解析器组装快照落库，脚本与云端不会出现两份解析逻辑。
 
-看板表现：ChatGPT 卡按**两个独立额度桶**分开展示——「Codex 编码额度」（Codex CLI/IDE 的 5 小时 / 每周 / 30 天窗口）与「网页对话额度」（网页聊天的 5 小时模型组窗口），两桶独立计量，Codex 用尽不影响网页聊天。网页桶暂无数据时卡片会显示占位说明行（免费档该接口返回 404）。「抓取方式」显示**本机推送**，并附带「推送时间」（数据新鲜度）；卡片数据来自最近一次成功推送（云端刷新失败时回退到该快照，摘要会注明"使用最近成功快照"）。
+凭据来源与刷新（脚本不再依赖本地 CLI token）：
+
+1. `CHATGPT_ACCESS_TOKEN` 环境变量（临时覆盖）；
+2. **Supabase 存储副本**（worker 用的同一份加密凭据）：token 失效时脚本会用它自带的 `refreshToken` 刷新，并**写回 Supabase**，所以看板链路不会因为本地 `~/.codex/auth.json` 过期而断；
+3. 本地 `~/.codex/auth.json`（兜底）。
+
+实测结论（2026-10-15，Plus 档验证）：订阅档位变化后，旧 token 即使未到 `exp` 也会被服务端判为 `token_expired`，因此脚本内置了「401/403 → 刷新 → 重试一次」；刷新走 `auth.openai.com/oauth/token`（本机代理出口可用）。本地 `auth.json` 的 ChatGPT token 若已失效，需要时在 Codex CLI 里重新登录（`codex login`），但这不影响看板数据。
+
+看板表现：ChatGPT 卡按**两个独立额度桶**分开展示——「Codex 编码额度」（Codex CLI/IDE 的 5 小时 / 每周 / 30 天窗口）与「网页对话额度」（网页聊天的 5 小时模型组窗口），两桶独立计量，Codex 用尽不影响网页聊天。网页桶暂无数据时卡片会显示占位说明行（该端点对免费/访客会话返回 404）。「抓取方式」显示**本机推送**，并附带「推送时间」（数据新鲜度）；卡片数据来自最近一次成功推送（云端刷新失败时回退到该快照，摘要会注明"使用最近成功快照"）。
 
 注意事项：
 
 - `.env` 需要 `INGEST_API_KEY` 与 `APIMONITOR_INGEST_URL`（与其它 refresh 脚本共用）。
 - 首次运行或登录态失效时，脚本会打开浏览器等待人工 Google 登录（最长 300 秒）；**登录一次后 cookie 持久化在专用 Profile 中，后续直接复用**。
 - 云端封禁不代表登录态失效：Worker 侧已把「403 + 拦截页 + 无 `cf-mitigated`」单独归类为出口封锁，不会误报"登录态已失效"，也不会消耗 Codex token 刷新（避免 refresh token 轮换后无法写回）。
-- 免费档目前只返回 Codex 30 天窗口（网页 `rate_limits` 返回 404、`accounts/check` 返回 405），订阅档位取自 codex 响应的 `plan_type`；购买 Plus 后重跑脚本可复核网页 5 小时额度与续费日期。
+- **续费日期需要真实账号的网页会话**：项目 Profile 若是访客/未登录状态，`accounts/check` 会返回 `plan_type=guest`（脚本会跳过，不覆盖真实档位）。用 Plus 账号登录一次即可补齐续费日期：
+
+  ```powershell
+  node --experimental-strip-types scripts/import-chatgpt-credentials.ts --relogin --web-only
+  ```
+
+  `--web-only` 只续期网页 session cookie（不要求本地 codex token 有效），写入时与已存凭据合并。
+- 免费档 `rate_limits` 返回 404（Plus 档实测同样 404），网页对话额度目前没有可用的数据源；订阅档位在网页会话不可用时会由 `codex/usage` 的 `plan_type` 兜底。
 - 想确认免费档「网页对话额度」是否有其它数据源，可在本机（代理开启、Profile 已登录）跑 `node --experimental-strip-types scripts/probe-chatgpt-endpoints.ts --browser`：它会在页面内探测 `rate_limits`、`accounts/check/v4-2023-04-27`、`models`、`me`、`settings/user`、`conversation/limit`、`usage_limits` 等候选端点，输出状态码与脱敏结构。
 - 想自动刷新可把该命令挂到 Windows 任务计划程序，与其它 refresh 脚本相同。
 

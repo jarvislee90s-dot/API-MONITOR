@@ -19,13 +19,20 @@
  * 使用：
  *   node --experimental-strip-types scripts/refresh-chatgpt-usage.ts
  *   node --experimental-strip-types scripts/refresh-chatgpt-usage.ts --auth-json <路径>   # 自定义 codex auth.json
+ *   CHATGPT_ACCESS_TOKEN=xxx CHATGPT_ACCOUNT_ID=xxx node --experimental-strip-types scripts/refresh-chatgpt-usage.ts
+ *     # 覆盖 codex token（auth.json 过期/失效时用；账号 id 也可只给 token）
+ *
+ * 鉴权语义（2026-10-15 实测）：
+ *   - codex/usage 必须用 Codex Bearer，且**不能**同时带 session cookie（会被判 token_expired）
+ *     → 该请求用 credentials:"omit"；
+ *   - 网页端点用 cookie-only（session 换来的 accessToken 已不被 backend-api 接受），
+ *     accounts/check 用 v4 端点；访客/免费会话拿不到订阅档位，此时由 codex 响应的 plan_type 兜底。
  *
  * 安全：只打印脱敏 hint 与状态码，不打印 token / cookie；原始 payload 不含凭据。
  */
 
 import { resolve } from "node:path";
 import {
-  AUTH_SESSION_URL,
   CODEX_USAGE_URL,
   ensureProxyOrRespawn,
   extractSessionToken,
@@ -34,9 +41,17 @@ import {
   maskHint,
   readCodexAuthJson,
 } from "./chatgpt-browser.ts"; // Node 类型剥离模式需要显式扩展名（scripts/ 不在 tsc 覆盖范围）
+import {
+  accessTokenAccountId,
+  accessTokenPlanType,
+  loadStoredChatgptCredential,
+  refreshStoredChatgptCredential,
+  type StoredChatgptCredential,
+} from "./chatgpt-credentials.ts";
 
 const WEB_RATE_LIMITS_URL = "https://chatgpt.com/backend-api/rate_limits";
-const SUBSCRIPTION_CHECK_URL = "https://chatgpt.com/backend-api/accounts/check";
+// 实测 cookie-only 下 v4 端点返回 accounts/entitlement（含 subscription_plan / renews_at），旧路径 405
+const SUBSCRIPTION_CHECK_URL = "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27";
 
 type FetchedPayload = { status: number; cfMitigated: string | null; body: unknown };
 
@@ -46,6 +61,20 @@ function describeFetch(label: string, result: FetchedPayload | null): string {
   if (result.status === 401 || result.status === 403) return `${label}: HTTP ${result.status}（登录态/token 失效）`;
   if (result.status < 200 || result.status >= 300) return `${label}: HTTP ${result.status}`;
   return `${label}: HTTP ${result.status}${result.body === null ? "（响应非 JSON）" : ""}`;
+}
+
+// accounts/check(v4) 档位：accounts.<id>.account.plan_type（plus/guest…）；缺失时退到 entitlement.subscription_plan
+function describeSubscriptionPlan(body: unknown): string | null {
+  if (!body || typeof body !== "object") return null;
+  const accounts = (body as { accounts?: Record<string, unknown> }).accounts;
+  if (!accounts || typeof accounts !== "object") return null;
+  const first = Object.values(accounts)[0];
+  if (!first || typeof first !== "object") return null;
+  const account = (first as { account?: Record<string, unknown> }).account ?? {};
+  const entitlement = (first as { entitlement?: Record<string, unknown> }).entitlement ?? {};
+  if (typeof account.plan_type === "string") return account.plan_type.toLowerCase();
+  if (typeof entitlement.subscription_plan === "string") return entitlement.subscription_plan.toLowerCase();
+  return null;
 }
 
 async function main(): Promise<void> {
@@ -64,11 +93,38 @@ async function main(): Promise<void> {
   }
   console.log(`[INFO] 推送目标: ${env.APIMONITOR_INGEST_URL}/api/ingest/chatgpt`);
 
-  const codex = readCodexAuthJson(authJsonPath);
-  if (codex) {
-    console.log(`[OK] codex auth.json 已读取（accessToken ${maskHint(codex.accessToken)}）`);
+  // 凭据来源优先级：环境变量 → Supabase 存储副本（可自动刷新并写回）→ 本地 auth.json
+  const envAccessToken = process.env.CHATGPT_ACCESS_TOKEN?.trim();
+  const envAccountId = process.env.CHATGPT_ACCOUNT_ID?.trim() || null;
+  let stored: StoredChatgptCredential | null = null;
+  let codex: { accessToken: string; accountId: string | null } | null = null;
+
+  if (envAccessToken) {
+    codex = { accessToken: envAccessToken, accountId: envAccountId ?? accessTokenAccountId(envAccessToken) };
+    console.log(`[OK] 使用 CHATGPT_ACCESS_TOKEN 环境变量（plan=${accessTokenPlanType(envAccessToken) ?? "?"}）`);
   } else {
-    console.warn(`[WARN] 未读取到 codex 凭据（${authJsonPath}），将只抓取网页/订阅链路`);
+    try {
+      stored = await loadStoredChatgptCredential(env);
+    } catch (error) {
+      console.warn(`[WARN] 读取 Supabase 存储凭据失败：${error instanceof Error ? error.message : error}`);
+    }
+    if (stored?.credential.accessToken) {
+      codex = {
+        accessToken: stored.credential.accessToken,
+        accountId: stored.credential.accountId ?? accessTokenAccountId(stored.credential.accessToken),
+      };
+      console.log(
+        `[OK] 使用 Supabase 存储凭据（${stored.accountLabel}，plan=${accessTokenPlanType(codex.accessToken) ?? "?"}，accessToken ${maskHint(codex.accessToken)}）`,
+      );
+    } else {
+      const local = readCodexAuthJson(authJsonPath);
+      if (local) {
+        codex = { accessToken: local.accessToken, accountId: local.accountId };
+        console.log(`[OK] codex auth.json 已读取（accessToken ${maskHint(local.accessToken)}）`);
+      } else {
+        console.warn(`[WARN] 未读取到 codex 凭据（${authJsonPath}），将只抓取网页/订阅链路`);
+      }
+    }
   }
 
   const session = await extractSessionToken(false);
@@ -84,38 +140,63 @@ async function main(): Promise<void> {
 
     const payloads: Record<string, unknown> = { capturedAt: new Date().toISOString() };
 
+    const fetchCodexUsage = (token: string, accountId: string | null) =>
+      fetchInPage(
+        session.page,
+        CODEX_USAGE_URL,
+        {
+          Accept: "application/json",
+          Authorization: `Bearer ${token}`,
+          ...(accountId ? { "chatgpt-account-id": accountId } : {}),
+        },
+        // 不带 session cookie：cookie 与 bearer 同时出现会被判 token_expired（实测）
+        "omit",
+      );
+
     if (codex) {
-      const codexResult = await fetchInPage(session.page, CODEX_USAGE_URL, {
-        Accept: "application/json",
-        Authorization: `Bearer ${codex.accessToken}`,
-        ...(codex.accountId ? { "chatgpt-account-id": codex.accountId } : {}),
-      });
+      let codexResult = await fetchCodexUsage(codex.accessToken, codex.accountId);
+      // token 失效（含订阅变更后服务端判废）→ 用存储的 refreshToken 刷新一次并写回
+      if (
+        codexResult &&
+        (codexResult.status === 401 || codexResult.status === 403) &&
+        !codexResult.cfMitigated &&
+        stored?.credential.refreshToken
+      ) {
+        console.log(`[INFO] codex/usage 返回 ${codexResult.status}，用存储的 refreshToken 刷新 ...`);
+        const refreshed = await refreshStoredChatgptCredential(env, stored);
+        if (refreshed) {
+          console.log(`[OK] token 已刷新并写回 Supabase（plan=${refreshed.planType ?? "?"}）`);
+          codex = { accessToken: refreshed.accessToken, accountId: codex.accountId ?? accessTokenAccountId(refreshed.accessToken) };
+          codexResult = await fetchCodexUsage(codex.accessToken, codex.accountId);
+        } else {
+          console.warn("[WARN] 刷新失败（refreshToken 可能已作废），需要重新登录后重试");
+        }
+      }
       console.log(describeFetch("codex/usage", codexResult));
       if (codexResult && codexResult.status >= 200 && codexResult.status < 300 && codexResult.body) {
         payloads.codex = codexResult.body;
+        const body = codexResult.body as { plan_type?: string; rate_limit?: Record<string, unknown> };
+        console.log(`[OK] codex 档位=${body.plan_type ?? "?"}，窗口键=${body.rate_limit ? Object.keys(body.rate_limit).join(",") : "(无)"}`);
       }
     }
 
     if (session.cookieHeader) {
-      const sessionResult = await fetchInPage(session.page, AUTH_SESSION_URL, { Accept: "application/json" });
-      const webToken =
-        sessionResult && typeof (sessionResult.body as { accessToken?: unknown } | null)?.accessToken === "string"
-          ? ((sessionResult.body as { accessToken: string }).accessToken)
-          : null;
-      console.log(describeFetch("auth/session", sessionResult));
-      if (!webToken) {
-        console.warn("[WARN] 未取得网页 accessToken，跳过 rate_limits / accounts/check");
-      } else {
-        const authHeaders = { Accept: "application/json", Authorization: `Bearer ${webToken}` };
-        const rateLimits = await fetchInPage(session.page, WEB_RATE_LIMITS_URL, authHeaders);
-        console.log(describeFetch("rate_limits", rateLimits));
-        if (rateLimits && rateLimits.status >= 200 && rateLimits.status < 300 && rateLimits.body) {
-          payloads.rateLimits = rateLimits.body;
-        }
-        const subscription = await fetchInPage(session.page, SUBSCRIPTION_CHECK_URL, authHeaders);
-        console.log(describeFetch("accounts/check", subscription));
-        if (subscription && subscription.status >= 200 && subscription.status < 300 && subscription.body) {
+      // 网页端点一律 cookie-only（session 换来的 accessToken 已不被 backend-api 接受，实测 401 token_expired）
+      const rateLimits = await fetchInPage(session.page, WEB_RATE_LIMITS_URL, { Accept: "application/json" });
+      console.log(describeFetch("rate_limits", rateLimits));
+      if (rateLimits && rateLimits.status >= 200 && rateLimits.status < 300 && rateLimits.body) {
+        payloads.rateLimits = rateLimits.body;
+      }
+
+      const subscription = await fetchInPage(session.page, SUBSCRIPTION_CHECK_URL, { Accept: "application/json" });
+      console.log(describeFetch("accounts/check(v4)", subscription));
+      if (subscription && subscription.status >= 200 && subscription.status < 300 && subscription.body) {
+        // 访客会话的 accounts/check 会返回 plan_type=guest，不能覆盖真实档位，交由 codex plan_type 兜底
+        const plan = describeSubscriptionPlan(subscription.body);
+        if (plan && plan !== "guest") {
           payloads.subscription = subscription.body;
+        } else {
+          console.log(`[SKIP] accounts/check 档位=${plan ?? "unknown"}（访客/免费会话），不使用其订阅数据`);
         }
       }
     }

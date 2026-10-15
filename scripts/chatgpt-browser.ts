@@ -258,27 +258,45 @@ export async function extractSessionToken(forceRelogin: boolean): Promise<Browse
   }
 }
 
-// 页面内同源 fetch：借浏览器完整指纹与 Profile 中的 cf_clearance 绕开 CF 对纯 fetch 的质询
+// 页面内同源 fetch：借浏览器完整指纹与 Profile 中的 cf_clearance 绕开 CF 对纯 fetch 的质询。
+// credentials 默认 "include"（网页链路需要 session cookie）；Codex 链路必须用 "omit"——
+// 同时携带 session cookie 与 CLI Bearer 会被服务端判为 token_expired（实测 2026-10-15）。
+// SPA 在请求期间可能跳转导致执行上下文销毁（实测），这类错误重试并等待页面稳定。
 export async function fetchInPage(
   page: import("playwright").Page,
   url: string,
   headers?: Record<string, string>,
+  credentials: RequestCredentials = "include",
 ): Promise<{ status: number; cfMitigated: string | null; body: unknown } | null> {
-  return page.evaluate(
-    async ({ url, headers }) => {
-      try {
-        const resp = await fetch(url, { headers, credentials: "include" });
-        let body: unknown = null;
+  const attemptOnce = () =>
+    page.evaluate(
+      async ({ url, headers, credentials }) => {
         try {
-          body = await resp.json();
+          const resp = await fetch(url, { headers, credentials });
+          let body: unknown = null;
+          try {
+            body = await resp.json();
+          } catch {
+            body = null;
+          }
+          return { status: resp.status, cfMitigated: resp.headers.get("cf-mitigated"), body };
         } catch {
-          body = null;
+          return null;
         }
-        return { status: resp.status, cfMitigated: resp.headers.get("cf-mitigated"), body };
-      } catch {
-        return null;
-      }
-    },
-    { url, headers: headers ?? {} },
-  );
+      },
+      { url, headers: headers ?? {}, credentials },
+    );
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await attemptOnce();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const transient = /Execution context was destroyed|Target closed|navigat/i.test(message);
+      if (!transient || attempt === 2) throw error;
+      await page.waitForLoadState("domcontentloaded").catch(() => undefined);
+      await page.waitForTimeout(1_200);
+    }
+  }
+  return null;
 }

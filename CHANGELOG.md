@@ -13,6 +13,19 @@
 ### Changed
 
 - ChatGPT 主指标标签由固定「Codex 5小时」改为首个窗口的 label（免费档为 30 天窗，避免档位错标）。
+- ChatGPT 鉴权语义按实测修正（2026-10-15，Plus 档验证）：`codex/usage` 必须用 Codex Bearer 且**不能**同时带 session cookie（否则被判 `token_expired`）→ 该请求改为 `credentials:"omit"`；网页端点改为 **cookie-only**（session 换来的 accessToken 已不被 backend-api 接受，一律 401）；订阅端点改用 `accounts/check/v4-2023-04-27`；访客/免费会话的订阅数据（`plan_type=guest`）不再写入，避免覆盖真实档位。
+- `parseSubscriptionPayload`：档位优先取 `plan_type`（再退到 `plan`/`subscription_plan`），不再依赖 JSON 键序。
+
+### Added
+
+- 新增 `scripts/chatgpt-credentials.ts`：本机侧凭据工具——从 Supabase 读取 worker 同一份加密凭据、用 refreshToken 刷新并写回、解析 token 内嵌的订阅档位。
+- `scripts/refresh-chatgpt-usage.ts` 凭据来源改为「环境变量 → Supabase 存储副本（可自动刷新写回）→ 本地 `~/.codex/auth.json`」，并在 `codex/usage` 返回 401/403 时自动刷新重试一次；推送时打印档位与窗口键。
+- `scripts/import-chatgpt-credentials.ts` 新增 `--web-only`（只续期网页 session cookie，不要求本地 codex token 有效），且写入前与已存凭据合并（不会抹掉 accessToken / refreshToken / accountId）。
+- `scripts/probe-chatgpt-endpoints.ts --browser` 增加候选端点探测（页面内执行）。（对应上一节记录）
+
+### Fixed
+
+- `scripts/chatgpt-browser.ts` 的 `fetchInPage` 增加「执行上下文被销毁」重试：SPA 在请求期间跳转会让 `page.evaluate` 直接抛错，导致整轮推送失败。
 
 ## [2026-10-14] - ChatGPT 本机推送通道 + 供应商停用控件
 

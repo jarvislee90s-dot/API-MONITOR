@@ -403,6 +403,53 @@ describe("handleIngestChatgpt", () => {
     }
   });
 
+  it("仅推送 v4 accounts/check 订阅 payload（无 codex/rateLimits）→ 200 且落库 plan/续费时间", async () => {
+    // 本机 refresh-chatgpt-usage.ts 的真实推送形态：accounts/check/v4-2023-04-27 原始响应体
+    const v4PlusPayload = {
+      accounts: {
+        default: {
+          account: { plan_type: "plus", plan_display_name: "ChatGPT Plus" },
+          entitlement: {
+            subscription_plan: "chatgptplusplan",
+            has_active_subscription: true,
+            renews_at: "2026-11-01T00:00:00Z",
+            expires_at: null,
+            cancels_at: null,
+          },
+          last_active_subscription: { will_renew: true, purchase_origin_platform: "chatgpt_web" },
+        },
+      },
+      account_ordering: ["default"],
+    };
+
+    const { fetchImpl, writes } = makeSupabaseFetch([chatgptAccountRow]);
+    vi.stubGlobal("fetch", fetchImpl as unknown as typeof fetch);
+    try {
+      const env = makeEnv();
+      const response = await handleIngestChatgpt(
+        makeChatgptRequest({ subscription: v4PlusPayload }),
+        env,
+      );
+      const payload = (await response.json()) as any;
+
+      // 无窗口但订阅档位有效：应入库而非 400
+      expect(response.status).toBe(200);
+      expect(payload.data).toMatchObject({
+        providerId: "chatgpt",
+        status: "partial",
+        windows: 0,
+        plan: "plus",
+      });
+
+      const usageWrite = writes.find((w) => w.path === "/rest/v1/usage_snapshots");
+      expect(usageWrite).toBeTruthy();
+      expect(usageWrite!.body.payload.metrics.plan).toBe("plus");
+      expect(usageWrite!.body.payload.metrics.planRenewAt).toBe("2026-11-01T00:00:00.000Z");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("parses a rateLimits payload into web windows with direct fetch method", async () => {
     const { fetchImpl, writes } = makeSupabaseFetch([chatgptAccountRow]);
     vi.stubGlobal("fetch", fetchImpl as unknown as typeof fetch);

@@ -14,6 +14,8 @@
  *   node --experimental-strip-types scripts/import-chatgpt-credentials.ts [--skip-browser] [--auth-json <路径>]
  *
  *   --relogin：进入浏览器后先清除 Profile 中的旧 cookie，再走登录检测/等待（换账号或 cookie 污染时使用）。
+ *   --web-only：只更新网页 session cookie（不读取/校验本地 codex token），用于登录态或订阅档位变化后的续期；
+ *               写入时与 Supabase 已存凭据合并，不会抹掉 accessToken / refreshToken / accountId。
  *
  * 网络与凭据说明：
  *   - 检测到 Windows 系统代理（或 HTTPS_PROXY）时自动以 NODE_USE_ENV_PROXY=1 重启自身，使 Node fetch 走代理；
@@ -28,6 +30,7 @@
 import { resolve } from "node:path";
 // 浏览器会话 / 代理自适配 / 页面内 fetch 等共享工具已抽到 chatgpt-browser.ts（与用量推送脚本共用）
 import {
+  AUTH_SESSION_URL,
   CHATGPT_HOME,
   CODEX_USAGE_URL,
   ensureProxyOrRespawn,
@@ -167,8 +170,26 @@ async function upsertChatgptAccountCredentials(
     return;
   }
 
-  // 3. 加密凭据写入 provider_account_credentials（on_conflict=provider_account_id 覆盖）
-  const encrypted = await encryptPayload(credentials, encryptionKey);
+  // 3. 与已存凭据合并后再加密写入：只更新部分字段（如仅续期 session cookie）时不能抹掉其它字段
+  let merged: Record<string, string> = { ...credentials };
+  try {
+    const { loadStoredChatgptCredential } = await import("./chatgpt-credentials.ts");
+    const stored = await loadStoredChatgptCredential(env);
+    if (stored?.credential) {
+      merged = {
+        ...(Object.fromEntries(
+          Object.entries(stored.credential).filter(([, value]) => typeof value === "string" && value.length > 0),
+        ) as Record<string, string>),
+        ...credentials,
+      };
+      const kept = Object.keys(merged).filter((key) => !(key in credentials));
+      if (kept.length > 0) console.log(`[INFO] 合并已存凭据，保留字段: ${kept.join(", ")}`);
+    }
+  } catch (error) {
+    console.warn(`[WARN] 读取已存凭据失败，按新建写入：${error instanceof Error ? error.message : error}`);
+  }
+
+  const encrypted = await encryptPayload(merged, encryptionKey);
   const credUrl = new URL("/rest/v1/provider_account_credentials", supabaseUrl);
   credUrl.searchParams.set("on_conflict", "provider_account_id");
   const credResp = await fetch(credUrl, {
@@ -190,7 +211,7 @@ async function upsertChatgptAccountCredentials(
   console.log("[OK] 加密凭据已写入 provider_account_credentials");
 
   // 4. 同步脱敏 hint 与账号状态（凭据写入成功才把账号标为 ready）
-  const hint = Object.fromEntries(Object.entries(credentials).map(([key, value]) => [key, maskHint(value)]));
+  const hint = Object.fromEntries(Object.entries(merged).map(([key, value]) => [key, maskHint(value)]));
   const patchResp = await fetch(new URL(`/rest/v1/provider_accounts?id=eq.${accountId}`, supabaseUrl), {
     method: "PATCH",
     headers: { ...headers, Prefer: "return=minimal" },
@@ -204,6 +225,9 @@ async function main(): Promise<void> {
   const checkOnly = args.includes("--check");
   const skipBrowser = args.includes("--skip-browser");
   const forceRelogin = args.includes("--relogin");
+  // --web-only：只续期网页 session cookie（换账号 / 让订阅档位与续费日期可见），
+  // 不校验本地 codex token —— 本地 token 失效（如订阅变更被判废）时也能用
+  const webOnly = args.includes("--web-only");
   const authJsonIndex = args.indexOf("--auth-json");
   const authJsonPath =
     authJsonIndex >= 0 && args[authJsonIndex + 1]
@@ -212,12 +236,16 @@ async function main(): Promise<void> {
 
   // --check 干跑只读取与校验，不写库，因此不加载 .env（loadEnv 延迟到真正写入前）
 
-  const codex = readCodexAuthJson(authJsonPath);
-  if (!codex) {
+  const codex = webOnly ? null : readCodexAuthJson(authJsonPath);
+  if (!webOnly && !codex) {
     console.error(`[FAIL] 未读取到 Codex 凭据：${authJsonPath} 缺少 tokens.access_token（请先在 Codex CLI 登录）`);
     process.exit(1);
   }
-  console.log(`[OK] auth.json 已读取（accessToken ${maskHint(codex.accessToken)}）`);
+  if (codex) {
+    console.log(`[OK] auth.json 已读取（accessToken ${maskHint(codex.accessToken)}）`);
+  } else {
+    console.log("[INFO] --web-only：只更新网页 session cookie，不读取本地 codex token");
+  }
 
   let browser: Awaited<ReturnType<typeof extractSessionToken>> = null;
   let sessionToken: string | null = null;
@@ -237,19 +265,31 @@ async function main(): Promise<void> {
   }
 
   try {
-    console.log("[INFO] 校验 codex token ...");
-    const validation = await validateCodexToken(codex, browser?.page);
-    if (!validation.ok) {
-      console.error(`[FAIL] codex token 校验失败：${validation.error}`);
-      process.exitCode = 1;
-      return;
+    const credentials: Record<string, string> = {};
+    if (codex) {
+      console.log("[INFO] 校验 codex token ...");
+      const validation = await validateCodexToken(codex, browser?.page);
+      if (!validation.ok) {
+        console.error(`[FAIL] codex token 校验失败：${validation.error}`);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(`[OK] codex rate_limits HTTP ${validation.status}`);
+      credentials.accessToken = codex.accessToken;
+      if (codex.refreshToken) credentials.refreshToken = codex.refreshToken;
+      if (codex.accountId) credentials.accountId = codex.accountId;
     }
-    console.log(`[OK] codex rate_limits HTTP ${validation.status}`);
-
-    const credentials: Record<string, string> = { accessToken: codex.accessToken };
-    if (codex.refreshToken) credentials.refreshToken = codex.refreshToken;
-    if (codex.accountId) credentials.accountId = codex.accountId;
     if (sessionToken) credentials.sessionToken = sessionToken;
+    if (sessionToken && webOnly) {
+      // 仅网页会话续期：至少要确认服务端认可该 cookie，避免写入死会话
+      const sessionResult = await fetchInPage(browser!.page, AUTH_SESSION_URL, { Accept: "application/json" });
+      if (sessionResult?.status !== 200) {
+        console.error(`[FAIL] 网页 session 校验失败：HTTP ${sessionResult?.status ?? "(failed)"}`);
+        process.exitCode = 1;
+        return;
+      }
+      console.log("[OK] 网页 session 已获服务端认可");
+    }
 
     if (checkOnly) {
       console.log("\n[--check] 干跑结束，未写入任何数据。将导入的字段：");
