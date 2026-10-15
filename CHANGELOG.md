@@ -12,6 +12,7 @@
 
 ### Added
 
+- 一键刷新脚本 `refresh-enabled.bat`（+ `scripts/refresh-enabled-providers.ts`）：先列出「智谱 / Ollama / ChatGPT(Codex) / OpenCode Go」谁在看板显示（供应商启用 且 至少一个账号设了首页显示），再依次刷新显示中的那些，跳过项给出原因；`--list` 只看状态。README 增补对应小节。
 - ChatGPT 新增 `--local` 本地同步模式：直接读 Codex CLI/IDE 的会话日志（`~/.codex/sessions/**/rollout-*.jsonl` 的 `payload.rate_limits`，即 CLI「剩余用量」面板同源数据）推送 5 小时/每周额度与档位，**免浏览器、免代理、秒级**；订阅与续费时间沿用库内最近成功快照。适合挂任务计划做周期同步。
 
 ### Fixed
