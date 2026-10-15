@@ -142,6 +142,8 @@ flowchart TB
 .\refresh-enabled.bat --list     # 只看状态，不刷新
 ```
 
+只刷 ChatGPT 的话，双击根目录的 **`refresh-chatgpt.bat`**：读 Codex 本地会话日志推送额度，**免代理、免浏览器、免验证码，通常 2 秒**内完成（适合每次用完 Codex 后点一下，让看板与 CLI「剩余用量」保持一致）。
+
 各供应商的刷新动作：
 
 | 供应商 | 刷新动作 | 说明 |
@@ -155,6 +157,7 @@ flowchart TB
 
 - 某供应商显示「不显示」时会被跳过。例如 OpenCode Go 若两个账号都没设首页显示，看板上就不会出现它的卡片，脚本也不会刷新它——需要的账号去设置页（`#/settings`）打开首页显示即可。
 - ChatGPT 用的是 `--local`（与 CLI「剩余用量」同源）；要同时刷新订阅档位与续费日期（需要代理与网页会话），单独跑一次 `node --experimental-strip-types scripts/refresh-chatgpt-usage.ts`。
+- 看板上的 ChatGPT 额度**只能与「最后一次推送」一样新**：云端取不到 chatgpt.com 数据，所以没有本地推送就不会更新（卡片「推送时间」即该快照的采集时间）。想让它自动保持最新，可把 `refresh-chatgpt.bat`（或 `refresh-chatgpt-usage.ts --local`）挂到 Windows 任务计划程序，例如每 10 分钟一次。
 - 刷新失败的项不影响看板：会继续显示最近一次成功快照。
 
 #### 智谱 BigModel Cookie 刷新
