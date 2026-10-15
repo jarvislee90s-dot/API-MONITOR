@@ -40,6 +40,8 @@ import {
   loadEnv,
   maskHint,
   readCodexAuthJson,
+  SUBSCRIPTION_CHECK_V4_URL,
+  parseWebPlanType,
 } from "./chatgpt-browser.ts"; // Node 类型剥离模式需要显式扩展名（scripts/ 不在 tsc 覆盖范围）
 import {
   accessTokenAccountId,
@@ -51,7 +53,7 @@ import {
 
 const WEB_RATE_LIMITS_URL = "https://chatgpt.com/backend-api/rate_limits";
 // 实测 cookie-only 下 v4 端点返回 accounts/entitlement（含 subscription_plan / renews_at），旧路径 405
-const SUBSCRIPTION_CHECK_URL = "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27";
+const SUBSCRIPTION_CHECK_URL = SUBSCRIPTION_CHECK_V4_URL;
 
 type FetchedPayload = { status: number; cfMitigated: string | null; body: unknown };
 
@@ -61,20 +63,6 @@ function describeFetch(label: string, result: FetchedPayload | null): string {
   if (result.status === 401 || result.status === 403) return `${label}: HTTP ${result.status}（登录态/token 失效）`;
   if (result.status < 200 || result.status >= 300) return `${label}: HTTP ${result.status}`;
   return `${label}: HTTP ${result.status}${result.body === null ? "（响应非 JSON）" : ""}`;
-}
-
-// accounts/check(v4) 档位：accounts.<id>.account.plan_type（plus/guest…）；缺失时退到 entitlement.subscription_plan
-function describeSubscriptionPlan(body: unknown): string | null {
-  if (!body || typeof body !== "object") return null;
-  const accounts = (body as { accounts?: Record<string, unknown> }).accounts;
-  if (!accounts || typeof accounts !== "object") return null;
-  const first = Object.values(accounts)[0];
-  if (!first || typeof first !== "object") return null;
-  const account = (first as { account?: Record<string, unknown> }).account ?? {};
-  const entitlement = (first as { entitlement?: Record<string, unknown> }).entitlement ?? {};
-  if (typeof account.plan_type === "string") return account.plan_type.toLowerCase();
-  if (typeof entitlement.subscription_plan === "string") return entitlement.subscription_plan.toLowerCase();
-  return null;
 }
 
 async function main(): Promise<void> {
@@ -192,7 +180,8 @@ async function main(): Promise<void> {
       console.log(describeFetch("accounts/check(v4)", subscription));
       if (subscription && subscription.status >= 200 && subscription.status < 300 && subscription.body) {
         // 访客会话的 accounts/check 会返回 plan_type=guest，不能覆盖真实档位，交由 codex plan_type 兜底
-        const plan = describeSubscriptionPlan(subscription.body);
+        const plan = parseWebPlanType(subscription.body);
+
         if (plan && plan !== "guest") {
           payloads.subscription = subscription.body;
         } else {
