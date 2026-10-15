@@ -146,6 +146,14 @@ Edge Profile cookie ┴→ import-chatgpt-   POST /api/refresh ──→ DO 节�
 - **token 失效与刷新**：订阅档位变化后旧 token 即使未到 `exp` 也被判废；刷新只能在本机（`auth.openai.com/oauth/token` 走本机代理可用，CF 出口被 403 封锁）。因此 `scripts/chatgpt-credentials.ts` 让推送脚本直接从 Supabase 读取 worker 侧同一份加密凭据，401 时自动刷新并写回，不再依赖本地 `~/.codex/auth.json`。
 - **网页对话额度仍无数据源**：`rate_limits` 在免费与 Plus 档均 404；卡片继续显示占位说明行。
 
+**2026-10-15 第四轮实测结论（真实 Plus 会话下定论，修正第三轮误判）**：
+- 第三轮"cookie-only 可用、session accessToken 一律 token_expired"的结论**只对访客会话成立**（当时 Profile 是访客，其 token 自然被拒）。
+  **真实账号会话下**：`/api/auth/session` 返回 `user.email` 与 `account.planType`（本次 plus，account id 与 Codex 凭据一致），该 `accessToken` 作为 Bearer **有效**；
+  但网页/订阅端点必须 **cookie + Bearer 同时带**：cookie-only 退化成访客视图（`accounts/check` 返回 guest、`renews_at=null`），bearer-only 直接 403。
+- **续费日期已接入**：`accounts/check/v4-2023-04-27`（cookie+Bearer）→ `accounts.<id>.entitlement.renews_at`（2026-11-15T05:15:52+00:00），看板显示「续费日期 11月15日 13:15」。
+- **登录态判定以 `/api/auth/session` 为准**（`user.email` + `account.planType`）：`accounts/check` 的 cookie-only 视图不可用于判断登录态，否则会出现"登录成功却永远等待"的假象。
+- **网页对话额度无数据源（定论）**：真实 Plus 会话下 `rate_limits` / `usage_limits` 依旧 404（`conversation/limit` 400），卡片保留占位说明行。
+
 **第一期终审沉淀的技术债（二期候选，按优先级）**：
 1. chatgpt partial 但无缺失窗口（窗口全在、仅订阅降级）时不满足 staleWindowKeys 豁免条件，会被整卡回退用旧 ready 卡替换、遮蔽实取新值——豁免条件可放宽为「chatgpt 且 partial 且 windows 非空」（`worker/index.ts` applyLatestReadyFallback）。
 2. handleRefresh 无账号分支（入口型 env 配置）绕过 postProcessSnapshots，不享受桶级补齐。

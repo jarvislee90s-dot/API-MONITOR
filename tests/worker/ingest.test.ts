@@ -450,6 +450,64 @@ describe("handleIngestChatgpt", () => {
     }
   });
 
+  it("仅推送真实 Plus 会话的 v4 订阅 payload（uuid 与 default 并存）→ 200 且落库 plan/+00:00 续费时间", async () => {
+    // 实测（2026-10-15）cookie+session Bearer 请求 accounts/check/v4-2023-04-27 的真实响应：
+    // accounts 下同时存在账号 uuid 条目与 default 条目，renews_at 为带 +00:00 偏移的字符串，
+    // 落库快照须取 plan_type=plus 并把续费时间标准化为 UTC ISO
+    const realPlusPayload = {
+      accounts: {
+        "f8346651-cc24-407d-9005-24872642799b": {
+          account: { plan_type: "plus", plan_display_name: "ChatGPT Plus" },
+          entitlement: {
+            subscription_plan: "chatgptplusplan",
+            has_active_subscription: true,
+            renews_at: "2026-11-15T05:15:52+00:00",
+            expires_at: "2026-11-15T05:15:52+00:00",
+            is_delinquent: false,
+          },
+          last_active_subscription: { will_renew: true, purchase_origin_platform: "chatgpt_web" },
+        },
+        default: {
+          account: { plan_type: "plus", plan_display_name: "ChatGPT Plus" },
+          entitlement: {
+            subscription_plan: "chatgptplusplan",
+            has_active_subscription: true,
+            renews_at: "2026-11-15T05:15:52+00:00",
+          },
+        },
+      },
+      account_ordering: ["f8346651-cc24-407d-9005-24872642799b", "default"],
+    };
+
+    const { fetchImpl, writes } = makeSupabaseFetch([chatgptAccountRow]);
+    vi.stubGlobal("fetch", fetchImpl as unknown as typeof fetch);
+    try {
+      const env = makeEnv();
+      const response = await handleIngestChatgpt(
+        makeChatgptRequest({ subscription: realPlusPayload }),
+        env,
+      );
+      const payload = (await response.json()) as any;
+
+      // 无窗口但订阅档位有效：应入库而非 400
+      expect(response.status).toBe(200);
+      expect(payload.ok).toBe(true);
+      expect(payload.data).toMatchObject({
+        providerId: "chatgpt",
+        status: "partial",
+        windows: 0,
+        plan: "plus",
+      });
+
+      const usageWrite = writes.find((w) => w.path === "/rest/v1/usage_snapshots");
+      expect(usageWrite).toBeTruthy();
+      expect(usageWrite!.body.payload.metrics.plan).toBe("plus");
+      expect(usageWrite!.body.payload.metrics.planRenewAt).toBe("2026-11-15T05:15:52.000Z");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("parses a rateLimits payload into web windows with direct fetch method", async () => {
     const { fetchImpl, writes } = makeSupabaseFetch([chatgptAccountRow]);
     vi.stubGlobal("fetch", fetchImpl as unknown as typeof fetch);

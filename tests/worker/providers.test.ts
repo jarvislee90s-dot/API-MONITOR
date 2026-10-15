@@ -2489,4 +2489,37 @@ describe("chatgpt adapter (网页/订阅链路)", () => {
 
     expect(parsed).toEqual({ plan: "plus", planRenewAt: "2026-11-01T00:00:00.000Z" });
   });
+
+  it("真实 Plus 会话的 v4 结构（uuid 与 default 条目并存）→ plan=plus、+00:00 偏移时间标准化", () => {
+    // 实测（2026-10-15）cookie+session Bearer 请求 accounts/check/v4-2023-04-27 的真实响应：
+    // accounts 下同时存在账号 uuid 条目与 default 条目；遍历多条 accounts 时必须先命中
+    // account.plan_type（"plus"）而非 entitlement.subscription_plan（"chatgptplusplan"）；
+    // renews_at 为带 +00:00 偏移的字符串，须解析并标准化为 UTC ISO
+    const parsed = parseSubscriptionPayload({
+      accounts: {
+        "f8346651-cc24-407d-9005-24872642799b": {
+          account: { plan_type: "plus", plan_display_name: "ChatGPT Plus" },
+          entitlement: {
+            subscription_plan: "chatgptplusplan",
+            has_active_subscription: true,
+            renews_at: "2026-11-15T05:15:52+00:00",
+            expires_at: "2026-11-15T05:15:52+00:00",
+            is_delinquent: false,
+          },
+          last_active_subscription: { will_renew: true, purchase_origin_platform: "chatgpt_web" },
+        },
+        default: {
+          account: { plan_type: "plus", plan_display_name: "ChatGPT Plus" },
+          entitlement: {
+            subscription_plan: "chatgptplusplan",
+            has_active_subscription: true,
+            renews_at: "2026-11-15T05:15:52+00:00",
+          },
+        },
+      },
+      account_ordering: ["f8346651-cc24-407d-9005-24872642799b", "default"],
+    });
+
+    expect(parsed).toEqual({ plan: "plus", planRenewAt: "2026-11-15T05:15:52.000Z" });
+  });
 });
