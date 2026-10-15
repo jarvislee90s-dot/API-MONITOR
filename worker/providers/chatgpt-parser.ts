@@ -15,7 +15,10 @@ function pickNumber(source: Record<string, unknown>, keys: string[]): number | n
 // 小数（0~1）按百分比放大，其余视为已是百分比值
 function toPercentValue(value: number | null): number | null {
   if (value === null) return null;
-  const percent = value > 0 && value <= 1 ? value * 100 : value;
+  // 小数（0~1 且非整数）按比例放大成百分比；整数 1 视作「1%」而不是 100%
+  // —— 实测 Codex CLI 会话日志会给出 used_percent: 1 表示 1%，旧规则会误判成 100%
+  const isFraction = value > 0 && value < 1 && !Number.isInteger(value);
+  const percent = isFraction ? value * 100 : value;
   return Math.round(percent * 10) / 10;
 }
 

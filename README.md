@@ -232,6 +232,19 @@ node --experimental-strip-types scripts/refresh-chatgpt-usage.ts
 
 看板表现：ChatGPT 卡按**两个独立额度桶**分开展示——「Codex 编码额度」（Codex CLI/IDE 的 5 小时 / 每周 / 30 天窗口）与「网页对话额度」（网页聊天的 5 小时模型组窗口），两桶独立计量，Codex 用尽不影响网页聊天。网页桶暂无数据时卡片会显示占位说明行（该接口对免费与 Plus 会话实测均为 404，属 OpenAI 未对外提供）。「抓取方式」显示**本机推送**，并附带「推送时间」（数据新鲜度）；卡片数据来自最近一次成功推送（云端刷新失败时回退到该快照，摘要会注明"使用最近成功快照"）。
 
+**更快的一条路：`--local`（推荐日常使用）**
+
+Codex CLI/IDE 每次请求都会把服务端返回的额度写进本地会话日志（`~/.codex/sessions/<年>/<月>/<日>/rollout-*.jsonl` 的 `payload.rate_limits`），这正是 CLI「剩余用量」面板显示的数据。本地模式直接读它，**免浏览器、免代理、秒级完成**：
+
+```powershell
+node --experimental-strip-types scripts/refresh-chatgpt-usage.ts --local
+```
+
+- 额度窗口（5 小时 / 每周）与档位取自日志，采集时间也用日志时间（卡片「推送时间」即 Codex 观测到该额度的时间）；
+- 订阅档位与续费时间沿用库里最近一次成功快照（免网络），因此 `--local` 不需要开代理；
+- 与 CLI 面板一致：实测 `backend-api/codex/usage` 的 `used_percent` 与 CLI/日志并不相同（2026-10-15：API 报 0，CLI 报 5），所以看板对齐 CLI 时以日志为准；
+- 适合挂 Windows 任务计划程序做周期同步（无窗口、无网络依赖）。
+
 注意事项：
 
 - `.env` 需要 `INGEST_API_KEY` 与 `APIMONITOR_INGEST_URL`（与其它 refresh 脚本共用）。

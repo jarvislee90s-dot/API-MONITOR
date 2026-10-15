@@ -1621,6 +1621,23 @@ describe("chatgpt adapter (codex 链路)", () => {
     expect(windows[1]).toMatchObject({ percentUsed: 3 });
   });
 
+  // 守卫：Codex CLI 会话日志实测 used_percent: 1 表示 1%，整数不得按小数启发式放大成 100%
+  it("整数 used_percent 不按小数放大：1 即 1%、0 即 0%（Codex CLI 会话日志实测形态）", () => {
+    const windows = parseCodexWindows(
+      {
+        rate_limit: {
+          primary_window: { used_percent: 1, limit_window_seconds: 18000, reset_at: 1792062872 },
+          secondary_window: { used_percent: 0, limit_window_seconds: 604800, reset_at: 1792649672 },
+        },
+      },
+      NOW,
+    );
+
+    expect(windows.map((w) => w.key)).toEqual(["codex_5h", "codex_weekly"]);
+    expect(windows[0]).toMatchObject({ percentUsed: 1, percentRemaining: 99 });
+    expect(windows[1]).toMatchObject({ percentUsed: 0, percentRemaining: 100 });
+  });
+
   it("codex 窗口带 meta.bucket=codex 桶标记（实测 rate_limit.primary/secondary_window 结构）", () => {
     // 前端据 meta.bucket 区分「Codex 编码额度」与「网页对话额度」两个独立计量桶
     const windows = parseCodexWindows(
@@ -2151,6 +2168,26 @@ describe("chatgpt adapter (网页/订阅链路)", () => {
       percentUsed: 40,
       resetAt: "2026-10-14T00:15:00.000Z",
     });
+  });
+
+  it("web 分组形态：0~1 之间的小数（0.25）按比例放大为 25%", () => {
+    const windows = parseWebRateLimitWindows(
+      [{ slug: "gpt_5_high", used_percent: 0.25, resets_in_seconds: 900 }],
+      NOW,
+    );
+
+    expect(windows.map((w) => w.key)).toEqual(["web_5h_gpt_5_high"]);
+    expect(windows[0]).toMatchObject({ percentUsed: 25, percentRemaining: 75 });
+  });
+
+  it("web 分组形态：整数（2）不放大，保持 2%", () => {
+    const windows = parseWebRateLimitWindows(
+      [{ slug: "gpt_5_high", used_percent: 2, resets_in_seconds: 900 }],
+      NOW,
+    );
+
+    expect(windows.map((w) => w.key)).toEqual(["web_5h_gpt_5_high"]);
+    expect(windows[0]).toMatchObject({ percentUsed: 2, percentRemaining: 98 });
   });
 
   it("unwraps a rate_limits wrapper object before parsing group windows", () => {
