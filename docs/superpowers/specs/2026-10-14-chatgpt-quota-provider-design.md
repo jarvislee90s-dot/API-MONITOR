@@ -139,6 +139,13 @@ Edge Profile cookie ┴→ import-chatgpt-   POST /api/refresh ──→ DO 节�
 - 网页桶无窗口时（免费档 `rate_limits` 返回 404）卡片追加**占位说明行**：「与 Codex 编码额度独立计量，Codex 用尽不影响网页聊天；本档位接口暂未提供该额度数据（返回 404）」，避免把 Codex 用尽误读成「ChatGPT 没额度了」。占位行不参与 trend、不画进度条；完全没有窗口时保持通用空态文案。
 - 免费档「网页对话额度」是否存在其它数据源仍未确认：候选端点（`accounts/check/v4-2023-04-27`、`models`、`me`、`settings/user`、`conversation/limit`、`usage_limits` 等）探测已加入 `scripts/probe-chatgpt-endpoints.ts --browser`（需本机代理与已登录 Profile 页面内执行），查到后按同一分桶链路接入。
 
+**2026-10-15 第三轮实测结论（用户订阅 Plus 后验证）**：
+- **档位确认**：刷新后的 Codex token 内嵌 `chatgpt_plan_type: "plus"`；`codex/usage` 返回 `plan_type: "plus"` + `rate_limit.primary_window`（`limit_window_seconds=18000`，5 小时）+ `secondary_window`（`604800`，每周），两个窗口 `used_percent: 0`；另有 `model_usage`、`credits`、`code_review_rate_limit`、`spend_control` 等未接入字段（二期可按需扩展）。
+- **鉴权语义变化（重要）**：`/api/auth/session` 仍返回 200 与 accessToken，但该 token 用作 Bearer 时一律 401 `token_expired`；**网页端点改 cookie-only 可用**（`/backend-api/me`、`/models`、`accounts/check/v4-2023-04-27` 均 200，`settings/user` 需 access token 仍 401）。`codex/usage` 必须用 Codex Bearer，且**不能同时带 session cookie**（否则同样被判 `token_expired`）→ 本机脚本该请求用 `credentials:"omit"`。
+- **订阅档位与续费日期来源**：`accounts/check/v4-2023-04-27` 的 `accounts.<id>.account.plan_type` + `entitlement.{subscription_plan,has_active_subscription,renews_at}`；访客会话返回 `plan_type=guest`，脚本侧已跳过、不写入（避免覆盖真实档位）。续费日期需要项目 Profile 用真实账号登录（`import-chatgpt-credentials.ts --relogin --web-only`）。
+- **token 失效与刷新**：订阅档位变化后旧 token 即使未到 `exp` 也被判废；刷新只能在本机（`auth.openai.com/oauth/token` 走本机代理可用，CF 出口被 403 封锁）。因此 `scripts/chatgpt-credentials.ts` 让推送脚本直接从 Supabase 读取 worker 侧同一份加密凭据，401 时自动刷新并写回，不再依赖本地 `~/.codex/auth.json`。
+- **网页对话额度仍无数据源**：`rate_limits` 在免费与 Plus 档均 404；卡片继续显示占位说明行。
+
 **第一期终审沉淀的技术债（二期候选，按优先级）**：
 1. chatgpt partial 但无缺失窗口（窗口全在、仅订阅降级）时不满足 staleWindowKeys 豁免条件，会被整卡回退用旧 ready 卡替换、遮蔽实取新值——豁免条件可放宽为「chatgpt 且 partial 且 windows 非空」（`worker/index.ts` applyLatestReadyFallback）。
 2. handleRefresh 无账号分支（入口型 env 配置）绕过 postProcessSnapshots，不享受桶级补齐。

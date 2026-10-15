@@ -16,6 +16,7 @@ import {
   isTrustedChatgptUrl,
   mergeChatgptBuckets,
   parseCodexWindows,
+  parseSubscriptionPayload,
   parseWebRateLimitWindows,
 } from "../../worker/providers/chatgpt";
 
@@ -2424,5 +2425,68 @@ describe("chatgpt adapter (网页/订阅链路)", () => {
       webFetchMethod: "direct",
     });
     expect(result.snapshot.summary).toContain("订阅档位 plus");
+  });
+
+  // 实测（2026-10-15）cookie-only 请求 accounts/check/v4-2023-04-27 的真实结构：
+  // plan 在 accounts.<id>.account.plan_type，续费时间在 accounts.<id>.entitlement.renews_at
+  const v4SubscriptionPlusPayload = {
+    accounts: {
+      default: {
+        account: { plan_type: "plus", plan_display_name: "ChatGPT Plus" },
+        entitlement: {
+          subscription_plan: "chatgptplusplan",
+          has_active_subscription: true,
+          renews_at: "2026-11-01T00:00:00Z",
+          expires_at: null,
+          cancels_at: null,
+        },
+        last_active_subscription: { will_renew: true, purchase_origin_platform: "chatgpt_web" },
+      },
+    },
+    account_ordering: ["default"],
+  };
+
+  it("parseSubscriptionPayload 解析 v4 accounts/check 的 plus 结构 → plan=plus、续费时间取 renews_at", () => {
+    // 关键回归点：深度查找必须先命中 account.plan_type（"plus"），
+    // 而不是后出现的 entitlement.subscription_plan（"chatgptplusplan"）
+    const parsed = parseSubscriptionPayload(v4SubscriptionPlusPayload);
+
+    expect(parsed).toEqual({ plan: "plus", planRenewAt: "2026-11-01T00:00:00.000Z" });
+  });
+
+  it("parseSubscriptionPayload 解析 v4 访客结构 → plan=guest、renews_at 为 null 时 planRenewAt=null", () => {
+    // 访客/未订阅会话：plan_type=guest、subscription_plan=chatgptguestplan、renews_at=null
+    const parsed = parseSubscriptionPayload({
+      accounts: {
+        default: {
+          account: { plan_type: "guest", plan_display_name: null },
+          entitlement: {
+            subscription_plan: "chatgptguestplan",
+            has_active_subscription: false,
+            renews_at: null,
+            expires_at: null,
+            cancels_at: null,
+          },
+        },
+      },
+      account_ordering: ["default"],
+    });
+
+    expect(parsed).toEqual({ plan: "guest", planRenewAt: null });
+  });
+
+  it("v4 结构键序反转（entitlement 在 account 前）仍取 plan_type 而非 subscription_plan", () => {
+    // 守卫：plan_type 匹配优先于 subscription_plan，不得依赖 JSON 键序；
+    // 若回退成单趟深度查找，此键序下会误取 entitlement.subscription_plan = "chatgptplusplan"
+    const parsed = parseSubscriptionPayload({
+      accounts: {
+        default: {
+          entitlement: { subscription_plan: "chatgptplusplan", renews_at: "2026-11-01T00:00:00Z" },
+          account: { plan_type: "plus" },
+        },
+      },
+    });
+
+    expect(parsed).toEqual({ plan: "plus", planRenewAt: "2026-11-01T00:00:00.000Z" });
   });
 });

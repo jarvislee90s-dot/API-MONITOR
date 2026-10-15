@@ -280,7 +280,12 @@ export function parseWebRateLimitWindows(payload: unknown, now: Date): ProviderW
 export function parseSubscriptionPayload(
   payload: unknown,
 ): { plan: string; planRenewAt: string | null } | null {
-  const plan = deepFindString(payload, /^(plan_type|plantype|plan|subscription_plan)$/i);
+  // plan_type 优先于 subscription_plan：v4 accounts/check 里两者并存
+  // （account.plan_type="plus" 与 entitlement.subscription_plan="chatgptplusplan"），
+  // 分开匹配避免依赖 JSON 键序（entitlement 若排在 account 前会误取到后者）
+  const plan =
+    deepFindString(payload, /^(plan_type|plantype)$/i) ??
+    deepFindString(payload, /^(plan|subscription_plan)$/i);
   if (!plan) return null;
   const renewRaw = deepFindString(
     payload,
