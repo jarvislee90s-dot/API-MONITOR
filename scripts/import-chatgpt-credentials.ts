@@ -39,6 +39,7 @@ import {
   loadEnv,
   maskHint,
   readCodexAuthJson,
+  readWebPlanType,
 } from "./chatgpt-browser.ts"; // Node 类型剥离模式需要显式扩展名（scripts/ 不在 tsc 覆盖范围）
 
 // 校验 codex token：优先在浏览器页面内同源请求（绕 CF 质询）；--skip-browser 时退回纯 fetch
@@ -255,7 +256,8 @@ async function main(): Promise<void> {
     }
     console.warn("[WARN] --skip-browser：跳过网页 session cookie 提取（codex 校验退回直连 fetch，可能被 CF 质询拦截）");
   } else {
-    browser = await extractSessionToken(forceRelogin);
+    // 要求真实账号会话：访客会话（plan=guest）拿不到订阅档位与续费日期，等于没续期
+    browser = await extractSessionToken(forceRelogin, { requireRealAccount: true });
     sessionToken = browser?.cookieHeader ?? null;
     if (sessionToken) {
       console.log(`[OK] session cookie 已提取并获服务端认可（${maskHint(sessionToken)}，共 ${sessionToken.length} 字符）`);
@@ -281,14 +283,16 @@ async function main(): Promise<void> {
     }
     if (sessionToken) credentials.sessionToken = sessionToken;
     if (sessionToken && webOnly) {
-      // 仅网页会话续期：至少要确认服务端认可该 cookie，避免写入死会话
-      const sessionResult = await fetchInPage(browser!.page, AUTH_SESSION_URL, { Accept: "application/json" });
-      if (sessionResult?.status !== 200) {
-        console.error(`[FAIL] 网页 session 校验失败：HTTP ${sessionResult?.status ?? "(failed)"}`);
+      // 仅网页会话续期：必须确认是真实账号会话（访客会话同样 200，但读不到订阅/额度）
+      const plan = await readWebPlanType(browser!.page);
+      if (plan === null || plan === "guest") {
+        console.error(
+          `[FAIL] 当前仍是访客会话（plan=${plan ?? "unknown"}），未写入。请在脚本打开的浏览器窗口里用 Google 登录，登录成功后脚本会自动继续。`,
+        );
         process.exitCode = 1;
         return;
       }
-      console.log("[OK] 网页 session 已获服务端认可");
+      console.log(`[OK] 网页会话已获服务端认可（plan=${plan}）`);
     }
 
     if (checkOnly) {

@@ -22,7 +22,8 @@ export const PROFILE_DIR = resolve(process.cwd(), "output/chatgpt-browser-profil
 export const CHATGPT_HOME = "https://chatgpt.com";
 export const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/codex/usage";
 export const AUTH_SESSION_URL = "https://chatgpt.com/api/auth/session";
-export const LOGIN_WAIT_MS = 300_000;
+// 等待人工登录的时长；可用 CHATGPT_LOGIN_WAIT_MS 覆盖（自动化/自测场景）
+export const LOGIN_WAIT_MS = Number(process.env.CHATGPT_LOGIN_WAIT_MS ?? 300_000);
 // 与真实浏览器一致的 UA，避免服务端接口按自动化 UA 拒绝
 export const BROWSER_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -184,6 +185,29 @@ export function buildSessionCookieHeader(cookies: Array<{ name: string; value: s
   return parts.map((cookie) => `${cookie.name}=${cookie.value}`).join("; ");
 }
 
+export const SUBSCRIPTION_CHECK_V4_URL = "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27";
+
+// v4 accounts/check 响应体 → 档位：accounts.<id>.account.plan_type（plus/free/guest…），
+// 缺失时退到 entitlement.subscription_plan。访客会话同样返回 200 但 plan_type=guest，
+// 不能当作"已登录真实账号"（也就读不到订阅档位/续费日期/网页额度）
+export function parseWebPlanType(body: unknown): string | null {
+  if (!body || typeof body !== "object") return null;
+  const accounts = (body as { accounts?: Record<string, Record<string, unknown>> }).accounts;
+  if (!accounts || typeof accounts !== "object") return null;
+  const entry = Object.values(accounts)[0];
+  if (!entry) return null;
+  const account = (entry.account as Record<string, unknown> | undefined) ?? {};
+  const entitlement = (entry.entitlement as Record<string, unknown> | undefined) ?? {};
+  if (typeof account.plan_type === "string") return account.plan_type.toLowerCase();
+  if (typeof entitlement.subscription_plan === "string") return entitlement.subscription_plan.toLowerCase();
+  return null;
+}
+
+export async function readWebPlanType(page: import("playwright").Page): Promise<string | null> {
+  const result = await fetchInPage(page, SUBSCRIPTION_CHECK_V4_URL, { Accept: "application/json" });
+  return parseWebPlanType(result?.body);
+}
+
 export type BrowserSession = {
   cookieHeader: string | null;
   page: import("playwright").Page;
@@ -193,7 +217,10 @@ export type BrowserSession = {
 // 从专用 Profile 提取 chatgpt.com 的 session cookie；未登录则打开页面等待人工登录。
 // 登录判定在浏览器页面内同源请求 /api/auth/session（完整浏览器指纹 + 自动携带 cookie），
 // 不做任何页面 DOM 选择器假设；返回页面句柄供后续取数复用（调用方负责关闭 context）。
-export async function extractSessionToken(forceRelogin: boolean): Promise<BrowserSession | null> {
+export async function extractSessionToken(
+  forceRelogin: boolean,
+  options: { requireRealAccount?: boolean } = {},
+): Promise<BrowserSession | null> {
   // 检测到可达代理时显式传给 Chromium，避免依赖（可能残留失效的）系统代理设置
   const proxy = detectProxy();
   const context = await chromium.launchPersistentContext(PROFILE_DIR, {
@@ -217,16 +244,30 @@ export async function extractSessionToken(forceRelogin: boolean): Promise<Browse
     const readCookieHeader = async (): Promise<string | null> =>
       buildSessionCookieHeader(await context.cookies("https://chatgpt.com"));
 
-    // 登录判定：页面内同源 fetch session 端点，返回非空 accessToken 即服务端认可当前登录态
+    // 登录判定：页面内同源 fetch session 端点，服务端认可当前登录态
+    // requireRealAccount：还要求不是访客会话（访客同样 200，但拿不到订阅/网页额度数据）
+    let guestHinted = false;
     const loggedIn = async (): Promise<boolean> => {
       const result = await fetchInPage(page, AUTH_SESSION_URL);
       const body = result?.body as { accessToken?: unknown } | null | undefined;
-      return (
+      const accepted =
         result !== null &&
         result.status === 200 &&
-        typeof body?.accessToken === "string" &&
-        body.accessToken.length > 0
-      );
+        (typeof body?.accessToken === "string" && body.accessToken.length > 0
+          ? true
+          : // 部分会话不再返回 accessToken：退回档位判定
+            (await readWebPlanType(page)) !== null);
+      if (!accepted) return false;
+      if (!options.requireRealAccount) return true;
+      const plan = await readWebPlanType(page);
+      if (plan === "guest" || plan === null) {
+        if (!guestHinted) {
+          guestHinted = true;
+          console.log("[HINT] 当前是访客会话（plan=guest），需要完成 Google 登录才能读取订阅与网页额度数据");
+        }
+        return false;
+      }
+      return true;
     };
 
     console.log("[INFO] 检查登录态 ...");
