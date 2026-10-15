@@ -187,25 +187,45 @@ export function buildSessionCookieHeader(cookies: Array<{ name: string; value: s
 
 export const SUBSCRIPTION_CHECK_V4_URL = "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27";
 
-// v4 accounts/check 响应体 → 档位：accounts.<id>.account.plan_type（plus/free/guest…），
-// 缺失时退到 entitlement.subscription_plan。访客会话同样返回 200 但 plan_type=guest，
-// 不能当作"已登录真实账号"（也就读不到订阅档位/续费日期/网页额度）
+// v4 accounts/check 响应体 → 档位（plus / free / guest…）
+// 注意：accounts 下可能同时存在 guest 条目与真实账号条目，只取第一条会把已登录账号误判成访客；
+// 这里遍历所有条目，优先「有生效订阅」，其次非 guest 的档位。找不到时退回 entitlement.subscription_plan
 export function parseWebPlanType(body: unknown): string | null {
   if (!body || typeof body !== "object") return null;
   const accounts = (body as { accounts?: Record<string, Record<string, unknown>> }).accounts;
   if (!accounts || typeof accounts !== "object") return null;
-  const entry = Object.values(accounts)[0];
-  if (!entry) return null;
-  const account = (entry.account as Record<string, unknown> | undefined) ?? {};
-  const entitlement = (entry.entitlement as Record<string, unknown> | undefined) ?? {};
-  if (typeof account.plan_type === "string") return account.plan_type.toLowerCase();
-  if (typeof entitlement.subscription_plan === "string") return entitlement.subscription_plan.toLowerCase();
-  return null;
+
+  let fallback: string | null = null;
+  for (const entry of Object.values(accounts)) {
+    if (!entry || typeof entry !== "object") continue;
+    const account = (entry.account as Record<string, unknown> | undefined) ?? {};
+    const entitlement = (entry.entitlement as Record<string, unknown> | undefined) ?? {};
+    const planType = typeof account.plan_type === "string" ? account.plan_type.toLowerCase() : null;
+    const subscriptionPlan =
+      typeof entitlement.subscription_plan === "string" ? entitlement.subscription_plan.toLowerCase() : null;
+    const plan = planType ?? subscriptionPlan;
+    if (!plan) continue;
+    const active = entitlement.has_active_subscription === true || entitlement.is_active_subscription_gratis === true;
+    if (active && plan !== "guest") return plan;
+    if (plan !== "guest" && fallback === null) fallback = plan;
+    if (fallback === null) fallback = plan;
+  }
+  return fallback;
 }
 
 export async function readWebPlanType(page: import("playwright").Page): Promise<string | null> {
   const result = await fetchInPage(page, SUBSCRIPTION_CHECK_V4_URL, { Accept: "application/json" });
   return parseWebPlanType(result?.body);
+}
+
+// 会话是否属于已登录的真实账号：session 里有 user.email，或档位不是 guest
+export async function readWebSessionIdentity(
+  page: import("playwright").Page,
+): Promise<{ hasEmail: boolean; plan: string | null }> {
+  const sessionResult = await fetchInPage(page, AUTH_SESSION_URL, { Accept: "application/json" });
+  const user = (sessionResult?.body as { user?: { email?: unknown } } | null)?.user;
+  const plan = await readWebPlanType(page);
+  return { hasEmail: typeof user?.email === "string" && user.email.length > 0, plan };
 }
 
 export type BrowserSession = {
@@ -259,15 +279,15 @@ export async function extractSessionToken(
             (await readWebPlanType(page)) !== null);
       if (!accepted) return false;
       if (!options.requireRealAccount) return true;
-      const plan = await readWebPlanType(page);
-      if (plan === "guest" || plan === null) {
-        if (!guestHinted) {
-          guestHinted = true;
-          console.log("[HINT] 当前是访客会话（plan=guest），需要完成 Google 登录才能读取订阅与网页额度数据");
-        }
-        return false;
+      const identity = await readWebSessionIdentity(page);
+      if (identity.hasEmail || (identity.plan !== null && identity.plan !== "guest")) return true;
+      if (!guestHinted) {
+        guestHinted = true;
+        console.log(
+          `[HINT] 当前是访客会话（plan=${identity.plan ?? "unknown"}，session 无 user.email），需要在该窗口完成 Google 登录`,
+        );
       }
-      return true;
+      return false;
     };
 
     console.log("[INFO] 检查登录态 ...");
