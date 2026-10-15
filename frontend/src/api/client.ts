@@ -481,7 +481,7 @@ function withChatgptBucketNote(
       label: "网页对话额度",
       scope: "网页对话额度",
       bucket: "web",
-      note: "与 Codex 编码额度独立计量，Codex 用尽不影响网页聊天；本档位接口暂未提供该额度数据（返回 404）",
+      note: "与 Codex 编码额度独立计量，Codex 用尽不影响网页聊天；该额度接口未对外提供（免费与 Plus 档实测均返回 404）",
       used: 0,
       limit: 0,
       percentUsed: null,
