@@ -21,6 +21,9 @@
  *   node --experimental-strip-types scripts/refresh-chatgpt-usage.ts --auth-json <路径>   # 自定义 codex auth.json
  *   CHATGPT_ACCESS_TOKEN=xxx CHATGPT_ACCOUNT_ID=xxx node --experimental-strip-types scripts/refresh-chatgpt-usage.ts
  *     # 覆盖 codex token（auth.json 过期/失效时用；账号 id 也可只给 token）
+ *   node --experimental-strip-types scripts/refresh-chatgpt-usage.ts --local
+ *     # 只读 Codex 本地会话日志推送额度（免浏览器、免代理、秒级；与 CLI「剩余用量」同源），
+ *     # 订阅档位/续费时间沿用库里最近一次成功快照
  *
  * 鉴权语义（2026-10-15 实测）：
  *   - codex/usage 必须用 Codex Bearer，且**不能**同时带 session cookie（会被判 token_expired）
@@ -51,6 +54,7 @@ import {
   refreshStoredChatgptCredential,
   type StoredChatgptCredential,
 } from "./chatgpt-credentials.ts";
+import { readLatestCodexUsage, type CodexRateLimitWindow } from "./chatgpt-codex-log.ts";
 
 const WEB_RATE_LIMITS_URL = "https://chatgpt.com/backend-api/rate_limits";
 // 实测 cookie-only 下 v4 端点返回 accounts/entitlement（含 subscription_plan / renews_at），旧路径 405
@@ -64,6 +68,85 @@ function describeFetch(label: string, result: FetchedPayload | null): string {
   if (result.status === 401 || result.status === 403) return `${label}: HTTP ${result.status}（登录态/token 失效）`;
   if (result.status < 200 || result.status >= 300) return `${label}: HTTP ${result.status}`;
   return `${label}: HTTP ${result.status}${result.body === null ? "（响应非 JSON）" : ""}`;
+}
+
+// Codex 日志窗口 → /backend-api/codex/usage 形状（worker 解析器两种都认）
+function toApiWindow(window: CodexRateLimitWindow): Record<string, unknown> {
+  return {
+    ...(typeof window.used_percent === "number" ? { used_percent: window.used_percent } : {}),
+    ...(typeof window.resets_at === "number" ? { reset_at: window.resets_at } : {}),
+    ...(typeof window.window_minutes === "number" ? { limit_window_seconds: window.window_minutes * 60 } : {}),
+  };
+}
+
+// 从库内最近一次成功快照取订阅档位与续费时间（本地模式下免网络沿用）
+async function loadPreviousSubscription(
+  env: Record<string, string>,
+): Promise<{ plan: string; planRenewAt: string | null } | null> {
+  const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } = env;
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) return null;
+  try {
+    const url = new URL("/rest/v1/usage_snapshots", SUPABASE_URL);
+    url.searchParams.set("select", "payload,captured_at");
+    url.searchParams.set("provider_key", "eq.chatgpt");
+    url.searchParams.set("order", "captured_at.desc");
+    url.searchParams.set("limit", "10");
+    const response = await fetch(url, {
+      headers: { apikey: SUPABASE_SERVICE_ROLE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}` },
+    });
+    if (!response.ok) return null;
+    const rows = (await response.json()) as Array<{
+      payload?: { metrics?: { plan?: unknown; planRenewAt?: unknown } };
+    }>;
+    for (const row of rows) {
+      const plan = row.payload?.metrics?.plan;
+      if (typeof plan === "string" && plan.length > 0 && plan !== "unknown") {
+        const renew = row.payload?.metrics?.planRenewAt;
+        return { plan, planRenewAt: typeof renew === "string" ? renew : null };
+      }
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+// 合成 v4 accounts/check 形状，让 worker 侧解析器直接复用（plan_type 优先、renews_at 取续费时间）
+function synthesizeSubscription(plan: string, planRenewAt: string | null): Record<string, unknown> {
+  return {
+    accounts: {
+      default: {
+        account: { plan_type: plan },
+        entitlement: { subscription_plan: plan, renews_at: planRenewAt, has_active_subscription: plan !== "guest" },
+      },
+    },
+    account_ordering: ["default"],
+  };
+}
+
+async function postIngest(env: Record<string, string>, payloads: Record<string, unknown>): Promise<boolean> {
+  console.log("[INFO] 推送原始 payload 到 Worker ingest 端点 ...");
+  const ingestUrl = `${env.APIMONITOR_INGEST_URL!.replace(/\/$/, "")}/api/ingest/chatgpt`;
+  const response = await fetch(ingestUrl, {
+    method: "POST",
+    headers: { "X-Ingest-Key": env.INGEST_API_KEY!, "content-type": "application/json" },
+    body: JSON.stringify(payloads),
+  });
+  if (response.status === 401) {
+    console.error("[FAIL] 推送鉴权失败：INGEST_API_KEY 与 Worker 端不一致");
+    return false;
+  }
+  if (!response.ok) {
+    console.error(`[FAIL] 推送失败: HTTP ${response.status} - ${await response.text()}`);
+    return false;
+  }
+  const result = (await response.json()) as {
+    data?: { capturedAt?: string; status?: string; windows?: number; plan?: string | null };
+  };
+  console.log(
+    `[OK] 快照已写入 Supabase：status=${result.data?.status ?? "?"}，windows=${result.data?.windows ?? 0}，plan=${result.data?.plan ?? "?"}（capturedAt: ${result.data?.capturedAt ?? "?"}）`,
+  );
+  return true;
 }
 
 async function main(): Promise<void> {
@@ -81,6 +164,35 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   console.log(`[INFO] 推送目标: ${env.APIMONITOR_INGEST_URL}/api/ingest/chatgpt`);
+
+  // --local：只读 Codex 本地会话日志（与 CLI「剩余用量」同源），免浏览器与代理，秒级完成
+  if (args.includes("--local")) {
+    const usage = readLatestCodexUsage();
+    if (!usage || (!usage.primary && !usage.secondary)) {
+      console.error("[FAIL] 未在 ~/.codex/sessions 找到额度快照：请先在 Codex CLI/IDE 里发一次请求，或改用不带 --local 的方式");
+      process.exit(1);
+    }
+    const rateLimit: Record<string, unknown> = {
+      ...(usage.primary ? { primary_window: toApiWindow(usage.primary) } : {}),
+      ...(usage.secondary ? { secondary_window: toApiWindow(usage.secondary) } : {}),
+    };
+    const payloads: Record<string, unknown> = {
+      // 采集时间用日志时间：卡片「推送时间」即 CLI 观测到该额度的时间
+      capturedAt: usage.observedAt,
+      codex: { ...(usage.planType ? { plan_type: usage.planType } : {}), rate_limit: rateLimit },
+    };
+    console.log(
+      `[OK] 本地日志额度（${usage.observedAt}，${usage.filePath.split(/[\/]/).pop()}）：5小时已用=${usage.primary?.used_percent ?? "?"}%、每周已用=${usage.secondary?.used_percent ?? "?"}%、plan=${usage.planType ?? "?"}`,
+    );
+    const previous = await loadPreviousSubscription(env);
+    if (previous) {
+      payloads.subscription = synthesizeSubscription(previous.plan, previous.planRenewAt);
+      console.log(`[INFO] 沿用库内订阅数据：plan=${previous.plan}，续费=${previous.planRenewAt ?? "(无)"}`);
+    }
+    const ok = await postIngest(env, payloads);
+    process.exitCode = ok ? 0 : 1;
+    return;
+  }
 
   // 凭据来源优先级：环境变量 → Supabase 存储副本（可自动刷新并写回）→ 本地 auth.json
   const envAccessToken = process.env.CHATGPT_ACCESS_TOKEN?.trim();
@@ -214,29 +326,11 @@ async function main(): Promise<void> {
       return;
     }
 
-    console.log("[INFO] 推送原始 payload 到 Worker ingest 端点 ...");
-    const ingestUrl = `${env.APIMONITOR_INGEST_URL.replace(/\/$/, "")}/api/ingest/chatgpt`;
-    const response = await fetch(ingestUrl, {
-      method: "POST",
-      headers: { "X-Ingest-Key": env.INGEST_API_KEY, "content-type": "application/json" },
-      body: JSON.stringify(payloads),
-    });
-    if (response.status === 401) {
-      console.error("[FAIL] 推送鉴权失败：INGEST_API_KEY 与 Worker 端不一致");
+    const ok = await postIngest(env, payloads);
+    if (!ok) {
       process.exitCode = 1;
       return;
     }
-    if (!response.ok) {
-      console.error(`[FAIL] 推送失败: HTTP ${response.status} - ${await response.text()}`);
-      process.exitCode = 1;
-      return;
-    }
-    const result = (await response.json()) as {
-      data?: { capturedAt?: string; status?: string; windows?: number; plan?: string | null };
-    };
-    console.log(
-      `[OK] 快照已写入 Supabase：status=${result.data?.status ?? "?"}，windows=${result.data?.windows ?? 0}，plan=${result.data?.plan ?? "?"}（capturedAt: ${result.data?.capturedAt ?? "?"}）`,
-    );
     console.log("看板刷新即可看到本机推送的 ChatGPT 数据（抓取方式会显示「本机推送」）。");
   } finally {
     await session.context.close();

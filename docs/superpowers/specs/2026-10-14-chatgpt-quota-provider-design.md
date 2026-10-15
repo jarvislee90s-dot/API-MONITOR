@@ -154,6 +154,13 @@ Edge Profile cookie ┴→ import-chatgpt-   POST /api/refresh ──→ DO 节�
 - **登录态判定以 `/api/auth/session` 为准**（`user.email` + `account.planType`）：`accounts/check` 的 cookie-only 视图不可用于判断登录态，否则会出现"登录成功却永远等待"的假象。
 - **网页对话额度无数据源（定论）**：真实 Plus 会话下 `rate_limits` / `usage_limits` 依旧 404（`conversation/limit` 400），卡片保留占位说明行。
 
+**2026-10-15 第五轮实测结论（与 CLI「剩余用量」对齐 + 百分比 bug）**：
+- 用户反馈看板与 Codex CLI 面板不一致（CLI 显示 96%/99% 剩余，看板 100% 剩余）。查明三层原因：
+  1. **数据源不同**：CLI 面板用的是本地会话日志快照；`backend-api/codex/usage` 同一时刻的 `used_percent` 与日志不一致（API 0 vs 日志 5），因此"对齐 CLI"应以日志为准；
+  2. **百分比解析 bug**：`toPercentValue` 的启发式（`value <= 1 → ×100`）把整数 1 当成 100%（日志 `used_percent: 1` = 1%），已改为「仅 0~1 之间的小数放大」；
+  3. 时效性：看板只在推送时更新（无自动刷新）。
+- **新增 `--local` 通道**：读取 `~/.codex/sessions/**/rollout-*.jsonl` 的 `payload.rate_limits`（字段 `primary/secondary.{used_percent,window_minutes,resets_at}` + `plan_type`），免浏览器/免代理/秒级；订阅与续费时间沿用库内快照。看板与 CLI 自此同源。
+
 **第一期终审沉淀的技术债（二期候选，按优先级）**：
 1. chatgpt partial 但无缺失窗口（窗口全在、仅订阅降级）时不满足 staleWindowKeys 豁免条件，会被整卡回退用旧 ready 卡替换、遮蔽实取新值——豁免条件可放宽为「chatgpt 且 partial 且 windows 非空」（`worker/index.ts` applyLatestReadyFallback）。
 2. handleRefresh 无账号分支（入口型 env 配置）绕过 postProcessSnapshots，不享受桶级补齐。
