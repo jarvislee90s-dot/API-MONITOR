@@ -133,6 +133,30 @@ flowchart TB
 
 部分供应商的登录态 cookie 会过期，或其用量页屏蔽数据中心 IP，需要本地脚本辅助刷新。火山/OpenCode 脚本复用本地浏览器 Profile 提取登录态，运行前需关闭对应浏览器（含后台进程）避免 Profile 锁定；Ollama 脚本使用项目专用 Profile（登录一次后长期复用，不占用日常浏览器）；DeepSeek/智谱脚本用账号密码在临时浏览器登录。`.env` 中需配置 `CLOUDFLARE_API_TOKEN`。
 
+#### 一键刷新：`refresh-enabled.bat`（推荐日常使用）
+
+双击项目根目录的 `refresh-enabled.bat`：先列出「智谱 / Ollama / ChatGPT(Codex) / OpenCode Go」谁在**看板显示**（供应商启用 且 至少一个账号设了首页显示；入口型供应商无账号时按显示处理），再**依次刷新处于显示状态的那些**，跳过停用或未设首页显示的供应商并给出原因。
+
+```powershell
+.\refresh-enabled.bat            # 列状态 + 依次刷新显示中的供应商
+.\refresh-enabled.bat --list     # 只看状态，不刷新
+```
+
+各供应商的刷新动作：
+
+| 供应商 | 刷新动作 | 说明 |
+| --- | --- | --- |
+| 智谱 BigModel | `refresh-zhipu-cookie.ts` | 账号密码登录刷新 cookie（可能需人工过验证码） |
+| Ollama Pro | `refresh-ollama-cookie.ts` | 专用 Profile 复用登录态，失效时弹浏览器登录 |
+| ChatGPT (Codex) | `refresh-chatgpt-usage.ts --local` | 读 Codex 本地会话日志，免代理、免浏览器、秒级 |
+| OpenCode Go | `refresh-opencode-usage.ts` | 需先关闭 Edge；双账号串行抓取后推送 |
+
+注意：
+
+- 某供应商显示「不显示」时会被跳过。例如 OpenCode Go 若两个账号都没设首页显示，看板上就不会出现它的卡片，脚本也不会刷新它——需要的账号去设置页（`#/settings`）打开首页显示即可。
+- ChatGPT 用的是 `--local`（与 CLI「剩余用量」同源）；要同时刷新订阅档位与续费日期（需要代理与网页会话），单独跑一次 `node --experimental-strip-types scripts/refresh-chatgpt-usage.ts`。
+- 刷新失败的项不影响看板：会继续显示最近一次成功快照。
+
 #### 智谱 BigModel Cookie 刷新
 
 智谱登录态 token 约 7 天过期，过期后看板会显示 `login_required`。用账号密码登录并刷新 cookie：
