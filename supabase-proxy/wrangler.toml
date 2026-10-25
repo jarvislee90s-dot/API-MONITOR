@@ -1,0 +1,24 @@
+# Supabase 反向代理 Worker
+#
+# 把自有域名 supabase.bondtoolbox.asia 的流量转发到 Supabase 项目域名，
+# 绕开境内网络对 *.supabase.co 的 SNI 阻断。custom_domain=true 会自动创建 DNS 记录。
+# UPSTREAM_HOST 仅为项目地址（非密钥，匿名可公开）；真正的密钥(apikey/Authorization)由调用方携带并原样透传。
+
+name = "supabase-proxy"
+main = "./src/worker.ts"
+compatibility_date = "2026-06-11"
+
+[vars]
+UPSTREAM_HOST = "cdzjuvewreribelvpccz.supabase.co"
+# 多项目映射:入口域名 → 上游项目(未命中时用 UPSTREAM_HOST 兜底)
+UPSTREAM_MAP = '{"supabase.bondtoolbox.asia":"cdzjuvewreribelvpccz.supabase.co","supabase2.bondtoolbox.asia":"onexoaebobgpwokgoxwy.supabase.co"}'
+
+# 自定义域名：绕开 *.workers.dev 的 DNS 污染与 *.supabase.co 的 SNI 阻断，国内可直连
+[[routes]]
+pattern = "supabase.bondtoolbox.asia"
+custom_domain = true
+
+# Bond_Toolbox 项目的反代入口
+[[routes]]
+pattern = "supabase2.bondtoolbox.asia"
+custom_domain = true

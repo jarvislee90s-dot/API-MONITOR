@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Supabase 反向代理搭建与使用 · 手把手教程</title>
+<style>
+  :root {
+    --bg: #f6f8fb; --card: #ffffff; --ink: #1f2937; --muted: #6b7280;
+    --brand: #3ecf8e; --brand-dark: #0f766e; --cf-orange: #f6821f; --cf-blue: #0051c3;
+    --bad: #dc2626; --ok: #16a34a; --line: #e5e7eb; --warn-bg: #fef3c7; --warn-ink: #92400e;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif; background: var(--bg); color: var(--ink); line-height: 1.7; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 24px 20px 80px; }
+  h1 { font-size: 26px; margin: 8px 0 4px; }
+  h2 { font-size: 20px; margin-top: 40px; padding-bottom: 8px; border-bottom: 2px solid var(--line); }
+  h3 { font-size: 16px; margin: 24px 0 8px; }
+  .sub { color: var(--muted); font-size: 13px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px 22px; margin: 16px 0; box-shadow: 0 1px 3px rgba(0,0,0,.04); }
+  .badge { display: inline-block; background: var(--brand); color: #04331f; font-weight: 700; font-size: 12px; border-radius: 999px; padding: 2px 10px; margin-left: 8px; vertical-align: middle; }
+  .badge.gray { background: #e5e7eb; color: #374151; }
+  code, pre { font-family: Consolas, "Courier New", monospace; }
+  code { background: #eef2f7; padding: 1px 6px; border-radius: 5px; font-size: 13px; }
+  pre { background: #0f172a; color: #e2e8f0; padding: 14px 16px; border-radius: 10px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre .ok { color: #4ade80; } pre .hl { color: #fbbf24; } pre .cm { color: #94a3b8; }
+  .nav { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 10px 0; }
+  .nav .step-chip { background: #eef2ff; border: 1px solid #c7d2fe; color: #3730a3; border-radius: 8px; padding: 4px 10px; font-size: 13px; }
+  .nav .arrow { color: #9ca3af; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th, td { border: 1px solid var(--line); padding: 8px 12px; text-align: left; }
+  th { background: #f3f4f6; }
+  .ok-tag { color: var(--ok); font-weight: 700; }
+  .bad-tag { color: var(--bad); font-weight: 700; }
+  .warn-box { background: var(--warn-bg); color: var(--warn-ink); border-radius: 10px; padding: 10px 14px; font-size: 14px; margin: 10px 0; }
+  details { border: 1px solid var(--line); border-radius: 10px; padding: 10px 16px; margin: 8px 0; background: #fff; }
+  summary { cursor: pointer; font-weight: 600; }
+  a { color: var(--cf-blue); }
+  .stepnum { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 50%; background: var(--brand-dark); color: #fff; font-weight: 700; margin-right: 8px; }
+  .foot { color: var(--muted); font-size: 12px; margin-top: 48px; }
+  svg text { font-family: "Microsoft YaHei", "PingFang SC", sans-serif; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Supabase 反向代理搭建与使用 <span class="badge">手把手教程</span></h1>
+<p class="sub">日期 2026-10-02 ｜ 适用：ApiMonitor 及任何需要在国内网络访问 Supabase 的项目 ｜ Markdown 版：<code>docs/tutorials/2026-10-02-supabase-proxy-setup.md</code></p>
+
+<h2>一图看懂：为什么需要它</h2>
+<div class="card">
+<svg viewBox="0 0 900 330" width="100%" xmlns="http://www.w3.org/2000/svg">
+  <!-- 改造前 -->
+  <text x="20" y="28" font-size="16" font-weight="bold" fill="#dc2626">改造前：本机直连 supabase.co（被 SNI 阻断）</text>
+  <rect x="20" y="50" width="150" height="64" rx="10" fill="#e0f2fe" stroke="#38bdf8"/>
+  <text x="95" y="78" font-size="14" text-anchor="middle">你的电脑</text>
+  <text x="95" y="98" font-size="12" text-anchor="middle" fill="#64748b">脚本 / 浏览器</text>
+  <rect x="330" y="50" width="230" height="64" rx="10" fill="#fee2e2" stroke="#f87171"/>
+  <text x="445" y="78" font-size="14" text-anchor="middle">supabase.co</text>
+  <text x="445" y="98" font-size="12" text-anchor="middle" fill="#991b1b">TLS 握手时被重置</text>
+  <line x1="170" y1="72" x2="326" y2="72" stroke="#16a34a" stroke-width="3"/>
+  <text x="248" y="64" font-size="12" text-anchor="middle" fill="#16a34a">① TCP 能连上 ✅</text>
+  <line x1="170" y1="98" x2="326" y2="98" stroke="#dc2626" stroke-width="3" stroke-dasharray="7 5"/>
+  <text x="248" y="116" font-size="12" text-anchor="middle" fill="#dc2626">② TLS 被重置 ❌（按域名 SNI 阻断）</text>
+  <text x="20" y="146" font-size="12" fill="#6b7280">表现：脚本 [WARN] 查询 Supabase 账号失败 / 浏览器登录设置页转圈失败</text>
+
+  <!-- 分隔线 -->
+  <line x1="20" y1="170" x2="880" y2="170" stroke="#e5e7eb" stroke-width="2"/>
+
+  <!-- 改造后 -->
+  <text x="20" y="198" font-size="16" font-weight="bold" fill="#16a34a">改造后：走自有域名经 Cloudflare 中转（畅通）</text>
+  <rect x="20" y="216" width="130" height="60" rx="10" fill="#e0f2fe" stroke="#38bdf8"/>
+  <text x="85" y="243" font-size="14" text-anchor="middle">你的电脑</text>
+  <text x="85" y="261" font-size="11" text-anchor="middle" fill="#64748b">脚本 / 浏览器</text>
+  <rect x="250" y="216" width="230" height="60" rx="10" fill="#ecfdf5" stroke="#3ecf8e"/>
+  <text x="365" y="240" font-size="13" text-anchor="middle">supabase.bondtoolbox.asia</text>
+  <text x="365" y="258" font-size="11" text-anchor="middle" fill="#047857">自有域名 · CF Worker 反代</text>
+  <rect x="600" y="216" width="180" height="60" rx="10" fill="#ecfdf5" stroke="#3ecf8e"/>
+  <text x="690" y="240" font-size="14" text-anchor="middle">supabase.co</text>
+  <text x="690" y="258" font-size="11" text-anchor="middle" fill="#047857">Cloudflare 机房之间访问</text>
+
+  <line x1="150" y1="246" x2="246" y2="246" stroke="#16a34a" stroke-width="3"/>
+  <text x="198" y="238" font-size="12" text-anchor="middle" fill="#16a34a">TLS 正常 ✅</text>
+  <text x="198" y="294" font-size="11" text-anchor="middle" fill="#6b7280">SNI 是自有域名，不在封锁名单</text>
+  <line x1="480" y1="246" x2="596" y2="246" stroke="#16a34a" stroke-width="3"/>
+  <text x="538" y="238" font-size="12" text-anchor="middle" fill="#16a34a">不经过墙 ✅</text>
+  <text x="538" y="294" font-size="11" text-anchor="middle" fill="#6b7280">Cloudflare 海外网络内部转发</text>
+</svg>
+</div>
+<div class="warn-box">🚫 唯一红线：不能用 Worker 默认的 <code>xxx.workers.dev</code> 域名——它在境内被 DNS 污染，必须绑自有域名（本教程已绑定 <code>supabase.bondtoolbox.asia</code>）。</div>
+
+<h2>已经替你完成的部分 <span class="badge gray">2026-10-02 已上线，无需重复</span></h2>
+<div class="card">
+<table>
+  <tr><th>#</th><th>已完成事项</th><th>结果</th></tr>
+  <tr><td>1</td><td>新建 <code>supabase-proxy/</code> Worker 并部署（<code>npx wrangler deploy</code>）</td><td class="ok-tag">已上线</td></tr>
+  <tr><td>2</td><td>绑定自定义域名 <code>supabase.bondtoolbox.asia</code>（DNS 自动创建）</td><td class="ok-tag">已生效</td></tr>
+  <tr><td>3</td><td>apimonitor Worker 的 secret <code>SUPABASE_URL</code> 切到反代域名</td><td class="ok-tag">已生效</td></tr>
+  <tr><td>4</td><td>本地 <code>.env</code> 的 <code>SUPABASE_URL</code> 切到反代域名</td><td class="ok-tag">已生效</td></tr>
+  <tr><td>5</td><td>验证：直连（不挂代理）TLS 5/5 ✅、REST 3/3 ✅、看板 API 正常</td><td class="ok-tag">通过</td></tr>
+</table>
+</div>
+
+<h2>三分钟验证一切正常</h2>
+<div class="card">
+  <h3>① 浏览器验证（最简单）</h3>
+  <p>直接打开 <a href="https://supabase.bondtoolbox.asia/healthz" target="_blank">https://supabase.bondtoolbox.asia/healthz</a>，看到 <code>ok</code> 两个字母即成功。不需要登录任何账号。</p>
+  <h3>② 命令行验证（可选）</h3>
+<pre>
+<span class="cm"># 在 PowerShell、项目根目录执行</span>
+node --experimental-strip-types scripts/test-supabase-connectivity.ts --url=https://supabase.bondtoolbox.asia
+</pre>
+  <p><b>判读要点：</b></p>
+  <ul>
+    <li><span class="ok-tag">✅ 正常</span>：<code>[4] 直连 TLS 握手</code> 全部成功；<code>[5] 直连 REST</code> 显示 <code>HTTP 401(可达)</code>——401 是 Supabase 对"没带密钥的请求"的正常应答，恰恰证明全链路通。</li>
+    <li><span class="ok-tag">✅ 误报说明</span>：脚本提示"DNS 不一致，可能污染"可忽略——<code>172.67.x.x</code> 和 <code>104.21.x.x</code> 都是 Cloudflare 正常任播 IP。</li>
+  </ul>
+</div>
+
+<h2>从零重建（换电脑 / 删除后重来时才需要）</h2>
+
+<div class="card">
+  <h3><span class="stepnum">1</span>部署反代 Worker（命令行，1 分钟）</h3>
+  <p>前置：<code>.env</code> 里已有 <code>CLOUDFLARE_API_TOKEN</code>（需有 Workers Scripts 上传与 Zone DNS 编辑权限）。</p>
+<pre>
+<span class="cm"># PowerShell，在项目根目录</span>
+cd E:\LLMproject\ApiMonitor
+$env:CLOUDFLARE_API_TOKEN=<span class="hl">"你的token值"</span>
+npx wrangler deploy --config supabase-proxy/wrangler.toml
+</pre>
+  <p>成功标志（最后几行）：</p>
+<pre>
+Uploaded supabase-proxy
+Deployed supabase-proxy triggers
+  <span class="ok">supabase.bondtoolbox.asia (custom domain)</span>  <span class="cm">← 出现这行说明域名也绑好了</span>
+</pre>
+  <p>若只部署成功、没有 custom domain 那一行 → token 缺 DNS 权限，走下面的步骤 2 手动绑。</p>
+</div>
+
+<div class="card">
+  <h3><span class="stepnum">2</span>（仅当没绑上域名时）控制台手动绑域名</h3>
+  <p>带图参考：<a href="https://developers.cloudflare.com/workers/configuration/routing/custom-domains/#add-a-custom-domain" target="_blank">Cloudflare 官方文档 · Custom Domains（含界面截图）</a></p>
+  <div class="nav">
+    <span class="step-chip">dash.cloudflare.com 登录</span><span class="arrow">▶</span>
+    <span class="step-chip">左侧菜单 Workers &amp; Pages</span><span class="arrow">▶</span>
+    <span class="step-chip">点列表中的 supabase-proxy</span><span class="arrow">▶</span>
+    <span class="step-chip">顶部 Settings 标签</span><span class="arrow">▶</span>
+    <span class="step-chip">Domains &amp; Routes 卡片 → Add</span><span class="arrow">▶</span>
+    <span class="step-chip">Custom domain</span><span class="arrow">▶</span>
+    <span class="step-chip">输入 supabase.bondtoolbox.asia</span><span class="arrow">▶</span>
+    <span class="step-chip">Add domain</span>
+  </div>
+  <p>等状态从 <code>Initializing</code> 变成 <span class="ok-tag">Active</span>（1~2 分钟），DNS 记录自动创建，不用去 DNS 页面手填。</p>
+</div>
+
+<div class="card">
+  <h3><span class="stepnum">3</span>把使用方指向反代域名</h3>
+  <table>
+    <tr><th>使用方</th><th>位置（在哪点）</th><th>改成</th></tr>
+    <tr><td>本地脚本</td><td>项目根目录 <code>.env</code> 的 <code>SUPABASE_URL</code></td><td><code>https://supabase.bondtoolbox.asia</code></td></tr>
+    <tr>
+      <td>看板 Worker</td>
+      <td>
+        <div class="nav">
+          <span class="step-chip">Workers &amp; Pages</span><span class="arrow">▶</span>
+          <span class="step-chip">apimonitor</span><span class="arrow">▶</span>
+          <span class="step-chip">Settings</span><span class="arrow">▶</span>
+          <span class="step-chip">Variables and Secrets</span><span class="arrow">▶</span>
+          <span class="step-chip">编辑 SUPABASE_URL</span>
+        </div>
+      </td>
+      <td><code>https://supabase.bondtoolbox.asia</code></td>
+    </tr>
+    <tr><td>其他项目</td><td>该项目的 env / <code>createClient(url, ...)</code> 第一个参数</td><td><code>https://supabase.bondtoolbox.asia</code></td></tr>
+  </table>
+  <p>改完 Worker 的 secret 后，浏览器访问 <code>https://apimonitor.bondtoolbox.asia/api/auth/config</code>，确认 <code>supabaseUrl</code> 是新域名。</p>
+</div>
+
+<div class="card">
+  <h3><span class="stepnum">4</span>（可选但推荐）Supabase 控制台补 Site URL</h3>
+  <div class="warn-box">⚠️ supabase.com/dashboard 境内也可能打不开，挂一次代理打开即可，只做一次。</div>
+  <div class="nav">
+    <span class="step-chip">supabase.com/dashboard 登录</span><span class="arrow">▶</span>
+    <span class="step-chip">选择项目</span><span class="arrow">▶</span>
+    <span class="step-chip">左下 Authentication</span><span class="arrow">▶</span>
+    <span class="step-chip">URL Configuration</span><span class="arrow">▶</span>
+    <span class="step-chip">Site URL 填 https://apimonitor.bondtoolbox.asia</span><span class="arrow">▶</span>
+    <span class="step-chip">Redirect URLs 也加上 → Save</span>
+  </div>
+  <p>对"邮箱+密码登录且未开邮件确认"的项目，这步不影响登录，但为将来启用邮件确认/魔法链接做准备。</p>
+</div>
+
+<h2>恢复看板两张卡（补写 cookie，这次不用挂代理）</h2>
+<div class="card">
+<pre>
+<span class="cm"># PowerShell，项目根目录</span>
+cd E:\LLMproject\ApiMonitor
+node --experimental-strip-types scripts/refresh-zhipu-cookie.ts
+node --experimental-strip-types scripts/refresh-volc-ark-cookie.ts
+</pre>
+  <p><b>智谱脚本成功标志</b>（之前的 <code>[WARN] 查询 Supabase 账号失败</code> 不再出现）：</p>
+<pre>
+<span class="ok">[OK] 加密凭据已写入 provider_account_credentials</span>
+<span class="ok">[OK] Supabase 账号 config.authCookie/authToken 已更新</span>
+</pre>
+  <p><b>火山脚本判读：</b></p>
+  <ul>
+    <li><code>cherry</code> 段出现同样两行 <span class="ok-tag">[OK]</span>（首页展示的就是 cherry）。</li>
+    <li><code>默认账号</code> 段仍会 <span class="bad-tag">[FAIL] Cookie 无效: 接口未返回用量数据</span>——该账号本身没有有效 Coding Plan 订阅数据，<b>与网络无关，属预期</b>，不影响看板。</li>
+  </ul>
+  <p>跑完后回看板点一次刷新：智谱、火山方舟两张卡的"使用缓存数据"消失、时间戳变当前。以后 cookie 过期（智谱约 7 天）重跑即可，<b>全程不需要代理</b>。</p>
+</div>
+
+<h2>另一个项目怎么复用</h2>
+<div class="card">
+  <p>反代已支持<b>多项目映射</b>（按入口域名转发到不同上游项目）：</p>
+  <table>
+    <tr><th>入口域名</th><th>上游 Supabase 项目</th><th>服务的项目</th></tr>
+    <tr><td><code>supabase.bondtoolbox.asia</code></td><td><code>cdzjuvewreribelvpccz.supabase.co</code></td><td>ApiMonitor 看板</td></tr>
+    <tr><td><code>supabase2.bondtoolbox.asia</code></td><td><code>onexoaebobgpwokgoxwy.supabase.co</code></td><td>Bond_Toolbox</td></tr>
+  </table>
+  <ul>
+    <li><b>接入方式</b>：把项目的 Supabase 地址换成对应入口域名（env 里的 <code>SUPABASE_URL</code>、前端 <code>createClient(url, key)</code>、<code>VITE_SUPABASE_URL</code> / <code>NEXT_PUBLIC_SUPABASE_URL</code> 等），密钥保持不变。</li>
+    <li><b>接第三个项目</b>：改 <code>supabase-proxy/wrangler.toml</code> 两处——<code>UPSTREAM_MAP</code> 加一条、<code>[[routes]]</code> 加一个新入口域名，重新 <code>npx wrangler deploy</code>。</li>
+    <li><b>Edge Functions</b>（跑在 Supabase 服务器上的 <code>functions/</code>）服务端到服务端不受影响，不用改。</li>
+    <li><b>安全边界</b>：反代只换"门牌号"，数据访问仍需 <code>apikey</code>/<code>Authorization</code>（密钥不经过反代）；转发目的地固定为映射表内的项目，别人不能拿它当跳板。</li>
+  </ul>
+</div>
+
+<h2>常见问题</h2>
+<div class="card">
+<details open><summary>Q1：为什么首次请求偶尔要几秒钟？</summary>
+<p>Cloudflare Worker 冷启动 + 首次 TLS 握手，属正常。部署后第一次访问曾 30+ 秒，之后稳定在 4 秒左右（该接口本身要实时拉取全部 provider）。</p></details>
+<details><summary>Q2：为什么不直接用 xxx.workers.dev？</summary>
+<p><code>*.workers.dev</code> 在境内被 DNS 污染/Sinkhole（<a href="https://community.cloudflare.com/t/cloudflare-workers-suspected-of-being-blocked-in-china/382155" target="_blank">Cloudflare 社区确认</a>），必须绑自有域名。</p></details>
+<details><summary>Q3：Supabase 控制台打不开了怎么办？</summary>
+<p>控制台只是配置时偶尔用一次，挂代理打开即可；<b>日常数据访问走 supabase.bondtoolbox.asia 完全不受影响</b>。</p></details>
+<details><summary>Q4：怎么看反代的流量/报错？</summary>
+<p>Workers &amp; Pages → supabase-proxy → <b>Metrics</b>（指标）/ <b>Logs</b>（实时日志）；<code>/healthz</code> 可随时探活。</p></details>
+<details open><summary>Q5：前端登录报 Failed to fetch？</summary>
+<p>反代会在本地应答浏览器 CORS 预检（上游对不带 apikey 的 OPTIONS 回 401，浏览器要求预检必须 2xx）。2026-10-02 已修复上线；若再遇到，先确认 <code>/healthz</code> 能打开，再看 supabase-proxy 的 Logs 排查。</p></details>
+<details><summary>Q6：想改上游项目或加第二个 Supabase 项目？</summary>
+<p>改/复制 <code>supabase-proxy/wrangler.toml</code> 的 <code>name</code>、<code>UPSTREAM_HOST</code>、<code>routes.pattern</code> 三处，重新 <code>npx wrangler deploy</code>。</p></details>
+</div>
+
+<h2>回滚（如需恢复直连）</h2>
+<div class="card">
+  <ol>
+    <li>本地 <code>.env</code>：<code>SUPABASE_URL</code> 改回 <code>https://cdzjuvewreribelvpccz.supabase.co</code>。</li>
+    <li>看板 Worker：apimonitor → Settings → Variables and Secrets → <code>SUPABASE_URL</code> 改回同值。</li>
+    <li>删除反代：Workers &amp; Pages → supabase-proxy → Settings → 页面底部 <b>Delete</b>。</li>
+    <li>注意：回滚后脚本/浏览器立刻回到"连接被重置"状态，确认不再需要时才执行。</li>
+  </ol>
+</div>
+
+<h2>参考链接</h2>
+<div class="card">
+  <ul>
+    <li><a href="https://supabase.com/blog/navigating-regional-network-blocks" target="_blank">Supabase 官方博客 · Navigating Regional Network Blocks</a></li>
+    <li><a href="https://jiobase.com/blog/proxy-supabase-cloudflare-workers" target="_blank">反代教程（带截图）· Proxy Supabase Through Cloudflare Workers</a></li>
+    <li><a href="https://medium.com/@the-underrated-explorer/the-great-supabase-block-how-i-bypassed-failed-to-fetch-with-a-cloudflare-worker-8ccc2de7cb29" target="_blank">The Great Supabase Block（Medium，含图）</a></li>
+    <li><a href="https://developers.cloudflare.com/workers/configuration/routing/custom-domains/" target="_blank">Cloudflare 官方 · Workers Custom Domains（含图）</a></li>
+    <li><a href="https://zh.greatfire.org/domain/supabase.co" target="_blank">GreatFire · supabase.co 长期监测</a></li>
+  </ul>
+</div>
+
+<p class="foot">ApiMonitor · docs/tutorials/2026-10-02-supabase-proxy-setup.html · 生成于 2026-10-02</p>
+</div>
+</body>
+</html>
