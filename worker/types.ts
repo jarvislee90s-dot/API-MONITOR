@@ -1,4 +1,4 @@
-﻿export type ProviderId =
+export type ProviderId =
   | "openrouter"
   | "opencode-go"
   | "xfyun-maas"
@@ -193,6 +193,7 @@ export interface WorkerEnv extends RefreshSessionEnv {
   OPENROUTER_API_KEY?: string;
   OPENROUTER_BASE_URL?: string;
   OPENCODE_GO_WORKSPACE_ID?: string;
+  OPENCODE_GO_SESSION_COOKIE?: string;
   OPENCODE_GO_AUTH_COOKIE?: string;
   OPENCODE_GO_API_KEY?: string;
   INGEST_API_KEY?: string;

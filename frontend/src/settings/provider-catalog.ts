@@ -10,8 +10,8 @@ export const PUBLIC_PROVIDER_CATALOG: ProviderCatalogItem[] = [
   {
     providerKey: "opencode-go",
     providerName: "OpenCode Go",
-    sourceUrl: "https://opencode.ai/workspace/{workspaceId}/go",
-    description: "workspaceId + auth cookie",
+    sourceUrl: "https://opencode.ai/console/{workspaceId}/go",
+    description: "workspaceId + session cookie（__Host-console_session）",
   },
   {
     providerKey: "xfyun-maas",

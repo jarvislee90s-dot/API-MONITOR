@@ -1,19 +1,21 @@
-﻿/**
- * OpenCode Go 用量抓取脚本
+/**
+ * OpenCode Go 用量抓取脚本（新版控制台 /console）
  *
- * 功能：从本地浏览器 Profile 提取 auth cookie，抓取 opencode 用量页，
- *       解析为标准快照后推送到 Worker 的 /api/ingest/opencode-go 端点。
- *       绕开 Worker 被 opencode 数据中心 IP 封锁的问题。
- *       支持多账号：每个账号绑定专属浏览器与 workspaceId，串行刷新互不阻塞。
+ * 功能：优先用 .env 缓存的 __Host-console_session cookie 直接调
+ *       https://opencode.ai/console/api/go/status（需要 x-org-id 头），解析三个用量窗口后
+ *       推送到 Worker 的 /api/ingest/opencode-go 端点。
+ *       cookie 缺失/失效时才启动 Edge Profile 打开控制台，并保留窗口等你手动登录。
+ *       这样正常刷新不需要每次开浏览器，绕开 Worker 被 opencode 数据中心 IP 封锁的问题。
  *
  * 前置条件：
- *   1. Edge 或 Chrome 浏览器中已登录 https://opencode.ai
- *   2. 运行前关闭所有浏览器窗口（含后台进程），避免 Profile 锁定
- *   3. .env 中已配置 INGEST_API_KEY、APIMONITOR_INGEST_URL
- *   4. .env 中配置 OPENCODE_GO_WORKSPACE_ID（账号1）和/或 OPENCODE_GO_WORKSPACE2_ID（账号2）
+ *   1. .env 中已配置 INGEST_API_KEY、APIMONITOR_INGEST_URL
+ *   2. .env 中配置 OPENCODE_GO_WORKSPACE_ID（账号1）/ OPENCODE_GO_WORKSPACE2_ID（账号2）
+ *   3. 首次运行或 cookie 过期时，Edge Profile 已登录 opencode（脚本会打开窗口等你登录）
+ *   4. 运行前关闭所有 Edge 窗口（脚本也会主动结束 Edge 进程，避免 Profile 锁定）
  *
  * 使用：
  *   node --experimental-strip-types scripts/refresh-opencode-usage.ts
+ *   node --experimental-strip-types scripts/refresh-opencode-usage.ts --no-wait-login
  *
  * 说明：APIMONITOR_INGEST_URL 已配置为自定义域名 apimonitor.bondtoolbox.asia，
  *       该域名国内可直连（不受 *.workers.dev 的 SNI 阻断影响），无需设置代理。
@@ -22,6 +24,7 @@
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { resolve } from "node:path";
+import { parseOpenCodeGoStatus, type OpenCodeGoStatusPayload } from "../worker/providers/opencode-go-parser.ts";
 
 function loadEnv(): Record<string, string> {
   const envPath = resolve(process.cwd(), ".env");
@@ -40,6 +43,21 @@ function loadEnv(): Record<string, string> {
     vars[key] = value;
   }
   return vars;
+}
+
+// 更新 .env 中指定键的值；不存在的键追加到末尾（只写 cookie 值，不进日志）
+function updateEnvKey(envPath: string, key: string, value: string): void {
+  const content = readFileSync(envPath, "utf-8");
+  const lines = content.split(/\r?\n/);
+  const pattern = new RegExp(`^\\s*${key}\\s*=`);
+  let found = false;
+  const updated = lines.map((line) => {
+    if (!pattern.test(line)) return line;
+    found = true;
+    return `${key}="${value}"`;
+  });
+  if (!found) updated.push(`${key}="${value}"`);
+  writeFileSync(envPath, updated.join("\n"), "utf-8");
 }
 
 const localAppData = process.env.LOCALAPPDATA ?? resolve(process.env.HOME ?? "", "AppData/Local");
@@ -90,181 +108,124 @@ function fixCrashedSession(userDataDir: string): void {
   }
 }
 
-// 账号列表：每个账号绑定专属浏览器与 workspaceId 环境变量，串行刷新互不阻塞
 type AccountConfig = {
   label: string;
-  browserName: string;
-  userDataDir: string;
   profileDirectory: string;
   workspaceIdEnv: string;
+  sessionCookieEnv: string;
+  // optional=true 的账号（例如已停用）拿不到数据时直接跳过，不等待人工登录
+  optional: boolean;
 };
 
+// 账号列表：每个账号绑定专属 Edge Profile 与 workspaceId / session cookie 环境变量
 const ACCOUNTS: AccountConfig[] = [
   {
     label: "jarvislee90s",
-    browserName: "Edge (Profile 1)",
-    userDataDir: resolve(localAppData, "Microsoft/Edge/User Data"),
-    profileDirectory: "Profile 1",
+    profileDirectory: "Default",
     workspaceIdEnv: "OPENCODE_GO_WORKSPACE_ID",
+    sessionCookieEnv: "OPENCODE_GO_SESSION_COOKIE",
+    optional: false,
   },
   {
     label: "lijiawei_jarvis",
-    browserName: "Edge (Default)",
-    userDataDir: resolve(localAppData, "Microsoft/Edge/User Data"),
-    profileDirectory: "Default",
+    profileDirectory: "Profile 1",
     workspaceIdEnv: "OPENCODE_GO_WORKSPACE2_ID",
+    sessionCookieEnv: "OPENCODE_GO_SESSION_COOKIE2",
+    optional: true,
   },
 ];
 
-// 以下解析逻辑移植自 worker/providers/opencode-go-parser.ts，保持一致
-const WINDOW_KEYS = ["rolling", "weekly", "monthly"] as const;
-type WindowKey = (typeof WINDOW_KEYS)[number];
+const SESSION_COOKIE_NAME = "__Host-console_session";
+const USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+const API_URL = "https://opencode.ai/console/api/go/status";
+const LOGIN_WAIT_MS = 300_000;
 
-function toBeijingOffsetIso(date: Date): string {
-  const beijingDate = new Date(date.getTime() + 8 * 60 * 60 * 1000);
-  return beijingDate.toISOString().replace(/\.\d{3}Z$/, "+08:00");
+function dashboardUrl(workspaceId: string): string {
+  return `https://opencode.ai/console/${encodeURIComponent(workspaceId)}/go`;
 }
 
-function parseWindow(html: string, key: WindowKey): { used: number; resetInSec?: number } | null {
-  const pattern = new RegExp(`${key}Usage:\\$R\\[\\d+\\]=\\{([^}]*)\\}`, "i");
-  const match = html.match(pattern);
-  if (!match?.[1]) return null;
+// 归一化 cookie：支持完整 cookie 串、单条 name=value、裸值；旧格式 auth=... 视为不可用
+function normalizeCookie(rawCookie: string | undefined): string | undefined {
+  const trimmed = rawCookie?.trim();
+  if (!trimmed) return undefined;
 
-  const body = match[1];
-  const usedMatch = body.match(/usagePercent:([0-9]+(?:\.[0-9]+)?)/i);
-  const resetMatch = body.match(/resetInSec:([0-9]+(?:\.[0-9]+)?)/i);
-  const used = usedMatch ? Number(usedMatch[1]) : Number.NaN;
-  if (!Number.isFinite(used)) return null;
-
-  return {
-    used,
-    resetInSec: resetMatch ? Number(resetMatch[1]) : undefined,
-  };
+  const parts = trimmed.split(";").map((part) => part.trim()).filter((part) => part.length > 0);
+  const sessionPart = parts.find((part) => part.startsWith(`${SESSION_COOKIE_NAME}=`));
+  if (sessionPart) return sessionPart.slice(SESSION_COOKIE_NAME.length + 1);
+  if (trimmed.includes("=")) {
+    return trimmed.startsWith("auth=") ? undefined : trimmed;
+  }
+  return trimmed;
 }
 
-function parseOpenCodeGoWindows(html: string, now: Date): Array<{
-  key: string;
-  label: string;
-  used: number;
-  limit: number;
-  remaining: number;
-  percentUsed: number;
-  percentRemaining: number;
-  resetAt: string | null;
-}> {
-  return WINDOW_KEYS.flatMap((key) => {
-    const parsed = parseWindow(html, key);
-    if (!parsed) return [];
+type StatusResult =
+  | { ok: true; payload: OpenCodeGoStatusPayload }
+  | { ok: false; kind: "unauthorized" | "forbidden" | "http" | "network" | "parse"; status?: number; message: string };
 
-    return [{
-      key,
-      label: key === "rolling" ? "5h" : key === "weekly" ? "Weekly" : "Monthly",
-      used: parsed.used,
-      limit: 100,
-      remaining: Math.max(0, 100 - parsed.used),
-      percentUsed: Math.min(100, parsed.used),
-      percentRemaining: Math.max(0, 100 - parsed.used),
-      resetAt: parsed.resetInSec
-        ? toBeijingOffsetIso(new Date(now.getTime() + parsed.resetInSec * 1000))
-        : null,
-    }];
-  });
-}
-
-// 从指定浏览器 Profile 提取 opencode.ai 的 auth cookie
-async function extractAuthCookie(
-  chromium: typeof import("playwright")["chromium"],
-  browserName: string,
-  userDataDir: string,
-  profileDirectory: string,
-): Promise<string | null> {
-  cleanStaleLocks(userDataDir);
-  fixCrashedSession(userDataDir);
-  console.log(`🔧 启动 ${browserName}（${profileDirectory}）...`);
-
-  // Edge 允许在真实 Profile 上远程调试，用 launchPersistentContext + --profile-directory 区分账号
-  let context: import("playwright").BrowserContext | null = null;
+// 调新版控制台用量接口：必须同时带 __Host-console_session cookie 与 x-org-id 头
+async function fetchGoStatus(workspaceId: string, cookieValue: string): Promise<StatusResult> {
   try {
-    context = await chromium.launchPersistentContext(userDataDir, {
-      headless: false,
-      channel: "msedge",
-      args: [
-        "--disable-blink-features=AutomationControlled",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-session-crashed-bubble",
-        "--disable-restore-session-state",
-        `--profile-directory=${profileDirectory}`,
-      ],
+    const response = await fetch(API_URL, {
+      headers: {
+        accept: "application/json",
+        "x-org-id": workspaceId,
+        cookie: `${SESSION_COOKIE_NAME}=${cookieValue}`,
+        "user-agent": USER_AGENT,
+      },
+      signal: AbortSignal.timeout(20_000),
     });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(`   ⚠️ ${browserName} 启动失败: ${msg.substring(0, 120)}`);
-    return null;
-  }
+    const text = await response.text();
 
-  try {
-    const page = await context.newPage();
-    await page.goto("https://opencode.ai", { waitUntil: "domcontentloaded", timeout: 30_000 });
-    await page.waitForTimeout(2_000);
-
-    const cookies = await context.cookies();
-    const authCookie = cookies.find((c) => c.name === "auth" && c.domain.includes("opencode.ai"));
-    if (!authCookie) {
-      console.log(`   ℹ️ ${browserName} 中未找到 opencode.ai auth cookie`);
-      return null;
+    if (response.status === 401) {
+      return { ok: false, kind: "unauthorized", status: 401, message: "session 无效或已过期" };
     }
-    console.log(`✅ 从 ${browserName} 提取到 auth cookie（${authCookie.value.length} 字符）`);
-    return authCookie.value;
-  } finally {
-    await context.close();
+    if (response.status === 403) {
+      return { ok: false, kind: "forbidden", status: 403, message: "该 session 无权访问此 workspace（登录了其它账号）" };
+    }
+    if (!response.ok) {
+      return { ok: false, kind: "http", status: response.status, message: `HTTP ${response.status}` };
+    }
+
+    try {
+      return { ok: true, payload: JSON.parse(text) as OpenCodeGoStatusPayload };
+    } catch {
+      return { ok: false, kind: "parse", status: response.status, message: "接口返回非 JSON" };
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, kind: "network", message };
   }
 }
 
-// 抓取单个账号用量页并推送快照，成功返回 true
-async function refreshAccount(
+async function readSessionCookie(context: import("playwright").BrowserContext): Promise<string | undefined> {
+  const cookies = await context.cookies();
+  const cookie = cookies.find(
+    (item) => item.name === SESSION_COOKIE_NAME && item.domain.includes("opencode.ai"),
+  );
+  return cookie?.value;
+}
+
+// 解析并推送快照；成功返回 true
+async function pushSnapshot(
   env: Record<string, string>,
   account: AccountConfig,
-  authCookie: string,
+  workspaceId: string,
+  payload: OpenCodeGoStatusPayload,
 ): Promise<boolean> {
-  const workspaceId = env[account.workspaceIdEnv];
-  if (!workspaceId) {
-    console.error(`❌ 账号 ${account.label} 缺少 ${account.workspaceIdEnv}，跳过`);
-    return false;
-  }
-  const sourceUrl = `https://opencode.ai/workspace/${encodeURIComponent(workspaceId)}/go`;
-
-  // 抓取用量页（本地直连国内 IP 可达）
-  console.log(`🌐 抓取 ${account.label} 用量页...`);
-  const resp = await fetch(sourceUrl, {
-    redirect: "manual",
-    headers: {
-      Cookie: `auth=${authCookie}`,
-      Accept: "text/html,application/xhtml+xml",
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ApiMonitor/0.1",
-    },
-  });
-
-  if (resp.status >= 300 && resp.status < 400) {
-    const location = resp.headers.get("location") ?? "";
-    console.error(`❌ ${account.label} 被重定向到登录页: ${location}（cookie 无效或出口 IP 被封）`);
-    return false;
-  }
-  if (!resp.ok) {
-    console.error(`❌ ${account.label} 用量页返回 HTTP ${resp.status}`);
-    return false;
-  }
-
-  const html = await resp.text();
   const now = new Date();
-  const windows = parseOpenCodeGoWindows(html, now);
+  const windows = parseOpenCodeGoStatus(payload);
   if (windows.length === 0) {
-    console.error(`❌ ${account.label} 页面已加载但未找到用量窗口数据`);
+    console.error(
+      `❌ ${account.label} 接口返回成功，但没有 Go 订阅用量窗口（可能未订阅或接口字段变化）`,
+    );
     return false;
   }
-  console.log(`✅ ${account.label} 解析到 ${windows.length} 个用量窗口: ${windows.map((w) => `${w.key}=${w.used}%`).join(", ")}`);
+  console.log(
+    `✅ ${account.label} 解析到 ${windows.length} 个用量窗口: ${windows.map((w) => `${w.key}=${w.used}%`).join(", ")}`,
+  );
 
-  // 构造标准快照（字段与 worker/providers/opencode-go.ts 的 createResult 对齐）
+  const sourceUrl = dashboardUrl(workspaceId);
   const capturedAt = now.toISOString();
   const snapshot = {
     providerId: "opencode-go",
@@ -275,6 +236,8 @@ async function refreshAccount(
     summary: "OpenCode Go usage windows parsed",
     windows,
     metrics: {
+      product: payload.product ?? null,
+      endsAt: payload.access?.endsAt ?? null,
       hasRolling: windows.some((w) => w.key === "rolling"),
       hasWeekly: windows.some((w) => w.key === "weekly"),
       hasMonthly: windows.some((w) => w.key === "monthly"),
@@ -283,7 +246,6 @@ async function refreshAccount(
     meta: { fetchMethod: "local_ingest", accountLabel: account.label },
   };
 
-  // 推送到 Worker ingest 端点
   console.log(`📤 推送 ${account.label} 快照到 Worker ingest 端点...`);
   const ingestUrl = `${env.APIMONITOR_INGEST_URL.replace(/\/$/, "")}/api/ingest/opencode-go`;
   const ingestResp = await fetch(ingestUrl, {
@@ -310,7 +272,156 @@ async function refreshAccount(
   return true;
 }
 
+type RefreshOutcome = "ok" | "skipped" | "failed";
+
+// 获取 Playwright chromium（延迟加载：缓存 cookie 可用时完全不启动浏览器）
+let chromiumModule: typeof import("playwright")["chromium"] | null = null;
+async function getChromium(): Promise<typeof import("playwright")["chromium"]> {
+  if (!chromiumModule) {
+    const playwright = await import("playwright");
+    chromiumModule = playwright.chromium;
+  }
+  return chromiumModule;
+}
+
+// 在 Edge Profile 中打开控制台，等待登录后拿到可用的 session cookie
+async function loginInBrowser(
+  account: AccountConfig,
+  workspaceId: string,
+  waitForLogin: boolean,
+): Promise<{ cookie: string; result: Extract<StatusResult, { ok: true }> } | null> {
+  killBrowserProcesses();
+
+  const chromium = await getChromium();
+  const userDataDir = process.env.BROWSER_USER_DATA_DIR ?? resolve(localAppData, "Microsoft/Edge/User Data");
+  cleanStaleLocks(userDataDir);
+  fixCrashedSession(userDataDir);
+  console.log(`🔧 启动 Edge（${account.profileDirectory}）...`);
+
+  let context: import("playwright").BrowserContext;
+  try {
+    context = await chromium.launchPersistentContext(userDataDir, {
+      headless: false,
+      viewport: { width: 1280, height: 900 },
+      channel: "msedge",
+      args: [
+        "--disable-blink-features=AutomationControlled",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-session-crashed-bubble",
+        "--disable-restore-session-state",
+        `--profile-directory=${account.profileDirectory}`,
+      ],
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`   ⚠️ Edge 启动失败: ${msg.substring(0, 160)}`);
+    return null;
+  }
+
+  try {
+    const page = context.pages()[0] ?? (await context.newPage());
+    const sourceUrl = dashboardUrl(workspaceId);
+    console.log(`🌐 打开 ${sourceUrl} ...`);
+    await page.goto(sourceUrl, { waitUntil: "domcontentloaded", timeout: 45_000 }).catch(() => null);
+    await page.waitForTimeout(3_000);
+
+    let cookie = await readSessionCookie(context);
+    let result = cookie ? await fetchGoStatus(workspaceId, cookie) : null;
+    if (cookie && result?.ok) {
+      console.log("✅ 当前 Profile 登录态有效（无需手动登录）");
+      return { cookie, result };
+    }
+
+    const reason =
+      result?.ok === false
+        ? result.kind === "forbidden"
+          ? `当前 Profile 登录的账号无权访问该 workspace（${result.message}）`
+          : `接口返回：${result.message}`
+        : "当前 Profile 没有 opencode 登录态";
+
+    console.log("");
+    console.log("══════════════════════════════════════════════════════════");
+    console.log(`  ${account.label} 需要登录：${reason}`);
+    if (!waitForLogin) {
+      console.log("  当前为无人值守模式（--no-wait-login），本次跳过该账号");
+      console.log("══════════════════════════════════════════════════════════");
+      console.log("");
+      return null;
+    }
+    console.log("  请在刚打开的 Edge 窗口里登录 opencode.ai：");
+    console.log("    · 可用邮箱验证码 / GitHub / Google 任一方式");
+    console.log("    · 登录后进入 Go 页面即可，脚本每 3 秒检测一次，成功后自动继续");
+    console.log(`  （最长等待 ${LOGIN_WAIT_MS / 1000} 秒，随时可 Ctrl+C 退出）`);
+    console.log("══════════════════════════════════════════════════════════");
+    console.log("");
+
+    const deadline = Date.now() + LOGIN_WAIT_MS;
+    while (Date.now() < deadline) {
+      await page.waitForTimeout(3_000);
+      cookie = await readSessionCookie(context);
+      if (!cookie) continue;
+      result = await fetchGoStatus(workspaceId, cookie);
+      if (result.ok) {
+        console.log("✅ 检测到登录成功，session cookie 已就绪");
+        return { cookie, result };
+      }
+    }
+
+    console.error(`❌ 等待登录超时（${LOGIN_WAIT_MS / 1000} 秒），请重新运行脚本`);
+    return null;
+  } finally {
+    await context.close();
+  }
+}
+
+async function refreshAccount(
+  env: Record<string, string>,
+  envPath: string,
+  account: AccountConfig,
+  waitForLogin: boolean,
+): Promise<RefreshOutcome> {
+  const workspaceId = env[account.workspaceIdEnv];
+  if (!workspaceId) {
+    console.warn(`⚠️ 未配置 ${account.workspaceIdEnv}，跳过账号 ${account.label}`);
+    return "skipped";
+  }
+
+  // 1) 优先用 .env 缓存的 session cookie（不启动浏览器）
+  const cachedCookie = normalizeCookie(env[account.sessionCookieEnv]);
+  if (cachedCookie) {
+    const cachedResult = await fetchGoStatus(workspaceId, cachedCookie);
+    if (cachedResult.ok) {
+      console.log("♻️ 使用 .env 缓存的 session cookie（未启动浏览器）");
+      return (await pushSnapshot(env, account, workspaceId, cachedResult.payload)) ? "ok" : "failed";
+    }
+    if (cachedResult.kind === "forbidden") {
+      console.warn(`⚠️ 缓存 cookie 无权访问该 workspace：${cachedResult.message}`);
+    } else {
+      console.log(`ℹ️ 缓存 cookie 不可用（${cachedResult.message}），转浏览器登录`);
+    }
+  }
+
+  // 2) 浏览器路径：可选账号（已停用）不再等待人工登录
+  if (account.optional) {
+    console.log(`ℹ️ 账号 ${account.label} 标记为可选（已停用），跳过浏览器登录；如需恢复请先确认账号状态`);
+    return "skipped";
+  }
+
+  const loggedIn = await loginInBrowser(account, workspaceId, waitForLogin);
+  if (!loggedIn) {
+    return "failed";
+  }
+
+  // 3) 缓存新 cookie（只写 .env，不进日志）
+  updateEnvKey(envPath, account.sessionCookieEnv, loggedIn.cookie);
+  console.log(`💾 已把 ${account.sessionCookieEnv} 写入 .env`);
+
+  return (await pushSnapshot(env, account, workspaceId, loggedIn.result.payload)) ? "ok" : "failed";
+}
+
 async function main(): Promise<void> {
+  const envPath = resolve(process.cwd(), ".env");
   const env = loadEnv();
   console.log("✅ 环境变量加载成功");
 
@@ -321,42 +432,27 @@ async function main(): Promise<void> {
   }
   console.log(`   推送目标: ${env.APIMONITOR_INGEST_URL}`);
 
-  // 终止残留浏览器进程，释放 Profile 锁
-  killBrowserProcesses();
-
-  const { chromium } = await import("playwright");
+  // 一键刷新等非交互场景传 --no-wait-login，避免登录失效时卡住 5 分钟
+  const waitForLogin = !process.argv.includes("--no-wait-login");
+  if (!waitForLogin) {
+    console.log("   模式: 无人值守（登录失效时跳过，不等待手动登录）");
+  }
 
   let success = 0;
   let failed = 0;
+  let skipped = 0;
 
   for (const account of ACCOUNTS) {
     console.log(`\n━━━ 处理账号：${account.label} ━━━`);
-
-    // 未配置该账号 workspaceId 则跳过（不计入失败）
-    if (!env[account.workspaceIdEnv]) {
-      console.warn(`⚠️ 未配置 ${account.workspaceIdEnv}，跳过账号 ${account.label}`);
-      continue;
-    }
-
-    const userDataDir = process.env.BROWSER_USER_DATA_DIR ?? account.userDataDir;
-    const authCookie = await extractAuthCookie(chromium, account.browserName, userDataDir, account.profileDirectory);
-    if (!authCookie) {
-      console.error(`❌ 账号 ${account.label} 未提取到 auth cookie`);
-      failed += 1;
-      continue;
-    }
-
-    const ok = await refreshAccount(env, account, authCookie);
-    if (ok) {
-      success += 1;
-    } else {
-      failed += 1;
-    }
+    const outcome = await refreshAccount(env, envPath, account, waitForLogin);
+    if (outcome === "ok") success += 1;
+    else if (outcome === "failed") failed += 1;
+    else skipped += 1;
   }
 
-  console.log(`\n━━━ 汇总：成功 ${success} 个，失败 ${failed} 个 ━━━`);
+  console.log(`\n━━━ 汇总：成功 ${success} 个，失败 ${failed} 个，跳过 ${skipped} 个 ━━━`);
   if (success === 0) {
-    console.error("❌ 所有账号刷新均失败");
+    console.error("❌ 没有账号刷新成功");
     process.exit(1);
   }
   console.log("   看板下次加载 /api/usage 将展示该快照（最近成功快照回退）。");

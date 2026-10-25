@@ -1,93 +1,47 @@
-import { clampNumber, parseHeadersCookie, toIsoString } from "../http";
+import { parseHeadersCookie, toIsoString } from "../http";
 import type { ProviderDefinition, ProviderFetchInput, ProviderFetchResult } from "../types";
 import { createResult } from "./types";
-import { parseOpenCodeGoWindows } from "./opencode-go-parser";
-import { renderOpenCodeGoBrowserHtml } from "./opencode-go-browser";
+import { parseOpenCodeGoStatus, type OpenCodeGoStatusPayload } from "./opencode-go-parser";
 
 type OpenCodeGoConfig = {
   workspaceId?: string;
+  // 新版控制台的会话 cookie（__Host-console_session），推荐字段
+  sessionCookie?: string;
+  // 旧字段：历史配置里是 `auth` cookie，新版接口只认 __Host-console_session
   authCookie?: string;
   apiKey?: string;
   baseUrl?: string;
-  browserFallbackEnabled?: boolean | string;
 };
 
-function isBrowserFallbackEnabled(value: boolean | string | undefined): boolean {
-  return value === true || value === "1" || value === "true";
-}
+// opencode 新版控制台用 __Host- 前缀的 host-only cookie 维持登录态
+const SESSION_COOKIE_NAME = "__Host-console_session";
 
-function toCookiePair(name: unknown, value: unknown): string | null {
-  if (typeof name !== "string" || name.trim() === "") return null;
-  if (value === undefined || value === null) return null;
-  const cookieName = name.trim();
-  if (cookieName.includes(";") || cookieName.includes("=")) return null;
-  return `${cookieName}=${String(value)}`;
-}
-
-function parseJsonCookie(rawCookie: string): string | null {
-  try {
-    const parsed = JSON.parse(rawCookie) as unknown;
-    if (Array.isArray(parsed)) {
-      const pairs = parsed
-        .map((item) => {
-          if (!item || typeof item !== "object") return null;
-          const record = item as Record<string, unknown>;
-          return toCookiePair(record.name, record.value);
-        })
-        .filter((pair): pair is string => Boolean(pair));
-      return pairs.length > 0 ? pairs.join("; ") : null;
-    }
-
-    if (parsed && typeof parsed === "object") {
-      const record = parsed as Record<string, unknown>;
-      const nestedCookie = record.cookie ?? record.Cookie ?? record.header ?? record.value;
-      if (typeof nestedCookie === "string") {
-        return normalizeOpenCodeCookie(nestedCookie) ?? null;
-      }
-
-      const singlePair = toCookiePair(record.name, record.value);
-      if (singlePair) return singlePair;
-
-      const pairs = Object.entries(record)
-        .map(([name, value]) => {
-          if (typeof value === "object") return null;
-          return toCookiePair(name, value);
-        })
-        .filter((pair): pair is string => Boolean(pair));
-      return pairs.length > 0 ? pairs.join("; ") : null;
-    }
-  } catch {
-    return null;
-  }
-
-  return null;
-}
-
-function normalizeOpenCodeCookie(rawCookie: string | undefined): string | undefined {
-  const trimmed = parseHeadersCookie(rawCookie);
-  if (!trimmed) return undefined;
-
-  const jsonCookie = parseJsonCookie(trimmed);
-  if (jsonCookie) return jsonCookie;
-
-  if (trimmed.includes("=")) return trimmed;
-  return `auth=${trimmed}`;
-}
-
-function isOpenCodeAuthUrl(value: string | null | undefined): boolean {
-  if (!value) return false;
-  try {
-    const url = new URL(value, "https://opencode.ai");
-    return url.hostname === "auth.opencode.ai" || url.pathname.startsWith("/auth/");
-  } catch {
-    return /auth\.opencode\.ai|\/auth\//i.test(value);
-  }
+function getOrigin(config: OpenCodeGoConfig): string {
+  return config.baseUrl?.replace(/\/$/, "") ?? "https://opencode.ai";
 }
 
 function getDashboardUrl(config: OpenCodeGoConfig): string {
-  const origin = config.baseUrl?.replace(/\/$/, "") ?? "https://opencode.ai";
-  if (!config.workspaceId) return `${origin}/workspace`;
-  return `${origin}/workspace/${encodeURIComponent(config.workspaceId)}/go`;
+  const origin = getOrigin(config);
+  if (!config.workspaceId) return `${origin}/console`;
+  return `${origin}/console/${encodeURIComponent(config.workspaceId)}/go`;
+}
+
+// 归一化 cookie：兼容三种输入——完整 cookie 串、单条 `name=value`、裸值
+function normalizeSessionCookie(rawCookie: string | undefined): string | undefined {
+  const trimmed = parseHeadersCookie(rawCookie);
+  if (!trimmed) return undefined;
+
+  const parts = trimmed
+    .split(";")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  const sessionPart = parts.find((part) => part.startsWith(`${SESSION_COOKIE_NAME}=`));
+  if (sessionPart) return sessionPart;
+  if (trimmed.includes("=")) {
+    // 旧配置（如 `auth=...`）原样带出：新版接口会返回 401，由调用方提示重新登录
+    return trimmed.replace(/^cookie:\s*/i, "");
+  }
+  return `${SESSION_COOKIE_NAME}=${trimmed}`;
 }
 
 export async function fetchOpenCodeGoSnapshot(input: ProviderFetchInput): Promise<ProviderFetchResult> {
@@ -95,176 +49,149 @@ export async function fetchOpenCodeGoSnapshot(input: ProviderFetchInput): Promis
   const fetchImpl = input.fetchImpl ?? fetch;
   const config = (input.config ?? {}) as OpenCodeGoConfig;
   const sourceUrl = getDashboardUrl(config);
+  const base = {
+    providerId: "opencode-go" as const,
+    providerName: "OpenCode Go",
+    sourceUrl,
+    capturedAt: now,
+  };
 
-  if (!config.workspaceId || (!config.authCookie && !config.apiKey)) {
+  if (!config.workspaceId) {
     return createResult({
-      providerId: "opencode-go",
-      providerName: "OpenCode Go",
-      sourceUrl,
+      ...base,
       status: "login_required",
-      capturedAt: now,
-      summary: "Missing workspaceId, auth cookie, or API key",
+      summary: "Missing workspaceId",
       windows: [],
-      metrics: {
-        hasWorkspaceId: Boolean(config.workspaceId),
-        hasAuthCookie: Boolean(config.authCookie),
-        hasApiKey: Boolean(config.apiKey),
-      },
-      meta: {},
+      metrics: { hasWorkspaceId: false },
+      meta: { fetchMethod: "api" },
+    });
+  }
+
+  const sessionCookie = normalizeSessionCookie(config.sessionCookie ?? config.authCookie);
+  if (!sessionCookie && !config.apiKey) {
+    return createResult({
+      ...base,
+      status: "login_required",
+      summary: "Missing session cookie",
+      windows: [],
+      metrics: { hasWorkspaceId: true, hasSessionCookie: false },
+      meta: { fetchMethod: "api" },
     });
   }
 
   const requestHeaders: Record<string, string> = {
-    Accept: "text/html,application/xhtml+xml",
+    Accept: "application/json",
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ApiMonitor/0.1",
+    // 新版控制台接口必须带 x-org-id，缺失会返回 400 org_required
+    "x-org-id": config.workspaceId,
   };
-
+  if (sessionCookie) {
+    requestHeaders.Cookie = sessionCookie;
+  }
   if (config.apiKey) {
-    requestHeaders["Authorization"] = `Bearer ${config.apiKey}`;
-  } else if (config.authCookie) {
-    const normalizedCookie = normalizeOpenCodeCookie(config.authCookie);
-    if (normalizedCookie) {
-      requestHeaders["Cookie"] = normalizedCookie;
-    }
+    requestHeaders.Authorization = `Bearer ${config.apiKey}`;
   }
 
-  const response = await fetchImpl(sourceUrl, {
-    redirect: "manual",
-    headers: requestHeaders,
-  });
+  const apiUrl = `${getOrigin(config)}/console/api/go/status`;
+  try {
+    const response = await fetchImpl(apiUrl, { headers: requestHeaders, redirect: "manual" });
+    const bodyText = await response.text();
 
-  const html = await response.text();
-  const location = response.headers.get("location");
-  const redirectedToLogin = response.status >= 300 && response.status < 400 && isOpenCodeAuthUrl(location);
-  const fetchStatus = !response.ok
-    ? response.status === 401 || response.status === 403 || redirectedToLogin ? "login_required" : "error"
-    : "ready";
-  const loginRequired = response.ok
-    ? isOpenCodeAuthUrl(response.url) || /<title[^>]*>\s*OpenAuth\s*<\/title>|sign in|log in|login|登录|登入/i.test(html)
-    : fetchStatus === "login_required";
-  const parsedWindows = response.ok && !loginRequired
-    ? parseOpenCodeGoWindows(html, input.now)
-    : [];
-  const fetchSummary = !response.ok
-    ? redirectedToLogin
-      ? "OpenCode Go dashboard redirected to login"
-      : `OpenCode Go dashboard returned HTTP ${response.status}`
-    : loginRequired
-      ? "OpenCode Go dashboard appears to require login"
-      : parsedWindows.length > 0
-        ? "OpenCode Go usage windows parsed"
-        : "OpenCode Go dashboard loaded but usage windows were not found";
+    if (response.status === 401) {
+      return createResult({
+        ...base,
+        status: "login_required",
+        summary: "OpenCode session 无效或已过期，请重新登录 opencode 控制台",
+        windows: [],
+        metrics: { httpStatus: response.status },
+        meta: { fetchMethod: "api" },
+      });
+    }
 
-  if (parsedWindows.length > 0) {
+    if (response.status === 403) {
+      return createResult({
+        ...base,
+        status: "login_required",
+        summary: "该 session 无权访问此 workspace（可能登录了其它账号）",
+        windows: [],
+        metrics: { httpStatus: response.status },
+        meta: { fetchMethod: "api" },
+      });
+    }
+
+    if (!response.ok) {
+      return createResult({
+        ...base,
+        status: "error",
+        summary: `OpenCode Go 用量接口返回 HTTP ${response.status}`,
+        windows: [],
+        metrics: { httpStatus: response.status },
+        meta: { fetchMethod: "api" },
+      });
+    }
+
+    let payload: OpenCodeGoStatusPayload;
+    try {
+      payload = JSON.parse(bodyText) as OpenCodeGoStatusPayload;
+    } catch {
+      return createResult({
+        ...base,
+        status: "error",
+        summary: "OpenCode Go 用量接口返回了非 JSON 内容",
+        windows: [],
+        metrics: { httpStatus: response.status },
+        meta: { fetchMethod: "api" },
+      });
+    }
+
+    const windows = parseOpenCodeGoStatus(payload);
+    if (windows.length === 0) {
+      return createResult({
+        ...base,
+        status: "partial",
+        summary: "登录成功，但未找到 Go 订阅用量窗口（可能未订阅或额度接口变更）",
+        windows: [],
+        metrics: {
+          httpStatus: response.status,
+          product: payload.product ?? null,
+          endsAt: payload.access?.endsAt ?? null,
+        },
+        meta: { fetchMethod: "api" },
+      });
+    }
+
     return createResult({
-      providerId: "opencode-go",
-      providerName: "OpenCode Go",
-      sourceUrl,
+      ...base,
       status: "ready",
-      capturedAt: now,
-      summary: "OpenCode Go usage windows parsed",
-      windows: parsedWindows,
+      summary: "OpenCode Go 用量窗口已解析",
+      windows,
       metrics: {
-        hasRolling: parsedWindows.some((window) => window.key === "rolling"),
-        hasWeekly: parsedWindows.some((window) => window.key === "weekly"),
-        hasMonthly: parsedWindows.some((window) => window.key === "monthly"),
+        httpStatus: response.status,
+        product: payload.product ?? null,
+        endsAt: payload.access?.endsAt ?? null,
+        hasRolling: windows.some((window) => window.key === "rolling"),
+        hasWeekly: windows.some((window) => window.key === "weekly"),
+        hasMonthly: windows.some((window) => window.key === "monthly"),
       },
-      meta: {
-        fetchMethod: config.apiKey ? "api_key" : "worker_fetch",
-      },
+      meta: { fetchMethod: "api" },
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "OpenCode Go 用量接口请求失败";
+    return createResult({
+      ...base,
+      status: "error",
+      summary: `OpenCode Go 用量接口请求失败：${message}`,
+      windows: [],
+      metrics: {},
+      meta: { fetchMethod: "api" },
     });
   }
-
-  if (isBrowserFallbackEnabled(config.browserFallbackEnabled)) {
-    const renderer = input.browserRenderer ?? (input.browser ? renderOpenCodeGoBrowserHtml : null);
-    if (!renderer) {
-      return createResult({
-        providerId: "opencode-go",
-        providerName: "OpenCode Go",
-        sourceUrl,
-        status: fetchStatus === "error" ? "error" : "login_required",
-        capturedAt: now,
-        summary: fetchSummary,
-        windows: [],
-        metrics: { httpStatus: response.status },
-        meta: {
-          fetchMethod: "worker_fetch",
-          browserFallbackAttempted: true,
-          browserFallbackStatus: "missing_binding",
-        },
-      });
-    }
-
-    try {
-      const browserHtml = await renderer({
-        sourceUrl,
-        authCookie: normalizeOpenCodeCookie(config.authCookie),
-        browser: input.browser,
-      });
-      const browserWindows = parseOpenCodeGoWindows(browserHtml, input.now);
-      if (browserWindows.length > 0) {
-        return createResult({
-          providerId: "opencode-go",
-          providerName: "OpenCode Go",
-          sourceUrl,
-          status: "ready",
-          capturedAt: now,
-          summary: "OpenCode Go usage windows parsed by Cloudflare Browser Run",
-          windows: browserWindows,
-          metrics: {
-            hasRolling: browserWindows.some((window) => window.key === "rolling"),
-            hasWeekly: browserWindows.some((window) => window.key === "weekly"),
-            hasMonthly: browserWindows.some((window) => window.key === "monthly"),
-          },
-          meta: {
-            fetchMethod: "browser_rendered",
-            liveFetchStatus: fetchStatus === "ready" ? "partial" : fetchStatus,
-            liveFetchSummary: fetchSummary,
-          },
-        });
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Browser Run fallback failed";
-      return createResult({
-        providerId: "opencode-go",
-        providerName: "OpenCode Go",
-        sourceUrl,
-        status: fetchStatus === "error" ? "error" : "login_required",
-        capturedAt: now,
-        summary: fetchSummary,
-        windows: [],
-        metrics: { httpStatus: response.status },
-        meta: {
-          fetchMethod: "worker_fetch",
-          browserFallbackAttempted: true,
-          browserFallbackStatus: "error",
-          browserFallbackSummary: message,
-        },
-      });
-    }
-  }
-
-  return createResult({
-    providerId: "opencode-go",
-    providerName: "OpenCode Go",
-    sourceUrl,
-    status: loginRequired ? "login_required" : "partial",
-    capturedAt: now,
-    summary: fetchSummary,
-    windows: [],
-    metrics: {
-      hasRolling: false,
-      hasWeekly: false,
-      hasMonthly: false,
-    },
-    meta: { fetchMethod: "worker_fetch" },
-  });
 }
 
 export const opencodeGo: ProviderDefinition = {
   id: "opencode-go",
   name: "OpenCode Go",
-  sourceUrl: "https://opencode.ai/workspace/{workspaceId}/go",
-  description: "OpenCode Go workspace dashboard usage snapshot",
+  sourceUrl: "https://opencode.ai/console/{workspaceId}/go",
+  description: "OpenCode Go 控制台用量快照（/console/api/go/status）",
   fetchSnapshot: fetchOpenCodeGoSnapshot,
 };

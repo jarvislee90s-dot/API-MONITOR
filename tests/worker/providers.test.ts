@@ -1,9 +1,9 @@
-﻿import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { getProvider, isProviderId, listProviders } from "../../worker/providers/registry";
 import { fetchOpenRouterSnapshot } from "../../worker/providers/openrouter";
 import { fetchOpenCodeGoSnapshot } from "../../worker/providers/opencode-go";
-import { parseOpenCodeGoWindows } from "../../worker/providers/opencode-go-parser";
+import { parseOpenCodeGoStatus } from "../../worker/providers/opencode-go-parser";
 import { fetchXfyunMaaSSnapshot } from "../../worker/providers/xfyun-maas";
 import { fetchAliyunBailianSnapshot } from "../../worker/providers/aliyun-bailian";
 import { fetchVolcArkSnapshot } from "../../worker/providers/volc-ark";
@@ -114,37 +114,61 @@ describe("openrouter adapter", () => {
 });
 
 describe("opencode-go adapter", () => {
-  it("returns login_required when the cloud auth inputs are missing", async () => {
+  // 实测自 /console/api/go/status（microCents → 百分比换算用例）
+  const goStatusPayload = {
+    product: "go",
+    access: {
+      startsAt: "2026-10-24T14:38:24.000Z",
+      endsAt: "2026-11-24T14:38:24.000Z",
+      meters: {
+        fiveHour: {
+          resetsAt: "2026-10-25T04:03:11.000Z",
+          limitMicroCents: "1200000000",
+          usedMicroCents: "54479842",
+        },
+        week: {
+          resetsAt: "2026-10-26T00:00:00.000Z",
+          limitMicroCents: "3000000000",
+          usedMicroCents: "112619438",
+        },
+        month: {
+          resetsAt: "2026-11-24T14:38:24.000Z",
+          limitMicroCents: "6000000000",
+          usedMicroCents: "112619438",
+        },
+      },
+    },
+  };
+
+  it("returns login_required when workspaceId is missing", async () => {
     const result = await fetchOpenCodeGoSnapshot({
       now: new Date("2026-06-11T00:00:00.000Z"),
       config: {},
     });
 
     expect(result.snapshot.status).toBe("login_required");
-    expect(result.snapshot.summary).toContain("Missing workspaceId, auth cookie, or API key");
+    expect(result.snapshot.summary).toContain("Missing workspaceId");
   });
 
-  it("uses Bearer auth when an OpenCode API key is configured", async () => {
-    const html = [
-      "<html><script>",
-      "rollingUsage:$R[10]={usagePercent:12,resetInSec:7200}",
-      "weeklyUsage:$R[11]={resetInSec:500000,usagePercent:34}",
-      "monthlyUsage:$R[12]={usagePercent:45,resetInSec:2480000}",
-      "</script></html>",
-    ].join("");
+  it("returns login_required when the session cookie is missing", async () => {
+    const result = await fetchOpenCodeGoSnapshot({
+      now: new Date("2026-06-11T00:00:00.000Z"),
+      config: { workspaceId: "wrk_123" },
+    });
 
+    expect(result.snapshot.status).toBe("login_required");
+    expect(result.snapshot.summary).toContain("Missing session cookie");
+  });
+
+  it("sends x-org-id and Bearer auth when an API key is configured", async () => {
     const seenHeaders: Record<string, string>[] = [];
-    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
-      if (init?.headers) {
-        const headers: Record<string, string> = {};
-        const h = new Headers(init.headers);
-        h.forEach((v, k) => { headers[k] = v; });
-        seenHeaders.push(headers);
-      }
-      return new Response(html, {
-        status: 200,
-        headers: { "content-type": "text/html; charset=utf-8" },
-      });
+    const fetchedUrls: string[] = [];
+    const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      fetchedUrls.push(String(url));
+      const headers: Record<string, string> = {};
+      new Headers(init?.headers).forEach((value, key) => { headers[key] = value; });
+      seenHeaders.push(headers);
+      return Response.json(goStatusPayload);
     });
 
     const result = await fetchOpenCodeGoSnapshot({
@@ -157,38 +181,24 @@ describe("opencode-go adapter", () => {
     });
 
     expect(result.snapshot.status).toBe("ready");
-    expect(result.snapshot.windows.map((w) => w.key)).toEqual(["rolling", "weekly", "monthly"]);
-    expect(result.snapshot.windows[0]).toMatchObject({
-      used: 12,
-      remaining: 88,
-      percentUsed: 12,
+    expect(fetchedUrls).toEqual(["https://opencode.ai/console/api/go/status"]);
+    expect(seenHeaders[0]).toMatchObject({
+      "x-org-id": "wrk_abc",
+      Authorization: "Bearer sk-test-key",
+      Accept: "application/json",
     });
-    expect(result.snapshot.meta).toMatchObject({ fetchMethod: "api_key" });
-    expect(seenHeaders[0]).toMatchObject({ Authorization: "Bearer sk-test-key" });
-    expect(seenHeaders[0]).not.toHaveProperty("Cookie");
+    expect(seenHeaders[0]).not.toHaveProperty("cookie");
   });
 
-  it("parses rolling, weekly, and monthly usage windows", async () => {
-    const html = [
-      "<html><script>",
-      "rollingUsage:$R[10]={usagePercent:7,resetInSec:18000}",
-      "weeklyUsage:$R[11]={resetInSec:540000,usagePercent:2}",
-      "monthlyUsage:$R[12]={usagePercent:16,resetInSec:2480000}",
-      "</script></html>",
-    ].join("");
-    const fetchImpl = vi.fn(async () => {
-      return new Response(html, {
-        status: 200,
-        headers: { "content-type": "text/html; charset=utf-8" },
-      });
-    });
+  it("parses meters into rolling, weekly and monthly windows", async () => {
+    const fetchImpl = vi.fn(async () => Response.json(goStatusPayload));
 
     const result = await fetchOpenCodeGoSnapshot({
-      now: new Date("2026-06-11T00:00:00.000Z"),
+      now: new Date("2026-10-25T02:00:00.000Z"),
       fetchImpl: fetchImpl as typeof fetch,
       config: {
         workspaceId: "wrk_123",
-        authCookie: "auth-cookie=abc",
+        sessionCookie: "session-token",
       },
     });
 
@@ -200,88 +210,73 @@ describe("opencode-go adapter", () => {
     ]);
     expect(result.snapshot.windows[0]).toMatchObject({
       label: "5h",
-      used: 7,
-      percentRemaining: 93,
-      resetAt: "2026-06-11T13:00:00+08:00",
+      used: 4.54,
+      limit: 100,
+      remaining: 95.46,
+      percentUsed: 4.54,
+      percentRemaining: 95.46,
+      resetAt: "2026-10-25T12:03:11+08:00",
     });
-    expect(result.snapshot.windows[1]).toMatchObject({
-      label: "Weekly",
-      used: 2,
-      percentRemaining: 98,
+    expect(result.snapshot.windows[1]).toMatchObject({ label: "Weekly", used: 3.75 });
+    expect(result.snapshot.windows[2]).toMatchObject({ label: "Monthly", used: 1.88 });
+    expect(result.snapshot.metrics).toMatchObject({
+      product: "go",
+      endsAt: "2026-11-24T14:38:24.000Z",
     });
-    expect(result.snapshot.windows[2]).toMatchObject({
-      label: "Monthly",
-      used: 16,
-      percentRemaining: 84,
-    });
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(result.snapshot.meta).toMatchObject({ fetchMethod: "api" });
   });
 
-  it("normalizes auth token and DevTools JSON cookies before fetching", async () => {
-    const html = "rollingUsage:$R[10]={usagePercent:7,resetInSec:18000}";
+  it("normalizes session cookies (bare value / full header / explicit name)", async () => {
     const seenCookies: string[] = [];
     const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
-      const headers = new Headers(init?.headers);
-      seenCookies.push(headers.get("Cookie") ?? "");
-      return new Response(html, {
-        status: 200,
-        headers: { "content-type": "text/html; charset=utf-8" },
-      });
+      seenCookies.push(new Headers(init?.headers).get("cookie") ?? "");
+      return Response.json(goStatusPayload);
     });
 
     await fetchOpenCodeGoSnapshot({
       now: new Date("2026-06-11T00:00:00.000Z"),
       fetchImpl: fetchImpl as typeof fetch,
-      config: {
-        workspaceId: "wrk_123",
-        authCookie: "abc123",
-      },
+      config: { workspaceId: "wrk_123", sessionCookie: "abc123" },
     });
     await fetchOpenCodeGoSnapshot({
       now: new Date("2026-06-11T00:00:00.000Z"),
       fetchImpl: fetchImpl as typeof fetch,
-      config: {
-        workspaceId: "wrk_123",
-        authCookie: JSON.stringify([
-          { name: "auth", value: "json-token" },
-          { name: "theme", value: "light" },
-        ]),
-      },
+      config: { workspaceId: "wrk_123", sessionCookie: "__Host-console_session=xyz; oc_locale=zh" },
+    });
+    await fetchOpenCodeGoSnapshot({
+      now: new Date("2026-06-11T00:00:00.000Z"),
+      fetchImpl: fetchImpl as typeof fetch,
+      config: { workspaceId: "wrk_123", authCookie: "__Host-console_session=legacy" },
     });
 
-    expect(seenCookies).toEqual(["auth=abc123", "auth=json-token; theme=light"]);
+    expect(seenCookies).toEqual([
+      "__Host-console_session=abc123",
+      "__Host-console_session=xyz",
+      "__Host-console_session=legacy",
+    ]);
   });
 
-  it("reports login_required when OpenCode redirects to auth", async () => {
-    const fetchImpl = vi.fn(async () => {
-      return new Response("", {
-        status: 302,
-        headers: { location: "https://auth.opencode.ai/authorize?client_id=app" },
-      });
-    });
+  it("maps 401 to login_required", async () => {
+    const fetchImpl = vi.fn(async () => new Response("unauthorized", { status: 401 }));
 
     const result = await fetchOpenCodeGoSnapshot({
       now: new Date("2026-06-11T00:00:00.000Z"),
       fetchImpl: fetchImpl as typeof fetch,
       config: {
         workspaceId: "wrk_123",
-        authCookie: "abc123",
+        sessionCookie: "expired",
       },
     });
 
     expect(result.snapshot.status).toBe("login_required");
-    expect(result.snapshot.summary).toContain("redirected to login");
+    expect(result.snapshot.summary).toContain("session 无效或已过期");
   });
 
-  it("uses baseUrl as the OpenCode origin while preserving the workspace route", async () => {
-    const html = "rollingUsage:$R[10]={usagePercent:7,resetInSec:18000}";
+  it("uses baseUrl as the origin while keeping the console API route", async () => {
     const fetchedUrls: string[] = [];
     const fetchImpl = vi.fn(async (url: string | URL | Request) => {
       fetchedUrls.push(String(url));
-      return new Response(html, {
-        status: 200,
-        headers: { "content-type": "text/html; charset=utf-8" },
-      });
+      return Response.json(goStatusPayload);
     });
 
     await fetchOpenCodeGoSnapshot({
@@ -289,105 +284,84 @@ describe("opencode-go adapter", () => {
       fetchImpl: fetchImpl as typeof fetch,
       config: {
         workspaceId: "wrk_123",
-        authCookie: "auth=abc123",
-        baseUrl: "https://opencode.ai",
+        sessionCookie: "session-token",
+        baseUrl: "https://opencode.example.com/",
       },
     });
 
-    expect(fetchedUrls).toEqual(["https://opencode.ai/workspace/wrk_123/go"]);
+    expect(fetchedUrls).toEqual(["https://opencode.example.com/console/api/go/status"]);
   });
 
-  it("parses OpenCode Go usage windows through the shared parser", () => {
-    const html = [
-      "<html><script>",
-      "rollingUsage:$R[10]={usagePercent:6,resetInSec:10200}",
-      "weeklyUsage:$R[11]={usagePercent:16,resetInSec:489600}",
-      "monthlyUsage:$R[12]={usagePercent:25,resetInSec:1987200}",
-      "</script></html>",
-    ].join("");
-
-    const windows = parseOpenCodeGoWindows(html, new Date("2026-06-16T07:00:00.000Z"));
+  it("parses the Go status payload through the shared parser", () => {
+    const windows = parseOpenCodeGoStatus(goStatusPayload);
 
     expect(windows.map((window) => window.key)).toEqual(["rolling", "weekly", "monthly"]);
     expect(windows[0]).toMatchObject({
       key: "rolling",
       label: "5h",
-      used: 6,
+      used: 4.54,
       limit: 100,
-      remaining: 94,
-      percentUsed: 6,
-      percentRemaining: 94,
-      resetAt: "2026-06-16T17:50:00+08:00",
+      remaining: 95.46,
+      percentUsed: 4.54,
+      percentRemaining: 95.46,
+      resetAt: "2026-10-25T12:03:11+08:00",
     });
-    expect(windows[1]).toMatchObject({ key: "weekly", used: 16, remaining: 84 });
-    expect(windows[2]).toMatchObject({ key: "monthly", used: 25, remaining: 75 });
+    expect(windows[1]).toMatchObject({ key: "weekly", used: 3.75 });
+    expect(windows[2]).toMatchObject({ key: "monthly", used: 1.88 });
   });
 
-  it("uses the injected browser renderer when lightweight OpenCode fetch redirects to login", async () => {
-    const fetchImpl = vi.fn(async () => {
-      return new Response("", {
-        status: 302,
-        headers: { location: "https://auth.opencode.ai/authorize?client_id=app" },
-      });
-    });
-    const browserRenderer = vi.fn(async () => {
-      return [
-        "<html><script>",
-        "rollingUsage:$R[10]={usagePercent:6,resetInSec:10200}",
-        "weeklyUsage:$R[11]={usagePercent:16,resetInSec:489600}",
-        "monthlyUsage:$R[12]={usagePercent:25,resetInSec:1987200}",
-        "</script></html>",
-      ].join("");
-    });
-
-    const result = await fetchOpenCodeGoSnapshot({
-      now: new Date("2026-06-16T07:00:00.000Z"),
-      fetchImpl: fetchImpl as typeof fetch,
-      browserRenderer,
-      config: {
-        workspaceId: "wrk_123",
-        authCookie: "auth=abc123",
-        browserFallbackEnabled: true,
+  it("skips missing meters and rounds percentages to two decimals", () => {
+    const windows = parseOpenCodeGoStatus({
+      access: {
+        meters: {
+          fiveHour: { limitMicroCents: "300000000", usedMicroCents: "100000000", resetsAt: null },
+          week: null,
+          month: { limitMicroCents: "0", usedMicroCents: "5" },
+        },
       },
     });
 
-    expect(result.snapshot.status).toBe("ready");
-    expect(result.snapshot.windows.map((window) => window.key)).toEqual(["rolling", "weekly", "monthly"]);
-    expect(result.snapshot.meta).toMatchObject({
-      fetchMethod: "browser_rendered",
-      liveFetchStatus: "login_required",
-    });
-    expect(browserRenderer).toHaveBeenCalledWith({
-      sourceUrl: "https://opencode.ai/workspace/wrk_123/go",
-      authCookie: "auth=abc123",
-      browser: undefined,
+    expect(windows).toHaveLength(1);
+    expect(windows[0]).toMatchObject({
+      key: "rolling",
+      used: 33.33,
+      remaining: 66.67,
+      resetAt: null,
     });
   });
 
-  it("keeps login_required when browser fallback is enabled but no renderer or binding is available", async () => {
-    const fetchImpl = vi.fn(async () => {
-      return new Response("", {
-        status: 302,
-        headers: { location: "https://auth.opencode.ai/authorize?client_id=app" },
-      });
-    });
+  it("maps 403 to login_required with an account mismatch hint", async () => {
+    const fetchImpl = vi.fn(async () => Response.json({ _tag: "Forbidden" }, { status: 403 }));
 
     const result = await fetchOpenCodeGoSnapshot({
-      now: new Date("2026-06-16T07:00:00.000Z"),
+      now: new Date("2026-06-11T00:00:00.000Z"),
       fetchImpl: fetchImpl as typeof fetch,
-      config: {
-        workspaceId: "wrk_123",
-        authCookie: "auth=abc123",
-        browserFallbackEnabled: true,
-      },
+      config: { workspaceId: "wrk_123", sessionCookie: "session-token" },
     });
 
     expect(result.snapshot.status).toBe("login_required");
-    expect(result.snapshot.meta).toMatchObject({
-      fetchMethod: "worker_fetch",
-      browserFallbackAttempted: true,
-      browserFallbackStatus: "missing_binding",
+    expect(result.snapshot.summary).toContain("无权访问此 workspace");
+  });
+
+  it("returns partial when the API responds without meters", async () => {
+    const fetchImpl = vi.fn(async () =>
+      Response.json({
+        product: "go",
+        access: {
+          endsAt: "2026-11-24T00:00:00.000Z",
+          meters: { fiveHour: null, week: null, month: null },
+        },
+      }),
+    );
+
+    const result = await fetchOpenCodeGoSnapshot({
+      now: new Date("2026-06-11T00:00:00.000Z"),
+      fetchImpl: fetchImpl as typeof fetch,
+      config: { workspaceId: "wrk_123", sessionCookie: "session-token" },
     });
+
+    expect(result.snapshot.status).toBe("partial");
+    expect(result.snapshot.summary).toContain("未找到 Go 订阅用量窗口");
   });
 });
 

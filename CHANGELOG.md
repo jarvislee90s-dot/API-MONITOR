@@ -2,6 +2,32 @@
 
 本项目使用 Keep a Changelog 风格记录：`Added` / `Changed` / `Fixed`。版本号按日期递增（`YYYY-MM-DD`）。
 
+## [2026-10-25] - OpenCode Go 适配新版控制台（/console + JSON API）
+
+### Changed
+
+- **opencode.ai 改版**：用量页由 `/workspace/{id}/go` 迁到 `/console/{id}/go`，用量不再内嵌在页面 RSC（`rollingUsage:$R[...]`）里，改由 `GET /console/api/go/status` 返回 JSON —— 必须同时带 `x-org-id: <workspaceId>` 头与 `__Host-console_session` cookie。
+- Worker provider、本地刷新脚本、cookie 刷新脚本、设置页入口 URL 全部切到新地址与 JSON 接口；窗口百分比按 `usedMicroCents / limitMicroCents` 换算（保留两位小数），窗口语义仍是 `used=百分比 / limit=100`，前端展示无需改动。
+- 本地脚本改为 **cookie 优先**：`.env` 的 `OPENCODE_GO_SESSION_COOKIE` 可以直接调接口（不启动浏览器）；只有 cookie 失效时才打开 Edge 并停下等你登录，登录成功后自动写回 `.env`。
+- 账号 2（`lijiawei_jarvis`）标记为可选账号：已停用时拿不到数据直接跳过，不阻塞账号 1。
+- README / `.env.example` 同步新变量（`OPENCODE_GO_SESSION_COOKIE` / `OPENCODE_GO_SESSION_COOKIE2`）。
+
+### Fixed
+
+- 修复 `scripts/refresh-opencode-usage.ts` 在新版页面下抓不到用量的问题（旧 HTML 正则已不存在）。
+- 修正设置页 OpenCode Go 凭据字段：`authCookie` → `sessionCookie`（`__Host-console_session`）。
+
+## [2026-10-24] - OpenCode Go 回到看板
+
+### Fixed
+
+- **回退快照按 provider 查询**：`fetchLatestReadySnapshots` 原实现用「全局 `limit 20` + 按时间倒序」取最近成功快照，chatgpt 每轮刷新都会落一条，很快把低频供应商（opencode-go 靠本地脚本推送）挤出窗口，导致云端 302 时明明有历史成功快照却回退不到、卡片显示空数据。现改为对每个 provider 分别查询（`provider_key=eq.<id>`，各取最近 10 条），并补了对应回归测试。
+- **OpenCode Go 刷新脚本给登录机会**：`scripts/refresh-opencode-usage.ts` 改为在 Edge Profile 内直接打开用量页抓取；登录态失效时不再直接报「被重定向到登录页」退出，而是保留浏览器窗口、打印提示，等你手动登录后自动继续（最长 300 秒）。新增 `--no-wait-login` 供 `refresh-enabled.bat` 等无人值守场景使用，避免卡住。
+
+### Changed
+
+- README 同步 OpenCode Go 刷新脚本的新行为（等待登录 / 无人值守模式）。
+
 ## [2026-10-15] - ChatGPT 双额度桶分开展示
 
 ### Added

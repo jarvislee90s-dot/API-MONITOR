@@ -85,32 +85,44 @@ const BROWSER_TARGETS = [
   },
 ];
 
+// 新版控制台：用量接口必须同时带 __Host-console_session 与 x-org-id
 async function validateCookie(
   cookie: string,
   workspaceId: string,
 ): Promise<{ valid: boolean; windows: string[]; error?: string }> {
-  const url = `https://opencode.ai/workspace/${encodeURIComponent(workspaceId)}/go`;
+  const url = "https://opencode.ai/console/api/go/status";
   try {
     const resp = await fetch(url, {
-      redirect: "manual",
       headers: {
-        Cookie: `auth=${cookie}`,
-        Accept: "text/html,application/xhtml+xml",
+        Accept: "application/json",
+        "x-org-id": workspaceId,
+        Cookie: `__Host-console_session=${cookie}`,
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ApiMonitor/0.1",
       },
     });
-    const html = await resp.text();
 
-    if (resp.status >= 300 && resp.status < 400) {
-      const location = resp.headers.get("location") ?? "";
-      return { valid: false, windows: [], error: `被重定向到: ${location}` };
+    if (resp.status === 401) {
+      return { valid: false, windows: [], error: "session 无效或已过期" };
+    }
+    if (resp.status === 403) {
+      return { valid: false, windows: [], error: "该 session 无权访问此 workspace（登录了其它账号）" };
+    }
+    if (!resp.ok) {
+      return { valid: false, windows: [], error: `接口返回 HTTP ${resp.status}` };
     }
 
-    const patterns = ["rollingUsage", "weeklyUsage", "monthlyUsage"];
-    const found = patterns.filter((p) => html.includes(p));
+    const payload = (await resp.json()) as {
+      access?: { meters?: { fiveHour?: unknown; week?: unknown; month?: unknown } };
+    };
+    const meters = payload.access?.meters;
+    const found = [
+      meters?.fiveHour ? "rolling" : null,
+      meters?.week ? "weekly" : null,
+      meters?.month ? "monthly" : null,
+    ].filter((item): item is string => Boolean(item));
 
     if (found.length === 0) {
-      return { valid: false, windows: [], error: "页面中未找到用量数据" };
+      return { valid: false, windows: [], error: "接口未返回 Go 订阅用量窗口（可能未订阅）" };
     }
 
     return { valid: true, windows: found };
@@ -120,16 +132,16 @@ async function validateCookie(
 }
 
 
-// 同步更新本地 .env 中的 OPENCODE_GO_AUTH_COOKIE
+// 同步更新本地 .env 中的 OPENCODE_GO_SESSION_COOKIE
 function updateEnvFile(cookieValue: string): void {
   const envPath = resolve(process.cwd(), ".env");
   const content = readFileSync(envPath, "utf-8");
   const eol = content.includes("\r\n") ? "\r\n" : "\n";
   const lines = content.split(/\r?\n/);
-  const newLine = `OPENCODE_GO_AUTH_COOKIE="${cookieValue}"`;
+  const newLine = `OPENCODE_GO_SESSION_COOKIE="${cookieValue}"`;
   let found = false;
   const updated = lines.map((line) => {
-    if (/^OPENCODE_GO_AUTH_COOKIE\s*=/.test(line)) {
+    if (/^OPENCODE_GO_SESSION_COOKIE\s*=/.test(line)) {
       found = true;
       return newLine;
     }
@@ -139,7 +151,7 @@ function updateEnvFile(cookieValue: string): void {
     updated.push("# OpenCode Go", newLine);
   }
   writeFileSync(envPath, updated.join(eol), "utf-8");
-  console.log("✅ 本地 .env 的 OPENCODE_GO_AUTH_COOKIE 已更新");
+  console.log("✅ 本地 .env 的 OPENCODE_GO_SESSION_COOKIE 已更新");
 }
 
 // AES-GCM 加密，与 Worker security/credentials.ts 保持一致
@@ -227,7 +239,7 @@ async function updateSupabaseCredentials(
     const label = providerKey === "opencode-go" ? "OpenCode Go" : providerKey;
     const sourceUrl =
       providerKey === "opencode-go"
-        ? `https://opencode.ai/workspace/${env.OPENCODE_GO_WORKSPACE_ID ?? ""}/go`
+        ? `https://opencode.ai/console/${env.OPENCODE_GO_WORKSPACE_ID ?? ""}/go`
         : "";
     try {
       const createResp = await fetch(
@@ -287,7 +299,7 @@ async function updateSupabaseCredentials(
       },
     );
     if (patchResp.ok) {
-      console.log("✅ Supabase 凭据已更新（config.authCookie）");
+      console.log("✅ Supabase 凭据已更新（config.sessionCookie）");
     } else {
       console.warn(`⚠️ Supabase 凭据更新失败: HTTP ${patchResp.status}`);
     }
@@ -321,7 +333,7 @@ async function updateWorkerSecret(env: Record<string, string>, cookieValue: stri
       method: "PUT",
       headers: baseHeaders,
       body: JSON.stringify({
-        name: "OPENCODE_GO_AUTH_COOKIE",
+        name: "OPENCODE_GO_SESSION_COOKIE",
         text: cookieValue,
         type: "secret_text",
       }),
@@ -335,7 +347,7 @@ async function updateWorkerSecret(env: Record<string, string>, cookieValue: stri
     throw new Error(`更新 Worker secret 失败: ${JSON.stringify(secretJson.errors)}`);
   }
 
-  console.log("✅ Worker secret OPENCODE_GO_AUTH_COOKIE 已更新");
+  console.log("✅ Worker secret OPENCODE_GO_SESSION_COOKIE 已更新");
 }
 
 async function main(): Promise<void> {
@@ -354,7 +366,7 @@ async function main(): Promise<void> {
 
   const { chromium } = await import("playwright");
 
-  let authCookieValue: string | undefined;
+  let sessionCookieValue: string | undefined;
 
   for (const target of BROWSER_TARGETS) {
     const userDataDir = process.env.BROWSER_USER_DATA_DIR ?? target.userDataDir;
@@ -381,21 +393,26 @@ async function main(): Promise<void> {
     }
 
     try {
-      const page = await context.newPage();
-      await page.goto("https://opencode.ai", { waitUntil: "domcontentloaded", timeout: 30_000 });
+      const page = context.pages()[0] ?? (await context.newPage());
+      const targetUrl = env.OPENCODE_GO_WORKSPACE_ID
+        ? `https://opencode.ai/console/${encodeURIComponent(env.OPENCODE_GO_WORKSPACE_ID)}/go`
+        : "https://opencode.ai";
+      await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
       await page.waitForTimeout(2_000);
 
       const cookies = await context.cookies();
-      const authCookie = cookies.find((c) => c.name === "auth" && c.domain.includes("opencode.ai"));
+      const sessionCookie = cookies.find(
+        (c) => c.name === "__Host-console_session" && c.domain.includes("opencode.ai"),
+      );
 
-      if (!authCookie) {
-        console.log(`   ℹ️ ${target.name} 中未找到 opencode.ai auth cookie`);
+      if (!sessionCookie) {
+        console.log(`   ℹ️ ${target.name} 中未找到 opencode.ai 的 __Host-console_session（未登录）`);
         continue;
       }
 
-      authCookieValue = authCookie.value;
-      console.log(`✅ 从 ${target.name} 提取到 auth cookie（${authCookieValue.length} 字符）`);
-      console.log(`   有效期至: ${authCookie.expires ? new Date(authCookie.expires * 1000).toISOString() : "session"}`);
+      sessionCookieValue = sessionCookie.value;
+      console.log(`✅ 从 ${target.name} 提取到 session cookie（${sessionCookieValue.length} 字符）`);
+      console.log(`   有效期至: ${sessionCookie.expires ? new Date(sessionCookie.expires * 1000).toISOString() : "session"}`);
 
       // 验证 cookie
       const workspaceId = env.OPENCODE_GO_WORKSPACE_ID;
@@ -403,7 +420,7 @@ async function main(): Promise<void> {
         console.warn("⚠️ .env 中未配置 OPENCODE_GO_WORKSPACE_ID，跳过验证");
       } else {
         console.log("🔍 验证 cookie 有效性...");
-        const validation = await validateCookie(authCookieValue, workspaceId);
+        const validation = await validateCookie(sessionCookieValue, workspaceId);
         if (!validation.valid) {
           console.error(`❌ Cookie 无效: ${validation.error}`);
           process.exit(1);
@@ -416,23 +433,23 @@ async function main(): Promise<void> {
     }
   }
 
-  if (!authCookieValue) {
-    console.error("❌ 在所有浏览器中均未找到 OpenCode Go 的 auth cookie。");
-    console.error("   请确认已在 Edge 或 Chrome 中登录 https://opencode.ai。");
+  if (!sessionCookieValue) {
+    console.error("❌ 在所有浏览器中均未找到 OpenCode Go 的 __Host-console_session cookie。");
+    console.error("   请确认已在 Edge 或 Chrome 中登录 https://opencode.ai/console。");
     process.exit(1);
   }
 
   // 更新 Worker secret
   console.log("🔐 通过 Cloudflare API 更新 Worker secret...");
-    await updateWorkerSecret(env, authCookieValue);
+    await updateWorkerSecret(env, sessionCookieValue);
 
   // 同步本地 .env
   console.log("📝 更新本地 .env...");
-  updateEnvFile(authCookieValue);
+  updateEnvFile(sessionCookieValue);
 
   // 写入 Supabase，使前端配置页和数据库账号直接生效
   const workspaceId = env.OPENCODE_GO_WORKSPACE_ID;
-  const creds: Record<string, string> = { authCookie: authCookieValue };
+  const creds: Record<string, string> = { sessionCookie: sessionCookieValue };
   if (workspaceId) {
     creds.workspaceId = workspaceId;
   }

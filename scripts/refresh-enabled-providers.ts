@@ -47,8 +47,9 @@ const PROVIDERS: ProviderPlan[] = [
   {
     key: "opencode-go",
     label: "OpenCode Go",
-    refreshArgs: ["scripts/refresh-opencode-usage.ts"],
-    note: "需先关闭 Edge；双账号串行抓取后推送",
+    // --no-wait-login：一键刷新时不要在登录失效的账号上卡 5 分钟，直接跳过并提示
+    refreshArgs: ["scripts/refresh-opencode-usage.ts", "--no-wait-login"],
+    note: "需先关闭 Edge；双账号串行抓取后推送（登录失效时跳过）",
   },
 ];
 

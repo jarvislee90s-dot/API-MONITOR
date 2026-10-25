@@ -24,7 +24,7 @@ describe("CredentialForm", () => {
         provider={{
           providerKey: "opencode-go",
           providerName: "OpenCode Go",
-          sourceUrl: "https://opencode.ai/workspace/wrk_123/go",
+          sourceUrl: "https://opencode.ai/console/wrk_123/go",
           description: "OpenCode usage",
         }}
         onSave={onSave}
@@ -32,17 +32,17 @@ describe("CredentialForm", () => {
     );
 
     fireEvent.change(screen.getByLabelText("workspaceId"), { target: { value: "wrk_123" } });
-    fireEvent.change(screen.getByLabelText("authCookie"), { target: { value: "auth=abc" } });
+    fireEvent.change(screen.getByLabelText("sessionCookie"), { target: { value: "session-token" } });
     fireEvent.click(screen.getByRole("button", { name: "保存账号" }));
 
     await waitFor(() =>
       expect(onSave).toHaveBeenCalledWith(
         expect.objectContaining({
           providerKey: "opencode-go",
-          sourceUrl: "https://opencode.ai/workspace/wrk_123/go",
+          sourceUrl: "https://opencode.ai/console/wrk_123/go",
           credentials: {
             workspaceId: "wrk_123",
-            authCookie: "auth=abc",
+            sessionCookie: "session-token",
           },
         }),
       ),

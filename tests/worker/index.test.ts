@@ -1,4 +1,4 @@
-﻿import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { backfillPartialWindows, handleApiRequest } from "../../worker/index";
 import { buildUsageDashboard } from "../../worker/dashboard";
@@ -86,18 +86,34 @@ function createUsageFetchStub() {
       );
     }
 
-    if (url.includes("opencode.ai/workspace")) {
+    if (url.includes("opencode.ai/console/api/go/status")) {
       return new Response(
-        [
-          "<html><script>",
-          "rollingUsage:$R[10]={usagePercent:7,resetInSec:18000}",
-          "weeklyUsage:$R[11]={resetInSec:540000,usagePercent:2}",
-          "monthlyUsage:$R[12]={usagePercent:16,resetInSec:2480000}",
-          "</script></html>",
-        ].join(""),
+        JSON.stringify({
+          product: "go",
+          access: {
+            endsAt: "2026-11-24T14:38:24.000Z",
+            meters: {
+              fiveHour: {
+                resetsAt: "2026-06-11T05:00:00.000Z",
+                limitMicroCents: "1200000000",
+                usedMicroCents: "84000000",
+              },
+              week: {
+                resetsAt: "2026-06-17T00:00:00.000Z",
+                limitMicroCents: "3000000000",
+                usedMicroCents: "60000000",
+              },
+              month: {
+                resetsAt: "2026-07-11T00:00:00.000Z",
+                limitMicroCents: "6000000000",
+                usedMicroCents: "960000000",
+              },
+            },
+          },
+        }),
         {
           status: 200,
-          headers: { "content-type": "text/html; charset=utf-8" },
+          headers: { "content-type": "application/json; charset=utf-8" },
         },
       );
     }
@@ -358,7 +374,7 @@ describe("worker api", () => {
     const readyOpenCodeSnapshot = {
       providerId: "opencode-go",
       providerName: "OpenCode Go",
-      sourceUrl: "https://opencode.ai/workspace/wrk_123/go",
+      sourceUrl: "https://opencode.ai/console/wrk_123/go",
       status: "ready",
       capturedAt: "2026-06-11T00:00:00.000Z",
       summary: "OpenCode Go usage windows parsed",
@@ -391,10 +407,10 @@ describe("worker api", () => {
         });
       }
 
-      if (url.includes("opencode.ai/workspace")) {
-        return new Response("<html>No usage markers in this cloud response</html>", {
+      if (url.includes("opencode.ai/console/api/go/status")) {
+        return new Response(JSON.stringify({ product: "go", access: { meters: {} } }), {
           status: 200,
-          headers: { "content-type": "text/html; charset=utf-8" },
+          headers: { "content-type": "application/json" },
         });
       }
 
@@ -448,7 +464,7 @@ describe("worker api", () => {
         isFallback: true,
         liveStatus: "partial",
       });
-      expect(openCodeCard.meta.fallbackFrom).toContain("usage windows were not found");
+      expect(openCodeCard.meta.fallbackFrom).toContain("未找到 Go 订阅用量窗口");
     } finally {
       vi.unstubAllGlobals();
     }
@@ -463,7 +479,7 @@ describe("worker api", () => {
       { workspaceId: "wrk_123", authCookie: "auth=abc" },
       encryptionKey,
     );
-    const workspaceUrl = "https://opencode.ai/workspace/wrk_123/go";
+    const workspaceUrl = "https://opencode.ai/console/wrk_123/go";
     const readySnapshot: ProviderSnapshot = {
       providerId: "opencode-go",
       providerName: "OpenCode Go",
@@ -533,11 +549,119 @@ describe("worker api", () => {
       vi.unstubAllGlobals();
     }
   });
+  it("queries latest ready snapshots per provider so low-frequency providers are not evicted by chatgpt", async () => {
+    // 回归：旧实现用「全局 limit 20」查回退快照，chatgpt 高频刷新会把 opencode-go
+    // 的历史成功快照挤出窗口，导致云端 302 时卡片无数据。修复后按 provider_key 分别查询。
+    const encryptionKey = "0123456789abcdef0123456789abcdef";
+    const encrypted = await encryptCredentialPayload(
+      { workspaceId: "wrk_123", authCookie: "auth=abc" },
+      encryptionKey,
+    );
+    const workspaceUrl = "https://opencode.ai/console/wrk_123/go";
+    const readySnapshot: ProviderSnapshot = {
+      providerId: "opencode-go",
+      providerName: "OpenCode Go",
+      sourceUrl: workspaceUrl,
+      status: "ready",
+      capturedAt: "2026-08-19T09:18:44.000Z",
+      summary: "OpenCode Go usage windows parsed",
+      windows: [
+        { key: "rolling", label: "5h", used: 0, limit: 100, remaining: 100, percentUsed: 0, percentRemaining: 100, resetAt: null },
+        { key: "weekly", label: "Weekly", used: 3, limit: 100, remaining: 97, percentUsed: 3, percentRemaining: 97, resetAt: null },
+      ],
+      metrics: {},
+      meta: { fetchMethod: "local_ingest" },
+    };
+    // 模拟「全局最新 20 条」全被 chatgpt 占满
+    const chatgptRows = Array.from({ length: 20 }, (_, index) => ({
+      provider_account_id: null,
+      source_url: "https://chatgpt.com",
+      payload: {
+        providerId: "chatgpt",
+        providerName: "ChatGPT",
+        sourceUrl: "https://chatgpt.com",
+        status: "ready",
+        capturedAt: `2026-10-${String(10 + index).padStart(2, "0")}T00:00:00.000Z`,
+        summary: "chatgpt",
+        windows: [{ key: "codex", label: "Codex", used: 1, limit: 100 }],
+        metrics: {},
+        meta: {},
+      },
+    }));
+    const snapshotQueryProviderKeys: Array<string | null> = [];
+
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+
+      if (url.includes("opencode.ai/workspace")) {
+        return new Response("<html>no usage markers in cloud response</html>", {
+          status: 200,
+          headers: { "content-type": "text/html; charset=utf-8" },
+        });
+      }
+      if (url.startsWith("https://supabase.test/rest/v1/provider_preferences")) {
+        return Response.json([
+          { provider_key: "opencode-go", enabled: true, display_order: 1, active_provider_account_id: "opencode-acct-1" },
+        ]);
+      }
+      if (url.startsWith("https://supabase.test/rest/v1/provider_account_credentials")) {
+        return Response.json([
+          { encrypted_payload: encrypted.encryptedPayload, nonce: encrypted.nonce, key_version: "v1" },
+        ]);
+      }
+      if (url.startsWith("https://supabase.test/rest/v1/provider_accounts")) {
+        const parsed = new URL(url);
+        if (parsed.searchParams.get("id") === "eq.opencode-acct-1") {
+          return Response.json([
+            { id: "opencode-acct-1", provider_key: "opencode-go", account_label: "jarvislee90s", source_url: workspaceUrl, config: {} },
+          ]);
+        }
+        return Response.json([
+          { id: "opencode-acct-1", provider_key: "opencode-go", account_label: "jarvislee90s", source_url: workspaceUrl, homepage_enabled: true, homepage_order: 1 },
+        ]);
+      }
+      if (url.startsWith("https://supabase.test/rest/v1/usage_snapshots")) {
+        const providerKey = new URL(url).searchParams.get("provider_key");
+        snapshotQueryProviderKeys.push(providerKey);
+        if (providerKey === "eq.opencode-go") {
+          return Response.json([{ provider_key: "opencode-go", source_url: workspaceUrl, payload: readySnapshot }]);
+        }
+        // 无 provider_key 的旧查询只会拿到 chatgpt 行
+        if (!providerKey) return Response.json(chatgptRows);
+        return Response.json([]);
+      }
+
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    vi.stubGlobal("fetch", fetchImpl as unknown as typeof fetch);
+    try {
+      const env = {
+        ...createEnv(fetchImpl as typeof fetch),
+        SUPABASE_URL: "https://supabase.test",
+        SUPABASE_SERVICE_ROLE_KEY: "service-role-test",
+        SUPABASE_USER_ID: "00000000-0000-0000-0000-000000000001",
+        CREDENTIAL_ENCRYPTION_KEY: encryptionKey,
+      };
+      const response = await handleApiRequest(new Request("https://api.monitor.local/api/usage"), env);
+      const payload = (await response.json()) as any;
+      const openCodeCard = payload.data.cards.find((card: { providerId: string }) => card.providerId === "opencode-go");
+
+      expect(response.status).toBe(200);
+      expect(snapshotQueryProviderKeys).toContain("eq.opencode-go");
+      expect(openCodeCard.status).toBe("ready");
+      expect(openCodeCard.meta.isFallback).toBe(true);
+      expect(openCodeCard.windows).toHaveLength(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("persists live refresh snapshots before applying dashboard fallback", async () => {
     const readyOpenCodeSnapshot: ProviderSnapshot = {
       providerId: "opencode-go",
       providerName: "OpenCode Go",
-      sourceUrl: "https://opencode.ai/workspace/wrk_123/go",
+      sourceUrl: "https://opencode.ai/console/wrk_123/go",
       status: "ready",
       capturedAt: "2026-06-13T13:27:00.000Z",
       summary: "OpenCode Go usage windows parsed",
@@ -552,10 +676,10 @@ describe("worker api", () => {
       if (url.includes("/api/v1/auth/key")) {
         return Response.json({ data: { usage: 1, limit: 100, limit_remaining: 99 } });
       }
-      if (url.includes("opencode.ai/workspace")) {
-        return new Response("<html>No usage markers in this cloud response</html>", {
+      if (url.includes("opencode.ai/console/api/go/status")) {
+        return new Response(JSON.stringify({ product: "go", access: { meters: {} } }), {
           status: 200,
-          headers: { "content-type": "text/html; charset=utf-8" },
+          headers: { "content-type": "application/json" },
         });
       }
       if (url.includes("maas.xfyun.cn/api/subscription")) {
@@ -942,7 +1066,7 @@ describe("worker api", () => {
       { workspaceId: "wrk_db", authCookie: "auth-cookie=db" },
       encryptionKey,
     );
-    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
 
       if (url.includes("/api/v1/auth/key")) {
@@ -952,14 +1076,21 @@ describe("worker api", () => {
         });
       }
 
-      if (url.includes("opencode.ai/workspace")) {
+      if (url.includes("opencode.ai/console/api/go/status")) {
         return new Response(
-          [
-            "<html><script>",
-            "rollingUsage:$R[10]={usagePercent:7,resetInSec:18000}",
-            "</script></html>",
-          ].join(""),
-          { status: 200, headers: { "content-type": "text/html; charset=utf-8" } },
+          JSON.stringify({
+            product: "go",
+            access: {
+              meters: {
+                fiveHour: {
+                  resetsAt: "2026-06-11T05:00:00.000Z",
+                  limitMicroCents: "1200000000",
+                  usedMicroCents: "84000000",
+                },
+              },
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
         );
       }
 
@@ -988,7 +1119,7 @@ describe("worker api", () => {
             id: "account-db-1",
             provider_key: "opencode-go",
             account_label: "DB账号",
-            source_url: "https://opencode.ai/workspace/wrk_db/go",
+            source_url: "https://opencode.ai/console/wrk_db/go",
             status: "ready",
             config: { baseUrl: "https://opencode.ai", workspaceId: "wrk_db" },
           }]),
@@ -1052,15 +1183,16 @@ describe("worker api", () => {
       expect(response.status).toBe(200);
       expect(payload.ok).toBe(true);
       expect(payload.data.refresh.refreshed).toBe(true);
-      // The workspace URL should come from DB account config (wrk_db) instead of env (wrk_123)
+      // 新版控制台把 workspaceId 放在 x-org-id 头里，URL 固定为 /console/api/go/status
       const opencodeCalls = fetchImpl.mock.calls.filter((call) => {
         const url = String(call[0]);
-        return url.includes("opencode.ai/workspace");
+        return url.includes("opencode.ai/console/api/go/status");
       });
       expect(opencodeCalls.length).toBeGreaterThan(0);
-      const opencodeUrl = String(opencodeCalls[0][0]);
-      expect(opencodeUrl).toContain("wrk_db");
-      expect(opencodeUrl).not.toContain("wrk_123");
+      const opencodeHeaders = new Headers(
+        (opencodeCalls[0]?.[1] as RequestInit | undefined)?.headers as HeadersInit,
+      );
+      expect(opencodeHeaders.get("x-org-id")).toBe("wrk_db");
       const accountReadCall = fetchImpl.mock.calls.find((call) => {
         const url = String(call[0]);
         return url.startsWith("https://supabase.test/rest/v1/provider_accounts") && url.includes("id=eq.account-db-1");
@@ -1265,7 +1397,7 @@ describe("worker api", () => {
               id: "opencode-enabled",
               provider_key: "opencode-go",
               account_label: "OpenCode 启用账号",
-              source_url: "https://opencode.ai/workspace/wrk_ordered/go",
+              source_url: "https://opencode.ai/console/wrk_ordered/go",
               config: {},
             },
           ]);
@@ -1298,7 +1430,7 @@ describe("worker api", () => {
             id: "opencode-enabled",
             provider_key: "opencode-go",
             account_label: "OpenCode 启用账号",
-            source_url: "https://opencode.ai/workspace/wrk_ordered/go",
+            source_url: "https://opencode.ai/console/wrk_ordered/go",
             status: "ready",
             credential_hint: { workspaceId: "wrk_ordered" },
             homepage_enabled: true,
@@ -1399,7 +1531,7 @@ describe("worker api", () => {
           id: "account-broken",
           provider_key: "opencode-go",
           account_label: "失效账号",
-          source_url: "https://opencode.ai/workspace/wrk_broken/go",
+          source_url: "https://opencode.ai/console/wrk_broken/go",
           status: "ready",
           credential_hint: { workspaceId: "wrk_broken" },
           homepage_enabled: true,
@@ -1627,7 +1759,7 @@ describe("worker api", () => {
   });
 
   it("falls back to env config when Supabase active account is missing", async () => {
-    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
 
       if (url.includes("/api/v1/auth/key")) {
@@ -1637,14 +1769,21 @@ describe("worker api", () => {
         });
       }
 
-      if (url.includes("opencode.ai/workspace")) {
+      if (url.includes("opencode.ai/console/api/go/status")) {
         return new Response(
-          [
-            "<html><script>",
-            "rollingUsage:$R[10]={usagePercent:7,resetInSec:18000}",
-            "</script></html>",
-          ].join(""),
-          { status: 200, headers: { "content-type": "text/html; charset=utf-8" } },
+          JSON.stringify({
+            product: "go",
+            access: {
+              meters: {
+                fiveHour: {
+                  resetsAt: "2026-06-11T05:00:00.000Z",
+                  limitMicroCents: "1200000000",
+                  usedMicroCents: "84000000",
+                },
+              },
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
         );
       }
 
@@ -1705,11 +1844,13 @@ describe("worker api", () => {
       expect(payload.data.refreshed).toBe(true);
       const opencodeCalls = fetchImpl.mock.calls.filter((call) => {
         const url = String(call[0]);
-        return url.includes("opencode.ai/workspace");
+        return url.includes("opencode.ai/console/api/go/status");
       });
       expect(opencodeCalls.length).toBeGreaterThan(0);
-      const opencodeUrl = String(opencodeCalls[0][0]);
-      expect(opencodeUrl).toContain("wrk_123");
+      const opencodeHeaders = new Headers(
+        (opencodeCalls[0]?.[1] as RequestInit | undefined)?.headers as HeadersInit,
+      );
+      expect(opencodeHeaders.get("x-org-id")).toBe("wrk_123");
     } finally {
       vi.unstubAllGlobals();
     }

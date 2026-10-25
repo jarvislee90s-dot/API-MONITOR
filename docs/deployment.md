@@ -46,7 +46,7 @@ npx wrangler@4 secret put SUPABASE_SERVICE_ROLE_KEY
 npx wrangler@4 secret put CREDENTIAL_ENCRYPTION_KEY
 npx wrangler@4 secret put OPENROUTER_API_KEY
 npx wrangler@4 secret put OPENCODE_GO_WORKSPACE_ID
-npx wrangler@4 secret put OPENCODE_GO_AUTH_COOKIE
+npx wrangler@4 secret put OPENCODE_GO_SESSION_COOKIE
 npx wrangler@4 secret put XFYUN_MAAS_API_URL
 npx wrangler@4 secret put XFYUN_MAAS_AUTH_COOKIE
 npx wrangler@4 secret put ALIYUN_BAILIAN_AUTH_COOKIE

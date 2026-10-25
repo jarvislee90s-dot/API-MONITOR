@@ -1,4 +1,4 @@
-﻿import { errorResponse, jsonResponse, readJsonBody, successResponse, toIsoString } from "./http";
+import { errorResponse, jsonResponse, readJsonBody, successResponse, toIsoString } from "./http";
 import { buildUsageDashboard } from "./dashboard";
 import { createLiveLoginSession } from "./browser/live-login";
 import { listProviders, getProvider, isProviderId } from "./providers/registry";
@@ -55,10 +55,11 @@ function buildProviderConfig(env: WorkerEnv, providerId: string): Record<string,
   if (providerId === "opencode-go") {
     return {
       workspaceId: env.OPENCODE_GO_WORKSPACE_ID,
+      // 新版控制台只认 __Host-console_session；旧 secret 作为兼容回退
+      sessionCookie: env.OPENCODE_GO_SESSION_COOKIE ?? env.OPENCODE_GO_AUTH_COOKIE,
       authCookie: env.OPENCODE_GO_AUTH_COOKIE,
       apiKey: env.OPENCODE_GO_API_KEY,
       baseUrl: env.OPENCODE_GO_BASE_URL,
-      browserFallbackEnabled: env.OPENCODE_GO_BROWSER_FALLBACK,
     };
   }
 
@@ -401,42 +402,62 @@ async function readDashboardPreferences(env: WorkerEnv, userId: string | null): 
   }
 }
 
+type ReadySnapshotRow = {
+  provider_account_id?: string | null;
+  source_url?: string;
+  payload?: ProviderSnapshot;
+};
+
+// 按单个 provider 拉取最近 ready 快照行。
+// 不能做成「全局 limit 20」的查询：chatgpt 每轮刷新都会落一条快照，很快把低频供应商
+// （opencode-go 靠本地脚本推送）挤出窗口，导致明明有历史成功快照却回退不到。
+async function fetchLatestReadySnapshotsForProvider(
+  env: WorkerEnv & { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string },
+  userId: string,
+  providerId: string,
+): Promise<ReadySnapshotRow[]> {
+  const url = new URL("/rest/v1/usage_snapshots", env.SUPABASE_URL);
+  url.searchParams.set("select", "provider_account_id,source_url,payload,created_at");
+  url.searchParams.set("user_id", `eq.${userId}`);
+  url.searchParams.set("provider_key", `eq.${providerId}`);
+  url.searchParams.set("status", "eq.ready");
+  url.searchParams.set("order", "created_at.desc");
+  // 同一 provider 下按账号/来源各取最新一条，10 条足够覆盖双账号场景
+  url.searchParams.set("limit", "10");
+
+  const response = await fetch(url, {
+    headers: {
+      apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+      Accept: "application/json",
+    },
+  });
+  if (!response.ok) return [];
+  return (await response.json().catch(() => [])) as ReadySnapshotRow[];
+}
+
 async function fetchLatestReadySnapshots(env: WorkerEnv, userId: string | null): Promise<Map<string, ProviderSnapshot>> {
   const snapshots = new Map<string, ProviderSnapshot>();
   if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY || !userId) {
     return snapshots;
   }
 
-  const url = new URL("/rest/v1/usage_snapshots", env.SUPABASE_URL);
-  url.searchParams.set("select", "provider_account_id,source_url,payload,created_at");
-  url.searchParams.set("user_id", `eq.${userId}`);
-  url.searchParams.set("status", "eq.ready");
-  url.searchParams.set("order", "created_at.desc");
-  url.searchParams.set("limit", "20");
-
+  const supabaseEnv = { ...env, SUPABASE_URL: env.SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY: env.SUPABASE_SERVICE_ROLE_KEY };
   try {
-    const response = await fetch(url, {
-      headers: {
-        apikey: env.SUPABASE_SERVICE_ROLE_KEY,
-        Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
-        Accept: "application/json",
-      },
-    });
-    if (!response.ok) {
-      return snapshots;
-    }
+    const rowsByProvider = await Promise.all(
+      listProviders().map((provider) =>
+        fetchLatestReadySnapshotsForProvider(supabaseEnv, userId, provider.id).catch(() => [] as ReadySnapshotRow[]),
+      ),
+    );
 
-    const rows = (await response.json().catch(() => [])) as Array<{
-      provider_account_id?: string | null;
-      source_url?: string;
-      payload?: ProviderSnapshot;
-    }>;
-    for (const row of rows) {
-      // 优先按账号 id 区分回退快照,避免同 source_url 多账号互相覆盖
-      const key = row.provider_account_id ?? row.source_url ?? row.payload?.sourceUrl ?? "";
-      if (!key || snapshots.has(key)) continue;
-      if (row.payload?.status === "ready") {
-        snapshots.set(key, row.payload);
+    for (const rows of rowsByProvider) {
+      for (const row of rows) {
+        // 优先按账号 id 区分回退快照,避免同 source_url 多账号互相覆盖
+        const key = row.provider_account_id ?? row.source_url ?? row.payload?.sourceUrl ?? "";
+        if (!key || snapshots.has(key)) continue;
+        if (row.payload?.status === "ready") {
+          snapshots.set(key, row.payload);
+        }
       }
     }
   } catch (error) {

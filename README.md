@@ -68,7 +68,7 @@ flowchart LR
 
 ## OpenCode Go 用量抓取机制
 
-OpenCode Go 与 ChatGPT 属于"本地脚本抓取 + 推送"，与其他供应商的抓取方式有本质区别，源于一个核心矛盾：**opencode.ai 与 chatgpt.com 都屏蔽 Cloudflare 出口**。Cloudflare Worker 的出口 IP 属于数据中心 IP，直连 opencode 用量页会被 302 重定向到登录页，直连 chatgpt.com 更会被整体 403 拒绝（详见下文 ChatGPT 小节）；而讯飞、OpenRouter 不屏蔽，Worker 云端能实时抓到。
+OpenCode Go 与 ChatGPT 属于"本地脚本抓取 + 推送"，与其他供应商的抓取方式有本质区别，源于一个核心矛盾：**opencode.ai 与 chatgpt.com 都屏蔽 Cloudflare 出口**。Cloudflare Worker 的出口 IP 属于数据中心 IP，直连 opencode 控制台或其用量接口会被拒绝（401/403 或登录页），直连 chatgpt.com 更会被整体 403 拒绝（详见下文 ChatGPT 小节）；而讯飞、OpenRouter 不屏蔽，Worker 云端能实时抓到。
 
 ### 数据通路对比
 
@@ -89,19 +89,20 @@ OpenCode Go 走"本地脚本抓取 + 推送"，点同步无效（云端被封）
 flowchart TB
     subgraph cloud["点同步（云端通路，对 opencode-go 无效）"]
         B1["前端点 同步"] --> B2["POST /api/refresh"]
-        B2 --> B3["Worker 云端抓取<br/>fetchOpenCodeGoSnapshot"]
-        B3 --> B4["数据中心 IP 被 opencode 封<br/>302 重定向到 login"]
+        B2 --> B3["Worker 云端抓取<br/>GET /console/api/go/status"]
+        B3 --> B4["数据中心 IP 被 opencode 拒绝<br/>401/403 或登录页"]
         B4 --> B5["落库 login_required 快照<br/>windows 为空"]
         B5 --> B6["/api/usage 展示时 fallback<br/>到最近成功快照"]
         B6 --> B7["看板仍显示旧数据<br/>同步无效"]
     end
 
     subgraph local["本地脚本通路（唯一能更新数据的路径）"]
-        L1["关闭所有浏览器"] --> L2["本地脚本启动<br/>playwright 开 Edge"]
-        L2 --> L3["从浏览器 Profile<br/>提取 auth cookie"]
-        L3 --> L4["本地国内 IP 直抓<br/>opencode 用量页"]
-        L4 --> L5["成功 200"]
-        L5 --> L6["parseOpenCodeGoWindows<br/>解析 3 个窗口"]
+        L1["读 .env 缓存的<br/>__Host-console_session"] --> L2["直接调<br/>/console/api/go/status"]
+        L2 -->|"200"| L6["parseOpenCodeGoStatus<br/>解析 3 个窗口"]
+        L2 -->|"401/403 或无缓存"| L3["启动 Edge Profile<br/>打开 /console/&lt;workspaceId&gt;/go"]
+        L3 --> L4["未登录时保留窗口<br/>等人工登录"]
+        L4 --> L5["提取 __Host-console_session<br/>写回 .env"]
+        L5 --> L2
         L6 --> L7["POST /api/ingest/opencode-go<br/>X-Ingest-Key 鉴权"]
         L7 --> L8["ingest handler 校验<br/>persistSnapshot 落库"]
         L8 --> L9["新的 ready 快照<br/>fetchMethod=local_ingest"]
@@ -116,7 +117,7 @@ flowchart TB
 | 供应商 | 数据来源 | 点同步 | 刷新方式 |
 | --- | --- | --- | --- |
 | 讯飞 MaaS / OpenRouter | Worker 云端直抓 | ✅ 实时刷新 | 前端点同步 |
-| OpenCode Go | 本地脚本抓取 + 推送 | ❌ 无效（云端 IP 被封） | 手动跑 `refresh-opencode-usage.ts` |
+| OpenCode Go | 本地脚本（cookie 优先，浏览器兜底） | ❌ 无效（云端 IP 被封） | 手动跑 `refresh-opencode-usage.ts`（通常不开浏览器） |
 | 智谱 BigModel | Worker 云端直抓（持久化 cookie/token） | ✅ 实时刷新 | 本地脚本刷新 cookie 后点同步 |
 | Ollama Pro | Worker 云端直抓（网页登录态 cookie） | ✅ 实时刷新 | 本地脚本刷新 cookie 后点同步 |
 | DeepSeek | Worker 云端直抓（登录态有效时） | ✅ 云端直抓 | 登录态过期时跑 `refresh-deepseek-usage.ts` |
@@ -126,8 +127,8 @@ flowchart TB
 
 - **点同步刷不了 OpenCode Go 是架构限制，不是 bug**：opencode.ai 屏蔽数据中心 IP，Worker 云端抓取必然被 302 到登录页；看板展示时 `applyFallback` 会回退到最近一次成功的 `ready` 快照（即本地脚本上次推送的），所以无论点多少次同步，数据都不会变新。
 - **自定义域名只解决网络封锁，不解决 IP 封锁**：*.workers.dev 在国内受 DNS 污染 + SNI 阻断，绑定 `apimonitor.bondtoolbox.asia` 后前端看板与本地脚本推送均可国内直连；但 Worker 出口 IP 仍是数据中心 IP，opencode 照样封，点同步仍无效。
-- **本地脚本依赖浏览器登录态**：需先在 Edge 的 Default 和 Profile 1 中分别登录两个 opencode.ai 账号，运行前关闭所有 Edge 窗口（含后台进程）避免 Profile 锁定。
-- **cookie 过期后需重新登录浏览器**：脚本从浏览器 Profile 提取 `auth cookie`，cookie 过期则抓取会被重定向到登录页。
+- **本地脚本优先复用 cookie**：平时只读 `.env` 的 `OPENCODE_GO_SESSION_COOKIE`（账号1）/ `OPENCODE_GO_SESSION_COOKIE2`（账号2）直接调 `/console/api/go/status`，不启动浏览器；cookie 缺失或失效时才打开 Edge Profile 并停下等你登录。
+- **session cookie 会过期**：实测约 30 天。过期后脚本会提示你登录，登录成功后自动把新的 `__Host-console_session` 写回 `.env`，后续刷新无需再登录。
 
 ### 刷新 Cookie 与用量（本地脚本）
 
@@ -188,19 +189,24 @@ opencode.ai 屏蔽数据中心 IP，Worker 云端点同步无效，需本地脚�
 node --experimental-strip-types scripts/refresh-opencode-usage.ts
 ```
 
-脚本从 .env 读取两个账号的 workspaceId（`OPENCODE_GO_WORKSPACE_ID` 和 `OPENCODE_GO_WORKSPACE2_ID`），分别从 Edge Profile 1 和 Default 提取 auth cookie、抓取各自用量页、解析 3 个窗口后推送到 Worker `/api/ingest/opencode-go` 端点。两个账号串行刷新，互不阻塞。推送目标为自定义域名，国内可直连。
+脚本从 .env 读取两个账号的 workspaceId（`OPENCODE_GO_WORKSPACE_ID` 和 `OPENCODE_GO_WORKSPACE2_ID`）与缓存的 session cookie，逐个调新版控制台接口 `GET https://opencode.ai/console/api/go/status`（带 `x-org-id: <workspaceId>` 头），解析 5h / Weekly / Monthly 三个窗口后推送到 Worker `/api/ingest/opencode-go` 端点。推送目标为自定义域名，国内可直连。
+
+- **cookie 优先**：`.env` 里已有有效 `OPENCODE_GO_SESSION_COOKIE` 时不会启动浏览器，通常几秒完成。
+- **cookie 失效才开浏览器**：脚本打开对应 Edge Profile 的 `/console/<workspaceId>/go`，打印登录提示并保留窗口；你在窗口里登录（邮箱验证码 / GitHub / Google 均可）后每 3 秒检测一次，成功后自动写回 `.env` 并继续，最长等待 300 秒。
+- **账号2 已停用**：`lijiawei_jarvis` 标记为可选账号，拿不到数据会直接跳过，不阻塞账号1；如需恢复，先在设置页启用该账号再运行。
+- 无人值守场景（`refresh-enabled.bat` 一键刷新）会传 `--no-wait-login`：登录失效直接跳过该账号，避免卡住。
 
 > **注意**：Chrome 149+ 的 App-Bound Encryption (ABE) 会阻止 CDP 读取 cookie，两个账号都必须用 Edge 浏览器登录。
 
 #### OpenCode Go Cookie 刷新
 
-只更新 OpenCode Go 的 auth cookie（不抓用量），同步到 Cloudflare Worker 的 `OPENCODE_GO_AUTH_COOKIE` secret：
+只更新 OpenCode Go 的 session cookie（不抓用量），同步到本地 `.env` 与 Cloudflare Worker 的 `OPENCODE_GO_SESSION_COOKIE` secret：
 
 ```powershell
 node --experimental-strip-types scripts/refresh-opencode-cookie.ts
 ```
 
-脚本提取 cookie 后会用 `OPENCODE_GO_WORKSPACE_ID` 验证有效性，再通过 Cloudflare API 更新 Worker secret。Worker 下次刷新即使用新 cookie。
+脚本从浏览器 Profile 提取 `__Host-console_session`，用 `GET /console/api/go/status`（带 `x-org-id`）验证有效性，再通过 Cloudflare API 更新 Worker secret 并写回 `.env`。Worker 下次刷新即使用新 cookie。
 
 #### Ollama Pro Cookie 刷新
 
@@ -360,7 +366,7 @@ npx wrangler@4 secret put SUPABASE_SERVICE_ROLE_KEY
 npx wrangler@4 secret put CREDENTIAL_ENCRYPTION_KEY
 npx wrangler@4 secret put OPENROUTER_API_KEY
 npx wrangler@4 secret put OPENCODE_GO_WORKSPACE_ID
-npx wrangler@4 secret put OPENCODE_GO_AUTH_COOKIE
+npx wrangler@4 secret put OPENCODE_GO_SESSION_COOKIE
 npx wrangler@4 secret put XFYUN_MAAS_API_URL
 npx wrangler@4 secret put XFYUN_MAAS_AUTH_COOKIE
 npx wrangler@4 secret put ALIYUN_BAILIAN_AUTH_COOKIE
@@ -397,7 +403,8 @@ not_found_handling = "single-page-application"
 | `OPENROUTER_API_KEY` | OpenRouter key endpoint |
 | `OPENCODE_GO_WORKSPACE_ID` | OpenCode Go 账号1 workspace id |
 | `OPENCODE_GO_WORKSPACE2_ID` | OpenCode Go 账号2 workspace id |
-| `OPENCODE_GO_AUTH_COOKIE` | OpenCode Go 登录 cookie |
+| `OPENCODE_GO_SESSION_COOKIE` | OpenCode Go 账号1 的 `__Host-console_session`（本地脚本自动写回） |
+| `OPENCODE_GO_SESSION_COOKIE2` | OpenCode Go 账号2 的 `__Host-console_session` |
 | `XFYUN_MAAS_API_URL` | 讯飞 `coding-plan/list` 用量接口 |
 | `XFYUN_MAAS_AUTH_COOKIE` | 讯飞登录 cookie |
 | `ALIYUN_BAILIAN_PAGE_URL` | 阿里云百炼 Coding Plan 看板入口 |

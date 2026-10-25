@@ -15,7 +15,7 @@ function defaultSourceUrl(provider: ProviderCatalogItem | null): string {
 
 function credentialFields(providerKey: string | undefined): string[] {
   if (providerKey === "openrouter") return ["apiKey", "endpoint"];
-  if (providerKey === "opencode-go") return ["workspaceId", "authCookie"];
+  if (providerKey === "opencode-go") return ["workspaceId", "sessionCookie"];
   if (providerKey === "xfyun-maas") return ["authCookie", "apiUrl"];
   if (providerKey === "aliyun-bailian") return ["authCookie", "apiUrl"];
   if (providerKey === "volc-ark") return ["authCookie", "apiUrl"];
@@ -32,6 +32,7 @@ function fieldLabel(field: string): string {
     endpoint: "endpoint / baseUrl",
     workspaceId: "workspaceId",
     authCookie: "authCookie",
+    sessionCookie: "session cookie（__Host-console_session）",
     authToken: "登录 Token",
     apiUrl: "endpoint / baseUrl",
     accessToken: "Access Token",
