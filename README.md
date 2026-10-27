@@ -68,56 +68,31 @@ flowchart LR
 
 ## OpenCode Go 用量抓取机制
 
-OpenCode Go 与 ChatGPT 属于"本地脚本抓取 + 推送"，与其他供应商的抓取方式有本质区别，源于一个核心矛盾：**opencode.ai 与 chatgpt.com 都屏蔽 Cloudflare 出口**。Cloudflare Worker 的出口 IP 属于数据中心 IP，直连 opencode 控制台或其用量接口会被拒绝（401/403 或登录页），直连 chatgpt.com 更会被整体 403 拒绝（详见下文 ChatGPT 小节）；而讯飞、OpenRouter 不屏蔽，Worker 云端能实时抓到。
+opencode.ai 会直接拒绝 Cloudflare 出口的请求（401），Worker 直连拿不到数据。为此加了 **Supabase Edge Function 兜底通道**：Worker 直连失败时改调部署在 Supabase（Deno Deploy / AWS 东京）的函数，由它带同一份 session cookie 取数——实测 Supabase 出口没有被 opencode 封，稳定返回 200。
 
-### 数据通路对比
+### 数据通路
 
-其他供应商走"云端直抓"，点首页同步即可实时刷新：
-
-`mermaid
+```mermaid
 flowchart LR
-    A1["前端点 同步"] --> A2["POST /api/refresh"]
-    A2 --> A3["Worker 云端抓取<br/>数据中心 IP 直连"]
-    A3 --> A4["成功 拿到实时数据"]
-    A4 --> A5["落库 ready 快照"]
-    A5 --> A6["看板展示实时值"]
-`
+    A1["前端点 同步 / 自动刷新"] --> A2["POST /api/refresh"]
+    A2 --> A3["Worker 直连 opencode<br/>Cloudflare 出口 → 401"]
+    A3 --> A4["改调 Supabase Edge Function<br/>AWS 出口 → 200"]
+    A4 --> A5["解析 3 个窗口<br/>persistSnapshot 落库"]
+    A5 --> A6["看板实时展示"]
+    A3 -. "两条通道都失败" .-> A7["fallback 到本地脚本<br/>上次推送的快照"]
+```
 
-OpenCode Go 走"本地脚本抓取 + 推送"，点同步无效（云端被封），只能靠本地脚本更新：
-
-`mermaid
-flowchart TB
-    subgraph cloud["点同步（云端通路，对 opencode-go 无效）"]
-        B1["前端点 同步"] --> B2["POST /api/refresh"]
-        B2 --> B3["Worker 云端抓取<br/>GET /console/api/go/status"]
-        B3 --> B4["数据中心 IP 被 opencode 拒绝<br/>401/403 或登录页"]
-        B4 --> B5["落库 login_required 快照<br/>windows 为空"]
-        B5 --> B6["/api/usage 展示时 fallback<br/>到最近成功快照"]
-        B6 --> B7["看板仍显示旧数据<br/>同步无效"]
-    end
-
-    subgraph local["本地脚本通路（唯一能更新数据的路径）"]
-        L1["读 .env 缓存的<br/>__Host-console_session"] --> L2["直接调<br/>/console/api/go/status"]
-        L2 -->|"200"| L6["parseOpenCodeGoStatus<br/>解析 3 个窗口"]
-        L2 -->|"401/403 或无缓存"| L3["启动 Edge Profile<br/>打开 /console/&lt;workspaceId&gt;/go"]
-        L3 --> L4["未登录时保留窗口<br/>等人工登录"]
-        L4 --> L5["提取 __Host-console_session<br/>写回 .env"]
-        L5 --> L2
-        L6 --> L7["POST /api/ingest/opencode-go<br/>X-Ingest-Key 鉴权"]
-        L7 --> L8["ingest handler 校验<br/>persistSnapshot 落库"]
-        L8 --> L9["新的 ready 快照<br/>fetchMethod=local_ingest"]
-        L9 --> L10["看板下次加载<br/>展示新快照"]
-    end
-
-    B7 -. "数据来源其实是本地脚本推送" .-> L9
-`
+- Edge Function 端点：`https://<project-ref>.supabase.co/functions/v1/opencode-usage`（Worker secret `OPENCODE_GO_EDGE_PROXY_URL`）
+- 鉴权：请求头 `x-proxy-key` 对应 Worker secret `OPENCODE_PROXY_KEY`，函数校验通过后才转发
+- 函数配置：Supabase secrets 里的 `OPENCODE_GO_WORKSPACE_ID` + `OPENCODE_GO_SESSION_COOKIE`
+- 源码：`supabase/functions/opencode-usage/index.ts`
 
 ### 供应商对比
 
 | 供应商 | 数据来源 | 点同步 | 刷新方式 |
 | --- | --- | --- | --- |
 | 讯飞 MaaS / OpenRouter | Worker 云端直抓 | ✅ 实时刷新 | 前端点同步 |
-| OpenCode Go | 本地脚本（cookie 优先，浏览器兜底） | ❌ 无效（云端 IP 被封） | 手动跑 `refresh-opencode-usage.ts`（通常不开浏览器） |
+| OpenCode Go | 云端：Worker 直连失败 → Supabase Edge Function | ✅ 实时刷新 | 无需手动；cookie 过期时跑 `refresh-opencode-cookie.ts` |
 | 智谱 BigModel | Worker 云端直抓（持久化 cookie/token） | ✅ 实时刷新 | 本地脚本刷新 cookie 后点同步 |
 | Ollama Pro | Worker 云端直抓（网页登录态 cookie） | ✅ 实时刷新 | 本地脚本刷新 cookie 后点同步 |
 | DeepSeek | Worker 云端直抓（登录态有效时） | ✅ 云端直抓 | 登录态过期时跑 `refresh-deepseek-usage.ts` |
@@ -125,10 +100,9 @@ flowchart TB
 
 ### 注意事项
 
-- **点同步刷不了 OpenCode Go 是架构限制，不是 bug**：opencode.ai 屏蔽数据中心 IP，Worker 云端抓取必然被 302 到登录页；看板展示时 `applyFallback` 会回退到最近一次成功的 `ready` 快照（即本地脚本上次推送的），所以无论点多少次同步，数据都不会变新。
-- **自定义域名只解决网络封锁，不解决 IP 封锁**：*.workers.dev 在国内受 DNS 污染 + SNI 阻断，绑定 `apimonitor.bondtoolbox.asia` 后前端看板与本地脚本推送均可国内直连；但 Worker 出口 IP 仍是数据中心 IP，opencode 照样封，点同步仍无效。
-- **本地脚本优先复用 cookie**：平时只读 `.env` 的 `OPENCODE_GO_SESSION_COOKIE`（账号1）/ `OPENCODE_GO_SESSION_COOKIE2`（账号2）直接调 `/console/api/go/status`，不启动浏览器；cookie 缺失或失效时才打开 Edge Profile 并停下等你登录。
-- **session cookie 会过期**：实测约 30 天。过期后脚本会提示你登录，登录成功后自动把新的 `__Host-console_session` 写回 `.env`，后续刷新无需再登录。
+- **现在点同步是有效的**：Worker 直连 opencode 被 401 后会自动切 Supabase Edge Function，返回实时数据（快照 `meta.fetchMethod="edge_function"`）。早期「点同步无效、只能本地推」的结论已随该通道上线而改变。
+- **cookie 过期后只影响取数**：Edge Function 与本地脚本依赖同一份 `__Host-console_session`（实测约 30 天）。过期后看板显示 `login_required`，跑一次 `node --experimental-strip-types scripts/refresh-opencode-cookie.ts` 会同时更新 `.env`、Worker secret、Supabase Edge Function secrets，无需改代码。
+- **本地脚本保留为兜底**：`refresh-opencode-usage.ts` 在 Edge Function 也不可用时可手动推送快照，平时不需要跑。
 
 ### 刷新 Cookie 与用量（本地脚本）
 
@@ -181,32 +155,38 @@ node --experimental-strip-types scripts/refresh-volc-ark-cookie.ts
 
 脚本从浏览器提取 `csrfToken` / `digest` / `AccountID` / `userInfo` 四个 cookie，调 `GetCodingPlanUsage` 验证有效性后，同时更新本地 `.env` 的 `VOLC_ARK_AUTH_COOKIE` 和 Cloudflare Worker 的同名 secret。若本地浏览器 Profile 被占用，会自动回退到临时浏览器——在弹出窗口登录火山方舟即可，脚本自动继续。
 
-#### OpenCode Go 用量刷新
+#### OpenCode Go 本地兜底刷新（通常不需要）
 
-opencode.ai 屏蔽数据中心 IP，Worker 云端点同步无效，需本地脚本抓取用量并推送：
+看板日常刷新走云端（Worker 直连失败会自动切 Supabase Edge Function），**不需要跑本地脚本**。只有云端两条通道都失败时，才用本地脚本手动推送快照：
 
 ```powershell
 node --experimental-strip-types scripts/refresh-opencode-usage.ts
 ```
 
-脚本从 .env 读取两个账号的 workspaceId（`OPENCODE_GO_WORKSPACE_ID` 和 `OPENCODE_GO_WORKSPACE2_ID`）与缓存的 session cookie，逐个调新版控制台接口 `GET https://opencode.ai/console/api/go/status`（带 `x-org-id: <workspaceId>` 头），解析 5h / Weekly / Monthly 三个窗口后推送到 Worker `/api/ingest/opencode-go` 端点。推送目标为自定义域名，国内可直连。
+脚本从 .env 读取两个账号的 workspaceId（`OPENCODE_GO_WORKSPACE_ID` 和 `OPENCODE_GO_WORKSPACE2_ID`）与缓存的 session cookie，逐个调 `GET https://opencode.ai/console/api/go/status`（带 `x-org-id` 头），解析 5h / Weekly / Monthly 后推送到 `/api/ingest/opencode-go`。
 
 - **cookie 优先**：`.env` 里已有有效 `OPENCODE_GO_SESSION_COOKIE` 时不会启动浏览器，通常几秒完成。
-- **cookie 失效才开浏览器**：脚本打开对应 Edge Profile 的 `/console/<workspaceId>/go`，打印登录提示并保留窗口；你在窗口里登录（邮箱验证码 / GitHub / Google 均可）后每 3 秒检测一次，成功后自动写回 `.env` 并继续，最长等待 300 秒。
-- **账号2 已停用**：`lijiawei_jarvis` 标记为可选账号，拿不到数据会直接跳过，不阻塞账号1；如需恢复，先在设置页启用该账号再运行。
-- 无人值守场景（`refresh-enabled.bat` 一键刷新）会传 `--no-wait-login`：登录失效直接跳过该账号，避免卡住。
+- **cookie 失效才开浏览器**：打开对应 Edge Profile 的 `/console/<workspaceId>/go`，保留窗口等你登录（最长 300 秒），成功后自动写回 `.env`。
+- 账号2 `lijiawei_jarvis` 标记为可选账号，停用时跳过，不阻塞账号1。
+- 无人值守场景（`refresh-enabled.bat`）会传 `--no-wait-login`，登录失效直接跳过该账号。
 
 > **注意**：Chrome 149+ 的 App-Bound Encryption (ABE) 会阻止 CDP 读取 cookie，两个账号都必须用 Edge 浏览器登录。
 
-#### OpenCode Go Cookie 刷新
+#### OpenCode Go Cookie 刷新（cookie 过期时跑这个）
 
-只更新 OpenCode Go 的 session cookie（不抓用量），同步到本地 `.env` 与 Cloudflare Worker 的 `OPENCODE_GO_SESSION_COOKIE` secret：
+Edge Function 与本地脚本共用同一份 `__Host-console_session`（实测约 30 天）。过期后看板显示 `login_required`，运行：
 
 ```powershell
 node --experimental-strip-types scripts/refresh-opencode-cookie.ts
 ```
 
-脚本从浏览器 Profile 提取 `__Host-console_session`，用 `GET /console/api/go/status`（带 `x-org-id`）验证有效性，再通过 Cloudflare API 更新 Worker secret 并写回 `.env`。Worker 下次刷新即使用新 cookie。
+脚本从浏览器 Profile 提取 `__Host-console_session`，用 `GET /console/api/go/status`（带 `x-org-id`）验证，然后**一次性同步三处**：
+
+1. 本地 `.env` 的 `OPENCODE_GO_SESSION_COOKIE`
+2. Cloudflare Worker secret `OPENCODE_GO_SESSION_COOKIE`
+3. Supabase Edge Function secrets（`OPENCODE_GO_SESSION_COOKIE` / `OPENCODE_GO_WORKSPACE_ID`）
+
+跑完刷新看板即恢复，无需改代码或重新部署。
 
 #### Ollama Pro Cookie 刷新
 
@@ -405,6 +385,8 @@ not_found_handling = "single-page-application"
 | `OPENCODE_GO_WORKSPACE2_ID` | OpenCode Go 账号2 workspace id |
 | `OPENCODE_GO_SESSION_COOKIE` | OpenCode Go 账号1 的 `__Host-console_session`（本地脚本自动写回） |
 | `OPENCODE_GO_SESSION_COOKIE2` | OpenCode Go 账号2 的 `__Host-console_session` |
+| `OPENCODE_GO_EDGE_PROXY_URL` | Supabase Edge Function 地址（云端兜底通道），如 `https://<ref>.supabase.co/functions/v1/opencode-usage` |
+| `OPENCODE_PROXY_KEY` | Edge Function 与 Worker 共享的调用密钥（`x-proxy-key`） |
 | `XFYUN_MAAS_API_URL` | 讯飞 `coding-plan/list` 用量接口 |
 | `XFYUN_MAAS_AUTH_COOKIE` | 讯飞登录 cookie |
 | `ALIYUN_BAILIAN_PAGE_URL` | 阿里云百炼 Coding Plan 看板入口 |

@@ -2,6 +2,23 @@
 
 本项目使用 Keep a Changelog 风格记录：`Added` / `Changed` / `Fixed`。版本号按日期递增（`YYYY-MM-DD`）。
 
+## [2026-10-27] - OpenCode Go 云端实时化（Supabase Edge Function 兜底）
+
+### Added
+
+- 新增 Supabase Edge Function `supabase/functions/opencode-usage/index.ts`：从 Supabase（Deno Deploy / AWS 东京）出口调 `GET /console/api/go/status`，绕开 opencode 对 Cloudflare 出口的 401。函数用 `x-proxy-key`（`OPENCODE_PROXY_KEY`）鉴权，workspaceId / session cookie 走 Supabase secrets。
+- Worker provider 增加 Edge Function 兜底：直连 opencode 失败时自动改调 `OPENCODE_GO_EDGE_PROXY_URL`，成功时快照 `meta.fetchMethod="edge_function"`。
+- `refresh-opencode-cookie.ts` 刷新 cookie 时同步更新 Supabase Edge Function secrets（`OPENCODE_GO_SESSION_COOKIE` / `OPENCODE_GO_WORKSPACE_ID`）。
+
+### Changed
+
+- 看板点「立即刷新」/ 自动刷新现在能拿到 OpenCode Go 实时数据（`fallback=false`），不再依赖本地脚本；`refresh-opencode-usage.ts` 降级为兜底通道。
+- Worker 直连请求补齐 `Origin` / `Referer` / `Sec-Fetch-*` 等浏览器头；补齐后仍 401，确认是出口 IP 层面拒绝（作为诊断记录保留）。
+
+### Fixed
+
+- 修复「卡片显示健康但数据不更新」：此前云端必然 401 → 回退旧快照；现在 Edge Function 通道返回实时数据。
+
 ## [2026-10-25] - OpenCode Go 适配新版控制台（/console + JSON API）
 
 ### Changed

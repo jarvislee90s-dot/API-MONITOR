@@ -60,6 +60,9 @@ function buildProviderConfig(env: WorkerEnv, providerId: string): Record<string,
       authCookie: env.OPENCODE_GO_AUTH_COOKIE,
       apiKey: env.OPENCODE_GO_API_KEY,
       baseUrl: env.OPENCODE_GO_BASE_URL,
+      // Supabase Edge Function 兜底（Cloudflare 出口被 opencode 拒绝）
+      edgeProxyUrl: env.OPENCODE_GO_EDGE_PROXY_URL,
+      edgeProxyKey: env.OPENCODE_PROXY_KEY,
     };
   }
 

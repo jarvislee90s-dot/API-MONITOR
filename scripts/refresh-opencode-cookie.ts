@@ -350,6 +350,38 @@ async function updateWorkerSecret(env: Record<string, string>, cookieValue: stri
   console.log("✅ Worker secret OPENCODE_GO_SESSION_COOKIE 已更新");
 }
 
+// 同步更新 Supabase Edge Function 的 secrets，让云端兜底通道也用上新 cookie
+async function updateEdgeFunctionSecrets(env: Record<string, string>, cookieValue: string): Promise<void> {
+  const token = env.Access_Token ?? env.SUPABASE_ACCESS_TOKEN;
+  const projectRef = env.SUPABASE_PROJECT_REF ?? "cdzjuvewreribelvpccz";
+  if (!token) {
+    console.warn("⚠️ 缺少 Access_Token（Supabase 个人访问令牌），跳过 Edge Function secret 更新");
+    return;
+  }
+
+  const secrets: Array<{ name: string; value: string }> = [
+    { name: "OPENCODE_GO_SESSION_COOKIE", value: cookieValue },
+  ];
+  if (env.OPENCODE_GO_WORKSPACE_ID) {
+    secrets.push({ name: "OPENCODE_GO_WORKSPACE_ID", value: env.OPENCODE_GO_WORKSPACE_ID });
+  }
+
+  try {
+    const response = await fetch(`https://api.supabase.com/v1/projects/${projectRef}/secrets`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify(secrets),
+    });
+    if (!response.ok) {
+      console.warn(`⚠️ Edge Function secrets 更新失败: HTTP ${response.status}`);
+      return;
+    }
+    console.log("✅ Supabase Edge Function secrets 已更新（OPENCODE_GO_SESSION_COOKIE）");
+  } catch (error) {
+    console.warn(`⚠️ Edge Function secrets 更新异常: ${String(error)}`);
+  }
+}
+
 async function main(): Promise<void> {
   const env = loadEnv();
 
@@ -442,6 +474,10 @@ async function main(): Promise<void> {
   // 更新 Worker secret
   console.log("🔐 通过 Cloudflare API 更新 Worker secret...");
     await updateWorkerSecret(env, sessionCookieValue);
+
+  // 同步更新 Supabase Edge Function secrets（云端兜底通道）
+  console.log("⚡ 同步 Supabase Edge Function secrets...");
+  await updateEdgeFunctionSecrets(env, sessionCookieValue);
 
   // 同步本地 .env
   console.log("📝 更新本地 .env...");

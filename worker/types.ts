@@ -195,6 +195,9 @@ export interface WorkerEnv extends RefreshSessionEnv {
   OPENCODE_GO_WORKSPACE_ID?: string;
   OPENCODE_GO_SESSION_COOKIE?: string;
   OPENCODE_GO_AUTH_COOKIE?: string;
+  // Supabase Edge Function 兜底通道（Cloudflare 出口被 opencode 拒绝时使用）
+  OPENCODE_GO_EDGE_PROXY_URL?: string;
+  OPENCODE_PROXY_KEY?: string;
   OPENCODE_GO_API_KEY?: string;
   INGEST_API_KEY?: string;
   OPENCODE_GO_BASE_URL?: string;

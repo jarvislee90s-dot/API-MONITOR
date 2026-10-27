@@ -363,6 +363,67 @@ describe("opencode-go adapter", () => {
     expect(result.snapshot.status).toBe("partial");
     expect(result.snapshot.summary).toContain("未找到 Go 订阅用量窗口");
   });
+
+  it("uses the Supabase Edge Function when the Cloudflare egress is rejected", async () => {
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const target = String(url);
+      if (target.includes("supabase.test/functions/v1/opencode-usage")) {
+        return Response.json(goStatusPayload);
+      }
+      return new Response("unauthorized", { status: 401 });
+    });
+
+    const result = await fetchOpenCodeGoSnapshot({
+      now: new Date("2026-10-25T02:00:00.000Z"),
+      fetchImpl: fetchImpl as typeof fetch,
+      config: {
+        workspaceId: "wrk_123",
+        sessionCookie: "session-token",
+        edgeProxyUrl: "https://supabase.test/functions/v1/opencode-usage",
+        edgeProxyKey: "proxy-key",
+      },
+    });
+
+    expect(result.snapshot.status).toBe("ready");
+    expect(result.snapshot.meta).toMatchObject({ fetchMethod: "edge_function" });
+    expect(result.snapshot.windows).toHaveLength(3);
+  });
+
+  it("maps an expired Edge Function session to login_required", async () => {
+    const fetchImpl = vi.fn(async () => Response.json({ error: "unauthorized" }, { status: 401 }));
+
+    const result = await fetchOpenCodeGoSnapshot({
+      now: new Date("2026-10-25T02:00:00.000Z"),
+      fetchImpl: fetchImpl as typeof fetch,
+      config: {
+        workspaceId: "wrk_123",
+        edgeProxyUrl: "https://supabase.test/functions/v1/opencode-usage",
+        edgeProxyKey: "proxy-key",
+      },
+    });
+
+    expect(result.snapshot.status).toBe("login_required");
+    expect(result.snapshot.summary).toContain("Edge Function 返回 HTTP 401");
+    expect(result.snapshot.meta).toMatchObject({ fetchMethod: "edge_function" });
+  });
+
+  it("reports both channels failing when edge proxy and direct request are rejected", async () => {
+    const fetchImpl = vi.fn(async () => new Response("unauthorized", { status: 401 }));
+
+    const result = await fetchOpenCodeGoSnapshot({
+      now: new Date("2026-10-25T02:00:00.000Z"),
+      fetchImpl: fetchImpl as typeof fetch,
+      config: {
+        workspaceId: "wrk_123",
+        sessionCookie: "session-token",
+        edgeProxyUrl: "https://supabase.test/functions/v1/opencode-usage",
+        edgeProxyKey: "proxy-key",
+      },
+    });
+
+    expect(result.snapshot.status).toBe("error");
+    expect(result.snapshot.summary).toContain("Edge Function 兜底也失败");
+  });
 });
 
 describe("xfyun maas adapter", () => {
