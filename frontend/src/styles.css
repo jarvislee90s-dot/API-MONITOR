@@ -200,9 +200,11 @@ button { border: 0; }
 .metric-box { display: grid; gap: 4px; padding: 10px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface-soft); }
 .metric-box strong { font-family: "JetBrains Mono", monospace; font-size: 16px; font-weight: 600; }
 .platform-card__grid { display: grid; grid-template-columns: 1fr 1.4fr; gap: 12px; min-height: 0; }
-.platform-card__grid--footer { grid-template-columns: 1.2fr 1fr; }
-.platform-card__links h3 { margin: 0 0 8px; font-size: 14px; font-weight: 600; }
-.platform-card__links-copy { margin: 0 0 10px; color: var(--muted); line-height: 1.5; font-size: 13px; }
+.platform-card__grid--footer { grid-template-columns: 1fr; }
+/* 原网页入口：竖向小按钮，不占模型表横向空间 */
+.platform-card__links { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.platform-card__links .link-list { flex-direction: column; align-items: flex-start; gap: 6px; }
+.platform-card__links .link-chip { padding: 6px 10px; font-size: 12px; }
 
 /* 账号切换 */
 .account-switcher { display: flex; gap: 8px; flex-wrap: wrap; }

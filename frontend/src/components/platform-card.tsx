@@ -142,13 +142,11 @@ export function PlatformCard({ platform }: PlatformCardProps) {
 
       <div className="platform-card__grid platform-card__grid--footer">
         <ModelSpendTable rows={platform.modelSpends} />
-        <div className="platform-card__links">
-          <h3>原网页和入口</h3>
-          <p className="platform-card__links-copy">
-            打开供应商原始看板；未登录时会跳转到对应登录页面。
-          </p>
-          <RawLinks links={display.links} />
-        </div>
+      </div>
+
+      {/* 原网页入口：只保留竖向排列的小按钮，不占模型表横向空间 */}
+      <div className="platform-card__links">
+        <RawLinks links={display.links} />
       </div>
     </article>
   );
