@@ -1,17 +1,19 @@
 /**
- * 一键刷新：列出「智谱 / Ollama / ChatGPT(Codex) / OpenCode Go」在看板上的启用状态，并依次刷新**启用中**的那些
+ * 一键刷新：按「看板实际显示的供应商」依次刷新对应脚本
  *
  * 由 refresh-enabled.bat 调用（也可单独运行）：
  *   node --experimental-strip-types scripts/refresh-enabled-providers.ts            # 列状态 + 依次刷新
  *   node --experimental-strip-types scripts/refresh-enabled-providers.ts --list      # 只看状态，不刷新
  *
- * 「看板显示」判定与 worker 的 buildProviderConfigs 一致：
- *   供应商启用（provider_preferences.enabled）且（存在首页启用账号 或 该供应商没有真实账号的入口型）
+ * 「谁要刷」判定（看板优先 + 设置兜底）：
+ *   1. 先请求 GET {APIMONITOR}/api/usage，拿线上看板实际渲染的 providerId 集合；
+ *   2. 看板请求失败时回退到 Supabase 设置推导（供应商启用 + 至少一个首页显示账号）。
  * 刷新动作按供应商选用既有脚本：
  *   智谱       → refresh-zhipu-cookie.ts（账号密码登录刷新 cookie，云端即可取数）
  *   Ollama     → refresh-ollama-cookie.ts（专用 Profile，登录态失效时弹浏览器）
  *   ChatGPT    → refresh-chatgpt-usage.ts --local（读 Codex 本地会话日志，免浏览器免代理，秒级）
  *   OpenCode Go→ refresh-opencode-usage.ts（需先关闭 Edge，双账号串行抓取后推送）
+ *   Command Code→ refresh-commandcode-usage.ts（专用 Profile 提 cookie，缓存有效时不弹浏览器）
  */
 
 import { spawnSync } from "node:child_process";
@@ -50,6 +52,12 @@ const PROVIDERS: ProviderPlan[] = [
     // --no-wait-login：一键刷新时不要在登录失效的账号上卡 5 分钟，直接跳过并提示
     refreshArgs: ["scripts/refresh-opencode-usage.ts", "--no-wait-login"],
     note: "需先关闭 Edge；双账号串行抓取后推送（登录失效时跳过）",
+  },
+  {
+    key: "commandcode",
+    label: "Command Code",
+    refreshArgs: ["scripts/refresh-commandcode-usage.ts", "--no-wait-login"],
+    note: "专用 Profile 提 cookie；缓存有效时不开浏览器",
   },
 ];
 
@@ -128,6 +136,26 @@ async function readStatuses(env: Record<string, string>): Promise<ProviderStatus
   });
 }
 
+// 看板优先：直接读线上 /api/usage 实际渲染的 providerId 集合；失败返回 null 走设置兜底
+async function readBoardProviderKeys(env: Record<string, string>): Promise<Set<string> | null> {
+  const base = env.APIMONITOR_URL ?? env.APIMONITOR_INGEST_URL;
+  if (!base) return null;
+  try {
+    const url = new URL("/api/usage", base);
+    const resp = await fetch(url, {
+      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (!resp.ok) return null;
+    const json = (await resp.json()) as { data?: { cards?: Array<{ providerId?: string }> } };
+    const cards = json.data?.cards ?? [];
+    const keys = cards.map((card) => card.providerId).filter((key): key is string => Boolean(key));
+    return keys.length > 0 ? new Set(keys) : null;
+  } catch {
+    return null;
+  }
+}
+
 function runRefresh(plan: ProviderPlan): boolean {
   console.log("");
   console.log(`──────── 刷新 ${plan.label}（${plan.note}）────────`);
@@ -148,9 +176,13 @@ async function main(): Promise<void> {
   const listOnly = process.argv.includes("--list");
   const env = loadEnv();
   const statuses = await readStatuses(env);
+  const boardKeys = await readBoardProviderKeys(env);
+  const statusSource = boardKeys ? "看板实际卡片" : "Supabase 设置推导";
+  const isVisible = (key: string): boolean =>
+    boardKeys ? boardKeys.has(key) : Boolean(statuses.find((item) => item.providerKey === key)?.visible);
 
   console.log("");
-  console.log("=========== 看板启用状态（智谱 / Ollama / ChatGPT / OpenCode Go）===========");
+  console.log(`=========== 看板启用状态（智谱 / Ollama / ChatGPT / OpenCode Go / Command Code，来源：${statusSource}）===========`);
   console.log("供应商          供应商启用   首页账号   看板显示   说明");
   for (const plan of PROVIDERS) {
     const status = statuses.find((item) => item.providerKey === plan.key)!;
@@ -159,13 +191,13 @@ async function main(): Promise<void> {
         plan.label.padEnd(14, " "),
         (status.providerEnabled ? "启用" : "停用").padEnd(11, " "),
         `${status.homepageAccounts}/${status.totalAccounts}`.padEnd(10, " "),
-        (status.visible ? "显示" : "不显示").padEnd(10, " "),
+        (isVisible(plan.key) ? "显示" : "不显示").padEnd(10, " "),
         status.skipReason ?? plan.note,
       ].join(" "),
     );
   }
 
-  const targets = PROVIDERS.filter((plan) => statuses.find((item) => item.providerKey === plan.key)!.visible);
+  const targets = PROVIDERS.filter((plan) => isVisible(plan.key));
   console.log("");
   if (targets.length === 0) {
     console.log("[INFO] 没有处于「看板显示」状态的供应商，无需刷新。");

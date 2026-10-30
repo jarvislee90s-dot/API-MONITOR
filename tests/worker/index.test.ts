@@ -229,6 +229,7 @@ describe("worker api", () => {
     expect(payload.data.map((provider: { id: string }) => provider.id)).toEqual([
       "openrouter",
       "opencode-go",
+      "commandcode",
       "xfyun-maas",
       "aliyun-bailian",
       "volc-ark",
@@ -344,13 +345,13 @@ describe("worker api", () => {
       expect(response.status).toBe(200);
       expect(payload.ok).toBe(true);
       expect(payload.data.kind).toBe("usage_dashboard");
-      expect(payload.data.cards).toHaveLength(9);
+      expect(payload.data.cards).toHaveLength(10);
       expect(payload.data.modelSpends).toEqual([]);
       expect(payload.data.totals).toMatchObject({
-        providers: 9,
+        providers: 10,
         ready: 3,
         partial: 1,
-        loginRequired: 5,
+        loginRequired: 6,
         error: 0,
       });
       expect(payload.data.cards[0]).toMatchObject({
@@ -359,8 +360,12 @@ describe("worker api", () => {
       });
       expect(payload.data.cards[0].trend).toHaveLength(4);
       expect(payload.data.cards[1].trend).toHaveLength(3);
-      expect(payload.data.cards[2].trend).toHaveLength(1);
-      expect(payload.data.cards[3]).toMatchObject({
+      expect(payload.data.cards[2]).toMatchObject({
+        providerId: "commandcode",
+        status: "login_required",
+      });
+      expect(payload.data.cards[3].trend).toHaveLength(1);
+      expect(payload.data.cards[4]).toMatchObject({
         providerId: "aliyun-bailian",
         providerName: "阿里云百炼",
         status: "partial",
@@ -807,7 +812,7 @@ describe("worker api", () => {
         sessionKey: "dashboard",
         refreshed: true,
       });
-      expect(payload.data.cards).toHaveLength(9);
+      expect(payload.data.cards).toHaveLength(10);
     } finally {
       vi.unstubAllGlobals();
     }

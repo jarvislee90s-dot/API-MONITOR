@@ -1,5 +1,6 @@
 import { openrouter } from "./openrouter";
 import { opencodeGo } from "./opencode-go";
+import { commandCode } from "./commandcode";
 import { xfyunMaaS } from "./xfyun-maas";
 import { aliyunBailian } from "./aliyun-bailian";
 import { volcArk } from "./volc-ark";
@@ -12,6 +13,7 @@ import type { ProviderDefinition, ProviderId } from "../types";
 const PROVIDERS: ProviderDefinition[] = [
   openrouter,
   opencodeGo,
+  commandCode,
   xfyunMaaS,
   aliyunBailian,
   volcArk,

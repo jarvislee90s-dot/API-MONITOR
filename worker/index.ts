@@ -8,6 +8,7 @@ import { getActiveProviderAccountConfig, getProviderAccountConfigById, listProvi
 import { requireUser } from "./auth";
 import {
   handleIngestChatgpt,
+  handleIngestCommandCode,
   handleIngestDeepSeek,
   handleIngestOpenCodeGo,
   handleIngestZhipu,
@@ -62,6 +63,17 @@ function buildProviderConfig(env: WorkerEnv, providerId: string): Record<string,
       baseUrl: env.OPENCODE_GO_BASE_URL,
       // Supabase Edge Function 兜底（Cloudflare 出口被 opencode 拒绝）
       edgeProxyUrl: env.OPENCODE_GO_EDGE_PROXY_URL,
+      edgeProxyKey: env.OPENCODE_PROXY_KEY,
+    };
+  }
+
+  if (providerId === "commandcode") {
+    return {
+      sessionCookie: env.COMMANDCODE_SESSION_COOKIE,
+      account: env.COMMANDCODE_ACCOUNT,
+      apiBaseUrl: env.COMMANDCODE_API_BASE_URL,
+      // Supabase Edge Function 兜底（Cloudflare 出口被 commandcode 拒绝时使用）
+      edgeProxyUrl: env.COMMANDCODE_EDGE_PROXY_URL,
       edgeProxyKey: env.OPENCODE_PROXY_KEY,
     };
   }
@@ -983,6 +995,9 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
 
   if (request.method === "POST" && url.pathname === "/api/ingest/opencode-go") {
     return handleIngestOpenCodeGo(request, env);
+  }
+  if (request.method === "POST" && url.pathname === "/api/ingest/commandcode") {
+    return handleIngestCommandCode(request, env);
   }
   if (request.method === "POST" && url.pathname === "/api/ingest/deepseek") {
     return handleIngestDeepSeek(request, env);

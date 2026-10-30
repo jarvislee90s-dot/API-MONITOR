@@ -4,6 +4,8 @@ import { getProvider, isProviderId, listProviders } from "../../worker/providers
 import { fetchOpenRouterSnapshot } from "../../worker/providers/openrouter";
 import { fetchOpenCodeGoSnapshot } from "../../worker/providers/opencode-go";
 import { parseOpenCodeGoStatus } from "../../worker/providers/opencode-go-parser";
+import { fetchCommandCodeSnapshot } from "../../worker/providers/commandcode";
+import { parseCommandCodeTopModels, parseCommandCodeWindows } from "../../worker/providers/commandcode-parser";
 import { fetchXfyunMaaSSnapshot } from "../../worker/providers/xfyun-maas";
 import { fetchAliyunBailianSnapshot } from "../../worker/providers/aliyun-bailian";
 import { fetchVolcArkSnapshot } from "../../worker/providers/volc-ark";
@@ -25,6 +27,7 @@ describe("provider registry", () => {
     expect(listProviders().map((provider) => provider.id)).toEqual([
       "openrouter",
       "opencode-go",
+      "commandcode",
       "xfyun-maas",
       "aliyun-bailian",
       "volc-ark",
@@ -423,6 +426,111 @@ describe("opencode-go adapter", () => {
 
     expect(result.snapshot.status).toBe("error");
     expect(result.snapshot.summary).toContain("Edge Function 兜底也失败");
+  });
+});
+
+describe("commandcode adapter", () => {
+  // 实测自 api.commandcode.ai（2026-10-30）
+  const summary = {
+    totalCount: 679,
+    totalTokens: 126561066,
+    totalCost: 2.82,
+    periodStart: "2026-10-30T07:58:57.000Z",
+  };
+  const byModel = {
+    success: true,
+    data: [
+      { model: "deepseek/deepseek-v4.1-flash", requests: 679, tokensTotal: 126561066 },
+    ],
+  };
+  const credits = {
+    credits: { monthlyCredits: 67.18, monthlyCreditsGranted: 70 },
+    windowLimits: {
+      fiveHour: { used: 2.818, cap: 14, resetAt: 1793365747331 },
+      weekly: { used: 2.818, cap: 35, resetAt: 1793952547331 },
+    },
+  };
+
+  function stubApi() {
+    return vi.fn(async (url: string | URL | Request) => {
+      const target = String(url);
+      if (target.endsWith("/internal/usage/summary")) return Response.json(summary);
+      if (target.endsWith("/internal/usage/by-model")) return Response.json(byModel);
+      if (target.endsWith("/internal/billing/credits")) return Response.json(credits);
+      return new Response("not found", { status: 404 });
+    });
+  }
+
+  it("returns login_required when the session cookie is missing", async () => {
+    const result = await fetchCommandCodeSnapshot({
+      now: new Date("2026-10-30T10:00:00.000Z"),
+      config: {},
+    });
+
+    expect(result.snapshot.status).toBe("login_required");
+    expect(result.snapshot.summary).toContain("Missing Command Code session cookie");
+  });
+
+  it("parses the three endpoints into windows and top models", async () => {
+    const result = await fetchCommandCodeSnapshot({
+      now: new Date("2026-10-30T10:00:00.000Z"),
+      fetchImpl: stubApi() as unknown as typeof fetch,
+      config: {
+        sessionCookie: "session-token",
+        account: "jarvislee90s-dot",
+      },
+    });
+
+    expect(result.snapshot.status).toBe("ready");
+    expect(result.snapshot.windows.map((window) => window.key)).toEqual([
+      "rolling",
+      "weekly",
+      "monthly",
+    ]);
+    expect(result.snapshot.windows[0]).toMatchObject({ label: "5 小时", used: 20.13 });
+    expect(result.snapshot.windows[1]).toMatchObject({ label: "每周", used: 8.05 });
+    expect(result.snapshot.windows[2]).toMatchObject({ label: "每月", used: 4.03 });
+    expect(result.snapshot.metrics).toMatchObject({
+      totalTokens: 126561066,
+      totalRequests: 679,
+      totalCost: 2.82,
+      periodStart: "2026-10-30T07:58:57.000Z",
+    });
+    expect(JSON.parse(String(result.snapshot.metrics.topModels))).toHaveLength(1);
+    expect(result.snapshot.meta).toMatchObject({ fetchMethod: "api" });
+  });
+
+  it("maps 401 to login_required", async () => {
+    const fetchImpl = vi.fn(async () => new Response("unauthorized", { status: 401 }));
+    const result = await fetchCommandCodeSnapshot({
+      now: new Date("2026-10-30T10:00:00.000Z"),
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      config: { sessionCookie: "expired", account: "jarvislee90s-dot" },
+    });
+
+    expect(result.snapshot.status).toBe("login_required");
+    expect(result.snapshot.summary).toContain("登录态无效或已过期");
+  });
+
+  it("computes monthly usage from granted vs remaining credits", () => {
+    const windows = parseCommandCodeWindows(credits, summary);
+    const monthly = windows.find((window) => window.key === "monthly");
+    expect(monthly?.used).toBe(4.03);
+    expect(monthly?.resetAt).toBe("2026-11-30T07:58:57.000Z");
+  });
+
+  it("sorts top models by tokens and computes share", () => {
+    const models = parseCommandCodeTopModels(
+      {
+        data: [
+          { model: "a", requests: 1, tokensTotal: 60 },
+          { model: "b", requests: 2, tokensTotal: 40 },
+        ],
+      },
+      100,
+    );
+    expect(models.map((model) => model.model)).toEqual(["a", "b"]);
+    expect(models[0]).toMatchObject({ tokens: 60, share: 0.6 });
   });
 });
 

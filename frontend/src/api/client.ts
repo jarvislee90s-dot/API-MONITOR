@@ -358,6 +358,7 @@ function mapStatus(status: ServerProviderStatus, meta?: Record<string, unknown>)
 function resolveAccent(providerId: string): string {
   if (providerId === "xfyun-maas") return "#2563eb";
   if (providerId === "opencode-go") return "#0f766e";
+  if (providerId === "commandcode") return "#ea580c";
   if (providerId === "aliyun-bailian") return "#7c3aed";
   if (providerId === "volc-ark") return "#dc2626";
   if (providerId === "deepseek") return "#0369a1";
@@ -370,6 +371,7 @@ function resolveAccent(providerId: string): string {
 function resolveTagline(providerId: string): string {
   if (providerId === "xfyun-maas") return "原网页入口 / 登录状态";
   if (providerId === "opencode-go") return "workspaceId + auth cookie";
+  if (providerId === "commandcode") return "5h / 周 / 月额度 + 模型用量";
   if (providerId === "aliyun-bailian") return "Coding Plan / 百炼控制台";
   if (providerId === "volc-ark") return "Coding Plan 用量 / 5小时周月";
   if (providerId === "deepseek") return "API 余额 / 近30天用量";
@@ -382,6 +384,7 @@ function resolveTagline(providerId: string): string {
 function resolvePrimaryMetricLabel(providerId: string, windows: ServerProviderWindow[]): string {
   if (providerId === "xfyun-maas") return "当前套餐";
   if (providerId === "opencode-go") return "活跃窗口";
+  if (providerId === "commandcode") return "5小时额度";
   if (providerId === "openrouter") return "本周期花费";
   if (providerId === "aliyun-bailian") return "当前套餐";
   if (providerId === "deepseek") return "充值余额";
@@ -508,12 +511,44 @@ function formatPercent(value: number): string {
   return `${Math.round(value * 10) / 10}%`;
 }
 
+// Command Code：Token 数按 M/K 缩写，计费周期显示为 10/30 - 11/30
+function formatTokenCount(value: number): string {
+  if (value >= 1e6) return `${(value / 1e6).toFixed(2)}M`;
+  if (value >= 1e3) return `${(value / 1e3).toFixed(1)}K`;
+  return new Intl.NumberFormat("zh-CN").format(value);
+}
+
+function formatBillingPeriod(periodStart: string): string {
+  const start = new Date(periodStart);
+  if (Number.isNaN(start.getTime())) return periodStart;
+  const end = new Date(start);
+  end.setUTCMonth(end.getUTCMonth() + 1);
+  const fmt = (date: Date) => `${date.getUTCMonth() + 1}/${date.getUTCDate()}`;
+  return `${fmt(start)} - ${fmt(end)}`;
+}
+
 // 智谱卡 3×3 九宫格指标：
 // 第1行 [5小时窗口(已用/额度), 登录状态, 最近同步]
 // 第2行 [7天 Cache 命中率, 7天积分消耗, 7天 Tokens]
 // 第3行 [30天 Cache 命中率, 30天积分总数, 30天 Tokens]
 // Ollama 模型请求数列表（由 metrics.weeklyModels JSON 推导，按请求数降序）
 function resolveModelSpends(providerId: string, metrics: Record<string, unknown>): ModelSpendRow[] {
+  if (providerId === "commandcode") {
+    const raw = typeof metrics.topModels === "string" ? metrics.topModels : "[]";
+    let rows: Array<{ model: string; requests: number; tokens: number; share: number }> = [];
+    try {
+      rows = JSON.parse(raw);
+    } catch {
+      rows = [];
+    }
+    return rows.slice(0, 5).map((row) => ({
+      model: row.model,
+      requests: row.requests,
+      tokens: row.tokens,
+      spendUsd: 0,
+      share: row.share,
+    }));
+  }
   if (providerId !== "ollama") return [];
   const raw = typeof metrics.weeklyModels === "string" ? metrics.weeklyModels : "[]";
   let models: Array<{ name: string; requests: number }> = [];
@@ -561,6 +596,16 @@ function buildDetailMetrics(
     push("5小时请求数", requests5h, (n) => new Intl.NumberFormat("zh-CN").format(n));
     push("本周请求数", metrics.weeklyRequestCount, (n) => new Intl.NumberFormat("zh-CN").format(n));
     push("5小时预计总请求", estimated5h, (n) => new Intl.NumberFormat("zh-CN").format(n));
+    return items;
+  }
+  if (providerId === "commandcode") {
+    push("总 Token", metrics.totalTokens, (n) => formatTokenCount(n));
+    push("总请求数", metrics.totalRequests, (n) => new Intl.NumberFormat("zh-CN").format(n));
+    push("计费月花费", metrics.totalCost, (n) => `$${n.toFixed(2)}`);
+    const periodStart = typeof metrics.periodStart === "string" ? metrics.periodStart : null;
+    if (periodStart) {
+      items.push({ label: "计费周期", value: formatBillingPeriod(periodStart) });
+    }
     return items;
   }
   if (providerId === "chatgpt") {

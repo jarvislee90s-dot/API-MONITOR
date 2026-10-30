@@ -16,7 +16,7 @@ https://apimonitor.bondtoolbox.asia
 
 ## 功能亮点
 
-- 统一展示 OpenRouter、OpenCode Go、讯飞 MaaS、阿里云百炼、火山方舟、智谱 BigModel、Ollama Pro、DeepSeek、ChatGPT 九个平台状态。
+- 统一展示 OpenRouter、OpenCode Go、Command Code、讯飞 MaaS、阿里云百炼、火山方舟、智谱 BigModel、Ollama Pro、DeepSeek、ChatGPT 十个平台状态。
 - 支持 5 小时、每周、套餐总量等不同 quota window。
 - 独立配置页支持"供应商 → 多账号 → 账号配置"的单页多层工作台。
 - 首页保持一个供应商一个大卡片；多账号通过卡片内账号子卡片切换显示。
@@ -38,6 +38,7 @@ https://apimonitor.bondtoolbox.asia
 | Supabase 存储 | 已配置表、RLS、迁移 |
 | OpenRouter | 已接入 |
 | OpenCode Go | 已接入，含最近成功快照回退 |
+| Command Code | 已接入 `api.commandcode.ai` 三个内部接口（5h/周/月额度 + Top5 模型 + 总 token/请求），云端直连可用 |
 | 讯飞 MaaS | 已接入 `coding-plan/list` 用量接口 |
 | 阿里云百炼 | 已接入原网页入口；云端抓取保留为实验选项 |
 | 火山方舟 | 已接入 `GetCodingPlanUsage` 用量接口（5小时/周/月百分比） |
@@ -93,6 +94,7 @@ flowchart LR
 | --- | --- | --- | --- |
 | 讯飞 MaaS / OpenRouter | Worker 云端直抓 | ✅ 实时刷新 | 前端点同步 |
 | OpenCode Go | 云端：Worker 直连失败 → Supabase Edge Function | ✅ 实时刷新 | 无需手动；cookie 过期时跑 `refresh-opencode-cookie.ts` |
+| Command Code | Worker 云端直连 `api.commandcode.ai` | ✅ 实时刷新 | 无需手动；cookie 过期时跑 `refresh-commandcode-usage.ts` |
 | 智谱 BigModel | Worker 云端直抓（持久化 cookie/token） | ✅ 实时刷新 | 本地脚本刷新 cookie 后点同步 |
 | Ollama Pro | Worker 云端直抓（网页登录态 cookie） | ✅ 实时刷新 | 本地脚本刷新 cookie 后点同步 |
 | DeepSeek | Worker 云端直抓（登录态有效时） | ✅ 云端直抓 | 登录态过期时跑 `refresh-deepseek-usage.ts` |
@@ -106,11 +108,26 @@ flowchart LR
 
 ### 刷新 Cookie 与用量（本地脚本）
 
-部分供应商的登录态 cookie 会过期，或其用量页屏蔽数据中心 IP，需要本地脚本辅助刷新。火山/OpenCode 脚本复用本地浏览器 Profile 提取登录态，运行前需关闭对应浏览器（含后台进程）避免 Profile 锁定；Ollama 脚本使用项目专用 Profile（登录一次后长期复用，不占用日常浏览器）；DeepSeek/智谱脚本用账号密码在临时浏览器登录。`.env` 中需配置 `CLOUDFLARE_API_TOKEN`。
+部分供应商的登录态 cookie 会过期，或其用量页屏蔽数据中心 IP，需要本地脚本辅助刷新。火山/OpenCode 脚本复用本地浏览器 Profile 提取登录态，运行前需关闭对应浏览器（含后台进程）避免 Profile 锁定；Ollama 与 Command Code 脚本使用项目专用 Profile（登录一次后长期复用，不占用日常浏览器）；DeepSeek/智谱脚本用账号密码在临时浏览器登录。`.env` 中需配置 `CLOUDFLARE_API_TOKEN`。
+
+### Command Code
+
+Command Code（commandcode.ai）用三个内部接口取数，全部挂在 `api.commandcode.ai`：
+
+| 接口 | 用途 |
+| --- | --- |
+| `/internal/usage/summary` | 总 Token / 总请求 / 总花费 / 计费周期（periodStart） |
+| `/internal/usage/by-model` | 按模型聚合（取 Top5，算 token 占比） |
+| `/internal/billing/credits` | 5 小时 / 每周额度窗口（used / cap / resetAt）与月度积分 |
+
+- 鉴权只用 `__Secure-commandcode_prod_.session_token`（实测约 7 天有效），Worker 直连可用，无需 Edge Function。
+- 本地脚本 `refresh-commandcode-usage.ts` 用专用 Profile（`output/commandcode-profile/`）提取 cookie 并推送；首次运行会打开窗口让你登录一次。
+- cookie 过期后跑一次该脚本即可，会同时更新 `.env`、Worker secret、Supabase 加密凭据与 Edge Function secrets。
+- 官方文档参考：<https://commandcode.ai/jarvislee90s-dot/settings/usage>
 
 #### 一键刷新：`refresh-enabled.bat`（推荐日常使用）
 
-双击项目根目录的 `refresh-enabled.bat`：先列出「智谱 / Ollama / ChatGPT(Codex) / OpenCode Go」谁在**看板显示**（供应商启用 且 至少一个账号设了首页显示；入口型供应商无账号时按显示处理），再**依次刷新处于显示状态的那些**，跳过停用或未设首页显示的供应商并给出原因。
+双击项目根目录的 `refresh-enabled.bat`：先请求线上 `/api/usage` 拿**看板实际显示的供应商**（请求失败时回退 Supabase 设置推导），再**依次刷新处于显示状态的那些**，跳过停用或未设首页显示的供应商并给出原因。
 
 ```powershell
 .\refresh-enabled.bat            # 列状态 + 依次刷新显示中的供应商
@@ -127,6 +144,7 @@ flowchart LR
 | Ollama Pro | `refresh-ollama-cookie.ts` | 专用 Profile 复用登录态，失效时弹浏览器登录 |
 | ChatGPT (Codex) | `refresh-chatgpt-usage.ts --local` | 读 Codex 本地会话日志，免代理、免浏览器、秒级 |
 | OpenCode Go | `refresh-opencode-usage.ts` | 需先关闭 Edge；双账号串行抓取后推送 |
+| Command Code | `refresh-commandcode-usage.ts` | 专用 Profile 提 cookie；缓存有效时不开浏览器 |
 
 注意：
 
@@ -387,6 +405,10 @@ not_found_handling = "single-page-application"
 | `OPENCODE_GO_SESSION_COOKIE2` | OpenCode Go 账号2 的 `__Host-console_session` |
 | `OPENCODE_GO_EDGE_PROXY_URL` | Supabase Edge Function 地址（云端兜底通道），如 `https://<ref>.supabase.co/functions/v1/opencode-usage` |
 | `OPENCODE_PROXY_KEY` | Edge Function 与 Worker 共享的调用密钥（`x-proxy-key`） |
+| `COMMANDCODE_SESSION_COOKIE` | Command Code 的 `__Secure-commandcode_prod_.session_token`（本地脚本自动写回） |
+| `COMMANDCODE_ACCOUNT` | Command Code 账号 slug（默认 `jarvislee90s-dot`） |
+| `COMMANDCODE_API_BASE_URL` | 可选，默认 `https://api.commandcode.ai` |
+| `COMMANDCODE_EDGE_PROXY_URL` | 可选，Command Code 的 Edge Function 兜底地址 |
 | `XFYUN_MAAS_API_URL` | 讯飞 `coding-plan/list` 用量接口 |
 | `XFYUN_MAAS_AUTH_COOKIE` | 讯飞登录 cookie |
 | `ALIYUN_BAILIAN_PAGE_URL` | 阿里云百炼 Coding Plan 看板入口 |

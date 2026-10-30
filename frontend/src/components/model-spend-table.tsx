@@ -10,8 +10,17 @@ function formatNumber(value: number): string {
   return new Intl.NumberFormat("zh-CN").format(value);
 }
 
+// 大数按 M/K 缩写（Command Code 的 token 数会到上亿）
+function formatTokens(value: number): string {
+  if (value >= 1e6) return `${(value / 1e6).toFixed(2)}M`;
+  if (value >= 1e3) return `${(value / 1e3).toFixed(1)}K`;
+  return formatNumber(value);
+}
+
 export function ModelSpendTable({ rows }: ModelSpendTableProps) {
   const visibleRows = rows.slice(0, MAX_ROWS);
+  // 有 token 数时多显示一列（Command Code）；Ollama 只有请求数时保持三列
+  const hasTokens = visibleRows.some((row) => row.tokens > 0);
 
   if (visibleRows.length === 0) {
     return (
@@ -37,6 +46,7 @@ export function ModelSpendTable({ rows }: ModelSpendTableProps) {
             <tr>
               <th>模型</th>
               <th>请求数</th>
+              {hasTokens ? <th>Token 数</th> : null}
               <th>占比</th>
             </tr>
           </thead>
@@ -45,6 +55,7 @@ export function ModelSpendTable({ rows }: ModelSpendTableProps) {
               <tr key={row.model}>
                 <td>{row.model}</td>
                 <td>{formatNumber(row.requests)}</td>
+                {hasTokens ? <td>{formatTokens(row.tokens)}</td> : null}
                 <td>{Math.round(row.share * 100)}%</td>
               </tr>
             ))}

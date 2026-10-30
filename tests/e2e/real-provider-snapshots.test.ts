@@ -49,6 +49,7 @@ const requiredEnvByProvider: Record<ProviderId, string[]> = {
   openrouter: ["OPENROUTER_API_KEY"],
   "deepseek": ["DEEPSEEK_API_KEY", "DEEPSEEK_USER_TOKEN", "DEEPSEEK_AUTH_COOKIE"],
   "opencode-go": ["OPENCODE_GO_WORKSPACE_ID", "OPENCODE_GO_AUTH_COOKIE"],
+  commandcode: ["COMMANDCODE_SESSION_COOKIE"],
   "xfyun-maas": ["XFYUN_MAAS_API_URL", "XFYUN_MAAS_AUTH_COOKIE"],
   "aliyun-bailian": ["ALIYUN_BAILIAN_API_URL", "ALIYUN_BAILIAN_AUTH_COOKIE"],
   "volc-ark": ["VOLC_ARK_AUTH_COOKIE"],

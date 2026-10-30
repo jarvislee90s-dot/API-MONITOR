@@ -96,6 +96,13 @@ export async function handleIngestOpenCodeGo(request: Request, env: WorkerEnv): 
   });
 }
 
+export async function handleIngestCommandCode(request: Request, env: WorkerEnv): Promise<Response> {
+  return handleProviderIngest(request, env, "commandcode", {
+    providerName: "Command Code",
+    summary: "Command Code usage windows parsed",
+  });
+}
+
 export async function handleIngestDeepSeek(request: Request, env: WorkerEnv): Promise<Response> {
   return handleProviderIngest(request, env, "deepseek", {
     providerName: "DeepSeek",

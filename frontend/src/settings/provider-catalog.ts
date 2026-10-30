@@ -14,6 +14,12 @@ export const PUBLIC_PROVIDER_CATALOG: ProviderCatalogItem[] = [
     description: "workspaceId + session cookie（__Host-console_session）",
   },
   {
+    providerKey: "commandcode",
+    providerName: "Command Code",
+    sourceUrl: "https://commandcode.ai/{account}/settings/usage",
+    description: "5h / 周 / 月额度 + Top5 模型（token / 请求 / 占比）",
+  },
+  {
     providerKey: "xfyun-maas",
     providerName: "讯飞 MaaS",
     sourceUrl: "https://maas.xfyun.cn/packageSubscription",

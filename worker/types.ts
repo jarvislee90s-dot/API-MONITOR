@@ -1,6 +1,7 @@
 export type ProviderId =
   | "openrouter"
   | "opencode-go"
+  | "commandcode"
   | "xfyun-maas"
   | "aliyun-bailian"
   | "volc-ark"
@@ -198,6 +199,11 @@ export interface WorkerEnv extends RefreshSessionEnv {
   // Supabase Edge Function 兜底通道（Cloudflare 出口被 opencode 拒绝时使用）
   OPENCODE_GO_EDGE_PROXY_URL?: string;
   OPENCODE_PROXY_KEY?: string;
+  // Command Code（commandcode.ai）：cookie 登录态 + 可选 Edge Function 兜底
+  COMMANDCODE_SESSION_COOKIE?: string;
+  COMMANDCODE_ACCOUNT?: string;
+  COMMANDCODE_API_BASE_URL?: string;
+  COMMANDCODE_EDGE_PROXY_URL?: string;
   OPENCODE_GO_API_KEY?: string;
   INGEST_API_KEY?: string;
   OPENCODE_GO_BASE_URL?: string;

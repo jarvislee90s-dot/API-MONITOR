@@ -2,6 +2,21 @@
 
 本项目使用 Keep a Changelog 风格记录：`Added` / `Changed` / `Fixed`。版本号按日期递增（`YYYY-MM-DD`）。
 
+## [2026-10-30] - 接入 Command Code（commandcode.ai）
+
+### Added
+
+- 新增 `commandcode` provider：云端直连 `api.commandcode.ai` 三个内部接口（`/internal/usage/summary`、`/internal/usage/by-model`、`/internal/billing/credits`），解析 5 小时 / 每周 / 每月额度百分比 + 总 Token / 总请求 / 计费周期 + Top5 模型（模型名、请求数、Token 数、token 占比）。
+- 新增 `scripts/refresh-commandcode-usage.ts`：用专用 Chrome Profile（`output/commandcode-profile/`）提取 `__Secure-commandcode_prod_.session_token`，调接口并推送到 `/api/ingest/commandcode`；同时同步 cookie 到 `.env`、Worker secret、Supabase 加密凭据与 Edge Function secrets。
+- 新增 Supabase Edge Function `supabase/functions/commandcode-usage/` 作为云端兜底（当前 Cloudflare 直连可用，未触发）。
+- 前端新增 Command Code 卡片：顶部指标（总 Token / 总请求 / 计费周期 / 花费）+ 5h/周/月三窗口 + Top5 模型表。
+
+### Changed
+
+- `refresh-enabled-providers.ts` 改为「看板优先 + 设置兜底」：先读线上 `/api/usage` 实际渲染的供应商，请求失败才回退 Supabase 设置推导；刷新列表加入 Command Code。
+- `ModelSpendTable` 支持 Token 数列：有 token 数据时显示 4 列，Ollama 仍保持 3 列。
+- 设置页凭据表单新增 Command Code（`account` + `sessionCookie`）。
+
 ## [2026-10-27] - OpenCode Go 云端实时化（Supabase Edge Function 兜底）
 
 ### Added

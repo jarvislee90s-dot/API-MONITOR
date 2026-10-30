@@ -16,6 +16,7 @@ function defaultSourceUrl(provider: ProviderCatalogItem | null): string {
 function credentialFields(providerKey: string | undefined): string[] {
   if (providerKey === "openrouter") return ["apiKey", "endpoint"];
   if (providerKey === "opencode-go") return ["workspaceId", "sessionCookie"];
+  if (providerKey === "commandcode") return ["account", "sessionCookie"];
   if (providerKey === "xfyun-maas") return ["authCookie", "apiUrl"];
   if (providerKey === "aliyun-bailian") return ["authCookie", "apiUrl"];
   if (providerKey === "volc-ark") return ["authCookie", "apiUrl"];
@@ -33,6 +34,7 @@ function fieldLabel(field: string): string {
     workspaceId: "workspaceId",
     authCookie: "authCookie",
     sessionCookie: "session cookie（__Host-console_session）",
+    account: "账号 slug（如 jarvislee90s-dot）",
     authToken: "登录 Token",
     apiUrl: "endpoint / baseUrl",
     accessToken: "Access Token",
