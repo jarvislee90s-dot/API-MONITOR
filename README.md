@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-API 与 Coding Plan 用量聚合看板。它把 OpenRouter、OpenCode Go、讯飞 MaaS Coding Plan、阿里云百炼 Coding Plan、火山方舟 Coding Plan、智谱 BigModel Coding Plan、Ollama Pro、DeepSeek 平台、ChatGPT（Codex / 对话额度 / 订阅状态）的用量状态聚合到一个响应式网页里，并用 Supabase 保存刷新快照和云端配置。
+API 与 Coding Plan 用量聚合看板。它把 OpenRouter、OpenCode Go、Command Code、讯飞 MaaS Coding Plan、阿里云百炼 Coding Plan、火山方舟 Coding Plan、智谱 BigModel Coding Plan、Ollama Pro、DeepSeek 平台、ChatGPT（Codex / 对话额度 / 订阅状态）的用量状态聚合到一个响应式网页里，并用 Supabase 保存刷新快照和云端配置。
 
 线上示例：
 
@@ -18,6 +18,7 @@ https://apimonitor.bondtoolbox.asia
 
 - 统一展示 OpenRouter、OpenCode Go、Command Code、讯飞 MaaS、阿里云百炼、火山方舟、智谱 BigModel、Ollama Pro、DeepSeek、ChatGPT 十个平台状态。
 - 支持 5 小时、每周、套餐总量等不同 quota window。
+- 卡片布局：模型请求 / Top5 模型表占满整行，原网页入口只保留一个竖向小按钮，不与数据表抢横向空间。
 - 独立配置页支持"供应商 → 多账号 → 账号配置"的单页多层工作台。
 - 首页保持一个供应商一个大卡片；多账号通过卡片内账号子卡片切换显示。
 - 供应商卡片可整体停用/启用（未配置账号的供应商也能隐藏），账号可单独控制是否在首页显示，停用都不会删除配置或凭据。
@@ -26,7 +27,9 @@ https://apimonitor.bondtoolbox.asia
 - Supabase Postgres 保存用量快照、窗口数据和刷新事件。
 - Supabase 保存配置，Worker 使用 AES-GCM 加密第三方凭据。
 - OpenCode Go 支持双账号，分别登录在 Edge 不同 Profile，本地脚本串行刷新推送。
-- OpenCode Go 与 ChatGPT 支持"最近成功快照"回退，降低云端抓取不稳定时的页面空窗。
+- OpenCode Go 云端优先直连，Cloudflare 出口被拒时自动切 Supabase Edge Function，点同步即可实时刷新。
+- Command Code 云端直连 `api.commandcode.ai` 三个内部接口（5h/周/月额度 + 总 token/请求 + Top5 模型），无需本地脚本即可实时刷新。
+- OpenCode Go、Command Code 与 ChatGPT 支持"最近成功快照"回退，降低云端抓取不稳定时的页面空窗。
 - ChatGPT 因 chatgpt.com 整体拒绝 Cloudflare 出口，改由本机脚本抓取并推送快照（卡片标注"本机推送"与推送时间）。
 
 ## 当前状态
@@ -58,6 +61,8 @@ flowchart LR
   Worker --> Supabase["Supabase Postgres"]
   Worker --> OpenRouter["OpenRouter API"]
   Worker --> OpenCode["OpenCode Go Dashboard"]
+  Worker --> EdgeFn["Supabase Edge Function (opencode 兜底)"]
+  Worker --> CommandCode["Command Code API"]
   Worker --> Xfyun["讯飞 MaaS Coding Plan"]
   Worker --> Bailian["阿里云百炼 Coding Plan"]
 
@@ -472,7 +477,7 @@ not_found_handling = "single-page-application"
 ## 后续计划
 
 - 模型级花费明细。
-- 更稳定的 OpenCode Go 云端抓取策略。
+- Command Code 多账号（当前单账号，数据结构已预留 accountId/label）。
 - 把 ChatGPT cookie 续期并入 `refresh-chatgpt-usage.ts`（每次推送顺带写回新 session cookie），并按需挂任务计划自动推送。
 - 手机端交互细节优化。
 - 用量预测和阈值告警。
