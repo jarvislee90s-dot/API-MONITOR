@@ -203,7 +203,17 @@ describe("api client mapping", () => {
     expect(platform.detailMetrics).toEqual([
       { label: "5小时", value: "2,024 / 1.2万" },
       { label: "登录状态", value: "已连接" },
-      { label: "最近同步", value: "8月21日 12:00" },
+      {
+        label: "最近同步",
+        value: new Intl.DateTimeFormat("zh-CN", {
+          timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+        }).format(new Date("2026-08-21T04:00:00.000Z")),
+      },
       { label: "7天 Cache 命中率", value: "95.5%" },
       { label: "7天积分消耗", value: "4,427.29" },
       { label: "7天 Tokens", value: "0.45亿" },

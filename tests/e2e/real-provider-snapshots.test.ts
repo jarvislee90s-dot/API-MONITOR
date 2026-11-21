@@ -3,6 +3,9 @@ import { describe, expect, it } from "vitest";
 import { handleApiRequest } from "../../worker/index";
 import type { ProviderId, WorkerEnv } from "../../worker/types";
 
+// OpenAI API 是专用入口，禁止公开 /api/providers/:provider/snapshot；此 E2E 不覆盖它
+type DirectProviderId = Exclude<ProviderId, "openai-api">;
+
 function readEnv(name: string): string | undefined {
   const value = process.env[name];
   return value && value.trim().length > 0 ? value.trim() : undefined;
@@ -45,7 +48,7 @@ function createDirectEnv(): WorkerEnv {
   };
 }
 
-const requiredEnvByProvider: Record<ProviderId, string[]> = {
+const requiredEnvByProvider: Record<DirectProviderId, string[]> = {
   openrouter: ["OPENROUTER_API_KEY"],
   "deepseek": ["DEEPSEEK_API_KEY", "DEEPSEEK_USER_TOKEN", "DEEPSEEK_AUTH_COOKIE"],
   "opencode-go": ["OPENCODE_GO_WORKSPACE_ID", "OPENCODE_GO_AUTH_COOKIE"],
@@ -59,7 +62,7 @@ const requiredEnvByProvider: Record<ProviderId, string[]> = {
 };
 
 describe.skipIf(process.env.RUN_REAL_E2E !== "1")("real provider snapshot e2e", () => {
-  for (const [providerId, requiredEnv] of Object.entries(requiredEnvByProvider) as Array<[ProviderId, string[]]>) {
+  for (const [providerId, requiredEnv] of Object.entries(requiredEnvByProvider) as Array<[DirectProviderId, string[]]>) {
     it(`loads ${providerId} usage snapshot directly`, async () => {
       const missing = requiredEnv.filter((name) => !readEnv(name));
       if (missing.length > 0) {

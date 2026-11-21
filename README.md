@@ -438,6 +438,12 @@ not_found_handling = "single-page-application"
 | `DEEPSEEK_USER_TOKEN` / `DEEPSEEK_AUTH_COOKIE` | DeepSeek 云端抓取登录态（脚本自动刷新并写回） |
 | `INGEST_API_KEY` | 本地脚本推送快照的共享密钥（opencode / deepseek / zhipu / chatgpt 共用，Worker 端需配置同名 secret） |
 | `APIMONITOR_INGEST_URL` | 本地脚本推送目标（Worker 线上地址，已配置为自定义域名） |
+| `OPENAI_API_OWNER_USER_ID` | OpenAI API 卡片 Owner 的 Supabase Auth UID（仅此已验证非匿名用户可见） |
+| `OPENAI_ADMIN_API_KEY` | OpenAI 组织级 Admin API Key，仅存 Worker Secret，不下发前端 |
+
+### OpenAI API 卡片配置
+
+在 Worker 配置 `OPENAI_API_OWNER_USER_ID` 与 `OPENAI_ADMIN_API_KEY` 两个 Secret，并在启用前应用 `supabase/migrations/202611210001_openai_api_snapshots.sql`（复用 `usage_snapshots`，增加专用查询索引与浏览器角色的 restrictive RLS 限制）。该卡片展示组织已入账费用、US$100 额度与本期文本模型 Top 5，按 UTC 每月 15 日换期；两个取数接口各自独立保留本周期成功值与采集时间。未配置或身份不匹配时不显示卡片，调试/设置入口不暴露组织数据。
 
 ## 安全说明
 

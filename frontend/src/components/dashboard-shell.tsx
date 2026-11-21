@@ -11,6 +11,8 @@ interface DashboardShellProps {
   syncState: DashboardSyncState;
   syncMessage: string | null;
   onRefresh: () => void;
+  // 本地 DEV 预览专用：隐藏无实际作用的刷新/配置按钮，并展示示例数据提示
+  previewNotice?: string | null;
 }
 
 function formatTimestamp(value: string): string {
@@ -38,6 +40,7 @@ export function DashboardShell({
   syncState,
   syncMessage,
   onRefresh,
+  previewNotice,
 }: DashboardShellProps) {
   const totalSpend = dashboard.platforms.reduce((sum, platform) => {
     return (
@@ -65,31 +68,47 @@ export function DashboardShell({
               <p className="kicker">ApiMonitor</p>
               <h1>API 与 Coding Plan 用量看板</h1>
               <p>
-                同一屏里看三个平台的健康状态、quota window、趋势、模型花费和原网页入口，活跃时自动刷新，空闲后自动暂停。
+                {previewNotice
+                  ? "本地示例数据预览：复用真实卡片渲染链，可切换不同状态查看；原网页链接仅在点击后跳转。"
+                  : "同一屏里看三个平台的健康状态、quota window、趋势、模型花费和原网页入口，活跃时自动刷新，空闲后自动暂停。"}
               </p>
             </div>
 
-            <div className="actions">
-              <a className="btn btn--ghost" href="#/settings">
-                <SlidersHorizontal size={16} aria-hidden="true" />
-                配置
-              </a>
-              <button
-                type="button"
-                className="btn btn--primary"
-                onClick={onRefresh}
-                disabled={isRefreshing}
-                aria-busy={isRefreshing}
-              >
-                <RefreshCw size={16} aria-hidden="true" className={isRefreshing ? "icon-spin" : ""} />
-                {isRefreshing ? "同步中" : "立即刷新"}
-              </button>
-              <span className={`activity-pill ${isActive ? "is-active" : "is-idle"}`}>
-                <Activity size={14} aria-hidden="true" />
-                {isActive ? "活跃刷新中" : "已暂停自动刷新"}
-              </span>
-            </div>
+            {previewNotice ? (
+              <div className="activity-pill is-idle" aria-label="本地预览状态">
+                <ShieldCheck size={14} aria-hidden="true" />
+                本地示例数据
+              </div>
+            ) : (
+              <div className="actions">
+                <a className="btn btn--ghost" href="#/settings">
+                  <SlidersHorizontal size={16} aria-hidden="true" />
+                  配置
+                </a>
+                <button
+                  type="button"
+                  className="btn btn--primary"
+                  onClick={onRefresh}
+                  disabled={isRefreshing}
+                  aria-busy={isRefreshing}
+                >
+                  <RefreshCw size={16} aria-hidden="true" className={isRefreshing ? "icon-spin" : ""} />
+                  {isRefreshing ? "同步中" : "立即刷新"}
+                </button>
+                <span className={`activity-pill ${isActive ? "is-active" : "is-idle"}`}>
+                  <Activity size={14} aria-hidden="true" />
+                  {isActive ? "活跃刷新中" : "已暂停自动刷新"}
+                </span>
+              </div>
+            )}
           </div>
+
+          {previewNotice ? (
+            <div className="sync-banner sync-banner--loading">
+              <ShieldCheck size={14} aria-hidden="true" />
+              <span>{previewNotice} · 预览仅渲染 OpenAI 组织卡，虚构金额与用量不代表真实账单。</span>
+            </div>
+          ) : null}
 
           {syncMessage ? (
             <div className={`sync-banner sync-banner--${syncState}`}>
@@ -102,32 +121,36 @@ export function DashboardShell({
             </div>
           ) : null}
 
-          <div className="summary-bar">
-            <div className="summary-card">
-              <span className="section-label">总花费</span>
-              <strong>{formatCurrency(totalSpend)}</strong>
-            </div>
-            <div className="summary-card">
-              <span className="section-label">最新使用量</span>
-              <strong>{new Intl.NumberFormat("zh-CN").format(totalUsage)}</strong>
-            </div>
-            <div className="summary-card">
-              <span className="section-label">平台数量</span>
-              <strong>{dashboard.platforms.length}</strong>
-            </div>
-            <div className="summary-card">
-              <span className="section-label">刷新时间</span>
-              <strong>{formatTimestamp(dashboard.refreshedAt)}</strong>
-            </div>
-          </div>
+          {previewNotice ? null : (
+            <>
+              <div className="summary-bar">
+                <div className="summary-card">
+                  <span className="section-label">总花费</span>
+                  <strong>{formatCurrency(totalSpend)}</strong>
+                </div>
+                <div className="summary-card">
+                  <span className="section-label">最新使用量</span>
+                  <strong>{new Intl.NumberFormat("zh-CN").format(totalUsage)}</strong>
+                </div>
+                <div className="summary-card">
+                  <span className="section-label">平台数量</span>
+                  <strong>{dashboard.platforms.length}</strong>
+                </div>
+                <div className="summary-card">
+                  <span className="section-label">刷新时间</span>
+                  <strong>{formatTimestamp(dashboard.refreshedAt)}</strong>
+                </div>
+              </div>
 
-          <div className="hero__foot">
-            <span className="hero__note">
-              <ShieldCheck size={14} aria-hidden="true" />
-              数据状态：{dashboard.status === "ready" ? "就绪" : "部分可用"}
-            </span>
-            <span className="hero__note">生成于 {formatTimestamp(dashboard.generatedAt)}</span>
-          </div>
+              <div className="hero__foot">
+                <span className="hero__note">
+                  <ShieldCheck size={14} aria-hidden="true" />
+                  数据状态：{dashboard.status === "ready" ? "就绪" : "部分可用"}
+                </span>
+                <span className="hero__note">生成于 {formatTimestamp(dashboard.generatedAt)}</span>
+              </div>
+            </>
+          )}
         </header>
 
         <section className="dashboard-grid" aria-label="三平台统一看板">

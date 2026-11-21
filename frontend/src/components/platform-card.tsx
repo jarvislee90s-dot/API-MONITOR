@@ -2,6 +2,7 @@ import { useMemo, useState, useEffect, type CSSProperties } from "react";
 import { AlertTriangle, ArrowUpRight, CheckCircle2, Clock3, RefreshCw } from "lucide-react";
 import type { PlatformSnapshot } from "../api/client";
 import { ModelSpendTable } from "./model-spend-table";
+import { OpenAiApiSections } from "./openai-api-sections";
 import { QuotaWindowList } from "./quota-window-list";
 import { RawLinks } from "./raw-links";
 import { UsageTrendChart } from "./usage-trend-chart";
@@ -105,44 +106,50 @@ export function PlatformCard({ platform }: PlatformCardProps) {
         </div>
       ) : null}
 
-      {(display.detailMetrics?.length ?? 0) > 0 ? (
-        <section className="platform-card__metrics platform-card__metrics--grid">
-          {display.detailMetrics.map((metric) => (
-            <div className="metric-box" key={metric.label}>
-              <span className="section-label">{metric.label}</span>
-              <strong>{metric.value}</strong>
-            </div>
-          ))}
-        </section>
+      {platform.openaiApi ? (
+        <OpenAiApiSections data={platform.openaiApi} />
       ) : (
-        <section className="platform-card__metrics">
-          <div className="metric-box">
-            <span className="section-label">{display.primaryMetricLabel}</span>
-            <strong>{display.primaryMetricValue}</strong>
+        <>
+          {(display.detailMetrics?.length ?? 0) > 0 ? (
+            <section className="platform-card__metrics platform-card__metrics--grid">
+              {display.detailMetrics.map((metric) => (
+                <div className="metric-box" key={metric.label}>
+                  <span className="section-label">{metric.label}</span>
+                  <strong>{metric.value}</strong>
+                </div>
+              ))}
+            </section>
+          ) : (
+            <section className="platform-card__metrics">
+              <div className="metric-box">
+                <span className="section-label">{display.primaryMetricLabel}</span>
+                <strong>{display.primaryMetricValue}</strong>
+              </div>
+              <div className="metric-box">
+                <span className="section-label">登录状态</span>
+                <strong>{display.loginState}</strong>
+              </div>
+              <div className="metric-box">
+                <span className="section-label">最近同步</span>
+                <strong>{formatTimestamp(display.lastRefreshedAt)}</strong>
+              </div>
+            </section>
+          )}
+
+          <div className="platform-card__grid">
+            <QuotaWindowList windows={display.quotaWindows} />
+            <UsageTrendChart
+              title={`${platform.name} 趋势`}
+              points={display.trend}
+              accent={platform.accent}
+            />
           </div>
-          <div className="metric-box">
-            <span className="section-label">登录状态</span>
-            <strong>{display.loginState}</strong>
+
+          <div className="platform-card__grid platform-card__grid--footer">
+            <ModelSpendTable rows={platform.modelSpends} />
           </div>
-          <div className="metric-box">
-            <span className="section-label">最近同步</span>
-            <strong>{formatTimestamp(display.lastRefreshedAt)}</strong>
-          </div>
-        </section>
+        </>
       )}
-
-      <div className="platform-card__grid">
-        <QuotaWindowList windows={display.quotaWindows} />
-        <UsageTrendChart
-          title={`${platform.name} 趋势`}
-          points={display.trend}
-          accent={platform.accent}
-        />
-      </div>
-
-      <div className="platform-card__grid platform-card__grid--footer">
-        <ModelSpendTable rows={platform.modelSpends} />
-      </div>
 
       {/* 原网页入口：只保留竖向排列的小按钮，不占模型表横向空间 */}
       <div className="platform-card__links">

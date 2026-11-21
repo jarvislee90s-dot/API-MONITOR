@@ -2,6 +2,42 @@ export type PlatformStatus = "healthy" | "warning" | "partial" | "login_required
 
 export type LinkTone = "neutral" | "brand" | "warning";
 
+// 与 Worker 共用 shared/openai-api.ts 的契约常量与类型，避免两端口径漂移。
+// 前端对外仍以以下名称重导出，映射层另做防御式运行时校验，
+// 保证缺失或非法 meta.openaiApi 时落到安全空态而不是崩溃。
+import {
+  OPENAI_API_BUDGET_USD,
+  OPENAI_API_PROVIDER_ID,
+  OPENAI_API_SOURCE_URL,
+  type OpenAiApiData as OpenAiApiCardData,
+  type OpenAiApiErrorCode as OpenAiErrorCode,
+  type OpenAiApiPeriod,
+  type OpenAiApiResourceStatus as OpenAiResourceStatus,
+  type OpenAiApiSection,
+  type OpenAiApiTopModel,
+  type OpenAiApiUsageValue,
+} from "../../../shared/openai-api";
+
+export {
+  OPENAI_API_BUDGET_USD,
+  OPENAI_API_PROVIDER_ID,
+  OPENAI_API_PROVIDER_NAME,
+  OPENAI_API_SOURCE_URL,
+} from "../../../shared/openai-api";
+export type {
+  OpenAiApiData as OpenAiApiCardData,
+  OpenAiApiErrorCode as OpenAiErrorCode,
+  OpenAiApiPeriod,
+  OpenAiApiResourceStatus as OpenAiResourceStatus,
+  OpenAiApiSection,
+  OpenAiApiTopModel,
+  OpenAiApiUsageValue,
+} from "../../../shared/openai-api";
+
+// 卡片具体两区类型的语义别名（openai-api-sections 直接消费）
+export type OpenAiApiCosts = OpenAiApiSection<number>;
+export type OpenAiApiUsage = OpenAiApiSection<OpenAiApiUsageValue>;
+
 export interface ApiClientOptions {
   baseUrl?: string;
   fetcher?: typeof fetch;
@@ -79,6 +115,8 @@ export interface PlatformSnapshot {
   links: RawLinkItem[];
   selectedAccountId: string | null;
   accounts: PlatformAccountSnapshot[];
+  // OpenAI 组织卡专属结构化数据；其余供应商卡片不携带此字段
+  openaiApi?: OpenAiApiCardData;
 }
 
 export interface PlatformAccountSnapshot {
@@ -369,6 +407,7 @@ function resolveAccent(providerId: string): string {
 }
 
 function resolveTagline(providerId: string): string {
+  if (providerId === OPENAI_API_PROVIDER_ID) return "组织费用与文本模型用量";
   if (providerId === "xfyun-maas") return "原网页入口 / 登录状态";
   if (providerId === "opencode-go") return "workspaceId + auth cookie";
   if (providerId === "commandcode") return "5h / 周 / 月额度 + 模型用量";
@@ -699,8 +738,155 @@ function toSourceLabel(sourceUrl: string): string {
   }
 }
 
-function toLinks(_providerId: string, sourceUrl: string): RawLinkItem[] {
+function toLinks(providerId: string, sourceUrl: string): RawLinkItem[] {
+  // OpenAI 组织卡的原网页按钮文案与普通平台不同
+  if (providerId === OPENAI_API_PROVIDER_ID) {
+    return [{ label: "打开原网页", href: sourceUrl, tone: "brand" }];
+  }
   return [{ label: "打开看板", href: sourceUrl, tone: "brand" }];
+}
+
+const OPENAI_RESOURCE_STATUSES: OpenAiResourceStatus[] = ["ready", "stale", "unavailable"];
+const OPENAI_ERROR_CODES: OpenAiErrorCode[] = [
+  "not_configured",
+  "timeout",
+  "upstream_failed",
+  "invalid_data",
+  "storage_failed",
+];
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function parseIsoString(value: unknown): string {
+  if (typeof value === "string" && value && !Number.isNaN(new Date(value).getTime())) {
+    return value;
+  }
+  return "";
+}
+
+function parseTimestampOrNull(value: unknown): string | null {
+  if (typeof value !== "string" || !value) return null;
+  return Number.isNaN(new Date(value).getTime()) ? null : value;
+}
+
+function parseStatus(value: unknown): OpenAiResourceStatus {
+  return OPENAI_RESOURCE_STATUSES.find((status) => status === value) ?? "unavailable";
+}
+
+function parseError(value: unknown): OpenAiErrorCode | undefined {
+  return OPENAI_ERROR_CODES.find((code) => code === value);
+}
+
+function parseNonNegativeInt(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+// 将服务端 meta.openaiApi 解析为前端结构化数据；任何非法结构都退化为安全空态。
+// 把非法区块降级为 unavailable + invalid_data，避免 ready/stale + null 伪装成成功空
+function invalidSection(): { status: "unavailable"; updatedAt: null; value: null; error: "invalid_data" } {
+  return { status: "unavailable", updatedAt: null, value: null, error: "invalid_data" };
+}
+
+function parseOpenAiApi(meta: Record<string, unknown>): OpenAiApiCardData {
+  const empty: OpenAiApiCardData = {
+    period: { start: "", end: "" },
+    costs: { status: "unavailable", updatedAt: null, value: null },
+    usage: { status: "unavailable", updatedAt: null, value: null },
+  };
+  const raw = asRecord(meta.openaiApi);
+  if (!raw) return empty;
+
+  const rawPeriod = asRecord(raw.period);
+  const period: OpenAiApiPeriod = {
+    start: parseIsoString(rawPeriod?.start),
+    end: parseIsoString(rawPeriod?.end),
+  };
+
+  // 费用区：ready/stale 必须有合法有限数值，否则视为无效数据
+  const rawCosts = asRecord(raw.costs);
+  const costsStatus = parseStatus(rawCosts?.status);
+  let costs: OpenAiApiCosts;
+  if (costsStatus === "unavailable") {
+    costs = { status: "unavailable", updatedAt: parseTimestampOrNull(rawCosts?.updatedAt), value: null };
+  } else {
+    const costValue = rawCosts?.value;
+    if (typeof costValue !== "number" || !Number.isFinite(costValue)) {
+      costs = invalidSection();
+    } else {
+      costs = {
+        status: costsStatus,
+        updatedAt: parseTimestampOrNull(rawCosts?.updatedAt),
+        value: costValue,
+      };
+    }
+  }
+  const costError = parseError(rawCosts?.error);
+  if (costError) costs.error = costError;
+
+  // 用量区：ready/stale 必须有合法数值且 topModels 为数组（[] 是合法空），
+  // 缺 topModels 或字段非法都降级为 invalid_data，不能伪装成「本期暂无用量」
+  const rawUsage = asRecord(raw.usage);
+  const usageStatus = parseStatus(rawUsage?.status);
+  let usage: OpenAiApiUsage;
+  if (usageStatus === "unavailable") {
+    usage = { status: "unavailable", updatedAt: parseTimestampOrNull(rawUsage?.updatedAt), value: null };
+  } else {
+    const rawUsageValue = asRecord(rawUsage?.value);
+    const requests = rawUsageValue ? parseNonNegativeInt(rawUsageValue.requests) : null;
+    const inputTokens = rawUsageValue ? parseNonNegativeInt(rawUsageValue.inputTokens) : null;
+    const outputTokens = rawUsageValue ? parseNonNegativeInt(rawUsageValue.outputTokens) : null;
+    const rawTopModels = rawUsageValue?.topModels;
+    // topModels 必须是数组（合法空数组为 []）；缺失/非法 → 无效数据
+    if (
+      requests === null ||
+      inputTokens === null ||
+      outputTokens === null ||
+      !Array.isArray(rawTopModels)
+    ) {
+      usage = invalidSection();
+    } else {
+      const topModels: OpenAiApiTopModel[] = [];
+      let hasInvalidRow = false;
+      for (const item of rawTopModels as unknown[]) {
+        const row = asRecord(item);
+        if (!row || typeof row.model !== "string" || !row.model) {
+          hasInvalidRow = true;
+          continue;
+        }
+        const rowRequests = parseNonNegativeInt(row.requests);
+        const rowTokens = parseNonNegativeInt(row.tokens);
+        // share 必须是 0..1 的有限数值；非法值（含缺失）与同区其它字段非法一样
+        // 让整区块降级 invalid_data，而不是被钳制成 0 伪装成合法空占比
+        const share =
+          typeof row.share === "number" && Number.isFinite(row.share) && row.share >= 0 && row.share <= 1
+            ? row.share
+            : null;
+        if (rowRequests === null || rowTokens === null || share === null) {
+          hasInvalidRow = true;
+          continue;
+        }
+        topModels.push({ model: row.model, requests: rowRequests, tokens: rowTokens, share });
+      }
+      if (hasInvalidRow) {
+        // 任一行非法 → 整区块无效，避免部分数据被当作完整快照
+        usage = invalidSection();
+      } else {
+        usage = {
+          status: usageStatus,
+          updatedAt: parseTimestampOrNull(rawUsage?.updatedAt),
+          value: { requests, inputTokens, outputTokens, topModels },
+        };
+      }
+    }
+  }
+  const usageError = parseError(rawUsage?.error);
+  if (usageError) usage.error = usageError;
+
+  return { period, costs, usage };
 }
 
 function mapServerDashboard(server: ServerUsageDashboard): DashboardSnapshot {
@@ -741,6 +927,13 @@ function mapServerDashboard(server: ServerUsageDashboard): DashboardSnapshot {
       };
     });
 
+    // OpenAI 组织卡：金额只进卡片自己的额度区，modelSpends 保持为空，
+    // 避免混入首页「总花费」；原网页入口由 toLinks 使用专用文案。
+    const isOpenAi = card.providerId === OPENAI_API_PROVIDER_ID;
+    const openaiApi = isOpenAi ? parseOpenAiApi(card.meta ?? {}) : undefined;
+    const sourceUrl =
+      isOpenAi && !card.sourceUrl ? OPENAI_API_SOURCE_URL : card.sourceUrl;
+
     return {
       id: card.providerId,
       name: card.providerName,
@@ -748,8 +941,14 @@ function mapServerDashboard(server: ServerUsageDashboard): DashboardSnapshot {
       summary: card.summary,
       status,
       loginState: resolveLoginState(card.status, card.meta),
-      sourceUrl: card.sourceUrl,
-      sourceLabel,
+      sourceUrl,
+      // OpenAI 卡头右侧只显示短标签，避免窄屏把「OpenAI API」标题挤成两行；
+      // sourceUrl 仍保留完整原网址，入口按钮照常跳转
+      sourceLabel: isOpenAi
+        ? "组织分析"
+        : sourceUrl === card.sourceUrl
+          ? sourceLabel
+          : toSourceLabel(sourceUrl),
       primaryMetricLabel: resolvePrimaryMetricLabel(card.providerId, card.windows),
       primaryMetricValue: primaryWindow ? formatWindowValue(primaryWindow) : card.summary,
       lastRefreshedAt: card.capturedAt,
@@ -763,10 +962,11 @@ function mapServerDashboard(server: ServerUsageDashboard): DashboardSnapshot {
         card.capturedAt,
       ),
       trend,
-      modelSpends: resolveModelSpends(card.providerId, card.metrics),
-      links: toLinks(card.providerId, card.sourceUrl),
+      modelSpends: isOpenAi ? [] : resolveModelSpends(card.providerId, card.metrics),
+      links: toLinks(card.providerId, sourceUrl),
       selectedAccountId: card.selectedAccountId ?? accounts[0]?.id ?? null,
       accounts,
+      ...(openaiApi ? { openaiApi } : {}),
     };
   });
 

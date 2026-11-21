@@ -3,6 +3,8 @@ import { errorResponse } from "./http";
 export interface AuthenticatedUser {
   userId: string;
   email: string | null;
+  // Supabase 匿名会话标识：来自 /auth/v1/user 的真实字段，不信任请求头/请求体
+  isAnonymous: boolean;
 }
 
 export interface SupabaseAuthEnv {
@@ -40,7 +42,11 @@ export async function requireUser(
     return { response: errorResponse(401, "unauthorized", "Supabase login is invalid or expired") };
   }
 
-  const user = (await response.json().catch(() => null)) as { id?: string; email?: string | null } | null;
+  const user = (await response.json().catch(() => null)) as {
+    id?: string;
+    email?: string | null;
+    is_anonymous?: boolean;
+  } | null;
   if (!user?.id) {
     return { response: errorResponse(401, "unauthorized", "Supabase login is invalid or expired") };
   }
@@ -49,6 +55,7 @@ export async function requireUser(
     user: {
       userId: user.id,
       email: user.email ?? null,
+      isAnonymous: user.is_anonymous === true,
     },
   };
 }

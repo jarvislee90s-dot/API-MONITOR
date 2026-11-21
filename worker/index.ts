@@ -2,7 +2,18 @@ import { errorResponse, jsonResponse, readJsonBody, successResponse, toIsoString
 import { buildUsageDashboard } from "./dashboard";
 import { createLiveLoginSession } from "./browser/live-login";
 import { listProviders, getProvider, isProviderId } from "./providers/registry";
-import { RefreshSessionDurableObject } from "./durable-object/refresh-session";
+import {
+  RefreshSessionDurableObject,
+  OPENAI_INTERNAL_DECIDE_PATH,
+  OPENAI_INTERNAL_SESSION_KEY,
+} from "./durable-object/refresh-session";
+import {
+  buildOpenAiApiCard,
+  readOpenAiApiData,
+  readOpenAiApiDataWithCache,
+  refreshOpenAiApiData,
+} from "./openai-api";
+import { deriveOpenAiPeriod, hasValidOpenAiQueryRange } from "../shared/openai-api";
 import { handleSettingsRequest } from "./settings/routes";
 import { getActiveProviderAccountConfig, getProviderAccountConfigById, listProviderSettings, updateProviderAccountCredentials } from "./settings/repository";
 import { requireUser } from "./auth";
@@ -21,6 +32,7 @@ import type {
   WorkerEnv,
   UsageDashboard,
 } from "./types";
+import type { OpenAiApiData } from "../shared/openai-api";
 
 type RefreshRequest = {
   providerId?: string;
@@ -751,15 +763,172 @@ async function handleProviderSnapshot(request: Request, providerId: string, env:
 async function resolveRequestUserId(
   request: Request,
   env: WorkerEnv,
-): Promise<{ userId: string | null } | { response: Response }> {
+): Promise<ResolvedIdentity | { response: Response }> {
   const hasBearerToken = Boolean(request.headers.get("authorization"));
   if (!hasBearerToken) {
-    return { userId: env.SUPABASE_USER_ID ?? null };
+    // 无 bearer 时仅为既有公开链路保留 env fallback；verified=false 永不解锁 OpenAI。
+    return { userId: env.SUPABASE_USER_ID ?? null, isAnonymous: false, verified: false };
   }
 
   const auth = await requireUser(request, env, fetch);
   if ("response" in auth) return auth;
-  return { userId: auth.user.userId };
+  return { userId: auth.user.userId, isAnonymous: auth.user.isAnonymous, verified: true };
+}
+
+type ResolvedIdentity = {
+  userId: string | null;
+  isAnonymous: boolean;
+  // true 表示经 Supabase /auth/v1/user 验证的真实 bearer 用户；env fallback 为 false。
+  verified: boolean;
+};
+
+// 仅当请求带有真实 Supabase bearer 且验证用户是配置的 Owner 且非匿名时才放行。
+// 不从 env.SUPABASE_USER_ID / 请求体 / 账号 ID / 会话名称 / 调试头推导权限。
+function isOpenAiOwner(identity: ResolvedIdentity, env: WorkerEnv): boolean {
+  return Boolean(
+    identity.verified &&
+      !identity.isAnonymous &&
+      identity.userId &&
+      env.OPENAI_API_OWNER_USER_ID &&
+      identity.userId === env.OPENAI_API_OWNER_USER_ID,
+  );
+}
+
+async function openAiInternalDecide(
+  env: WorkerEnv,
+  periodStart: string,
+  periodEnd: string,
+): Promise<{ allowed: boolean; nextAllowedAt: string | null }> {
+  const sessionId = env.REFRESH_SESSION.idFromName(OPENAI_INTERNAL_SESSION_KEY);
+  const stub = env.REFRESH_SESSION.get(sessionId);
+  const response = await stub.fetch(
+    new Request(`https://refresh-session.local${OPENAI_INTERNAL_DECIDE_PATH}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ periodStart, periodEnd }),
+    }),
+  );
+  const payload = (await response.json().catch(() => ({}))) as {
+    ok?: boolean;
+    data?: { allowed?: boolean; nextAllowedAt?: string | null };
+  };
+  return {
+    allowed: payload.data?.allowed === true,
+    nextAllowedAt: payload.data?.nextAllowedAt ?? null,
+  };
+}
+
+type OpenAiLoadResult = {
+  data: OpenAiApiData;
+  refreshed: boolean;
+  nextAllowedAt: string | null;
+};
+
+// GET / 全量刷新 / 显式刷新共用：只读不预约；同周期首秒无有效区间不预约；
+// 响应前按当前时刻重算周期，若已换期则只读当前周期快照，避免展示旧周期结果。
+async function loadOpenAiData(
+  env: WorkerEnv,
+  identity: ResolvedIdentity,
+  refresh: boolean,
+  persist: boolean,
+  now: Date,
+): Promise<OpenAiLoadResult | null> {
+  if (!isOpenAiOwner(identity, env)) return null;
+
+  const period = deriveOpenAiPeriod(now);
+  const validRange = hasValidOpenAiQueryRange(now, period);
+  let refreshedData: OpenAiApiData | null = null;
+  let refreshed = false;
+  let nextAllowedAt: string | null = null;
+
+  if (refresh && persist && validRange) {
+    let decision = { allowed: false, nextAllowedAt: null as string | null };
+    try {
+      decision = await openAiInternalDecide(env, period.start, period.end);
+    } catch {
+      // DO 异常时不放行上游，由下方只读快照兜底
+    }
+    nextAllowedAt = decision.nextAllowedAt;
+    if (decision.allowed) {
+      const result = await refreshOpenAiApiData(env, now, fetch);
+      if (result) {
+        refreshedData = result.data;
+        refreshed = result.refreshed;
+      }
+    }
+  }
+
+  let data: OpenAiApiData;
+  if (refreshedData) {
+    data = refreshedData;
+  } else {
+    data = await readOpenAiApiDataWithCache(env, period, fetch);
+  }
+
+  // 读完后再核对当前时刻：跨越 15 日零点时旧周期结果不再展示，改读新周期快照。
+  const nowAfterRead = new Date();
+  const currentPeriod = deriveOpenAiPeriod(nowAfterRead);
+  if (data.period.start !== currentPeriod.start) {
+    data = await readOpenAiApiDataWithCache(env, currentPeriod, fetch);
+    data = { ...data, period: currentPeriod };
+  }
+  return { data, refreshed, nextAllowedAt };
+}
+
+async function appendOpenAiCard(
+  dashboard: UsageDashboard,
+  env: WorkerEnv,
+  identity: ResolvedIdentity,
+  refresh: boolean,
+  persist: boolean,
+  now: Date,
+): Promise<{ dashboard: UsageDashboard; openAiNextAllowedAt: string | null }> {
+  const loaded = await loadOpenAiData(env, identity, refresh, persist, now);
+  if (!loaded) return { dashboard, openAiNextAllowedAt: null };
+
+  const card = buildOpenAiApiCard(loaded.data, now);
+  const cards = [...dashboard.cards, card];
+  const status = cards.reduce<UsageDashboard["status"]>((current, item) => {
+    const rank = (s: UsageDashboard["status"]) =>
+      s === "error" ? 4 : s === "login_required" ? 3 : s === "partial" ? 2 : s === "ready" ? 1 : 0;
+    return rank(item.status) > rank(current) ? item.status : current;
+  }, "ready");
+  return {
+    dashboard: {
+      ...dashboard,
+      cards,
+      status,
+      summary: `${dashboard.summary} | OpenAI API: ${card.status}`,
+      totals: {
+        ...dashboard.totals,
+        providers: dashboard.totals.providers + 1,
+        ...(card.status === "ready" ? { ready: dashboard.totals.ready + 1 } : {}),
+        ...(card.status === "partial" ? { partial: dashboard.totals.partial + 1 } : {}),
+        ...(card.status === "error" ? { error: dashboard.totals.error + 1 } : {}),
+      },
+    },
+    openAiNextAllowedAt: loaded.nextAllowedAt,
+  };
+}
+
+function privateCacheHeaders(): ResponseInit {
+  return { headers: { "Cache-Control": "private, no-store" } };
+}
+
+function isOpenAiInternalPath(pathname: string): boolean {
+  if (pathname === OPENAI_INTERNAL_DECIDE_PATH || pathname.startsWith("/__internal_openai_api/")) {
+    return true;
+  }
+  // 任何 URL 编码或路径别名都不能把内部实例暴露给公开转发
+  try {
+    const decoded = decodeURIComponent(pathname);
+    if (decoded === OPENAI_INTERNAL_DECIDE_PATH || decoded.includes("__internal_openai_api")) {
+      return true;
+    }
+  } catch {
+    return true;
+  }
+  return pathname.includes("__internal") || pathname.includes(OPENAI_INTERNAL_SESSION_KEY);
 }
 
 async function handleUsage(request: Request, env: WorkerEnv): Promise<Response> {
@@ -772,11 +941,21 @@ async function handleUsage(request: Request, env: WorkerEnv): Promise<Response> 
   const dashboard = buildUsageDashboard(snapshots, {
     providerPreferences: await readDashboardPreferences(env, userId),
   });
-  return successResponse(dashboard);
+  const { dashboard: withOpenAi } = await appendOpenAiCard(dashboard, env, resolved, false, false, new Date());
+  return successResponse(withOpenAi, privateCacheHeaders());
 }
 
-async function handleDashboardRefresh(request: Request, env: WorkerEnv, userId: string | null, body: RefreshRequest): Promise<Response> {
+async function handleDashboardRefresh(
+  request: Request,
+  env: WorkerEnv,
+  userId: string | null,
+  body: RefreshRequest,
+  identity: ResolvedIdentity,
+): Promise<Response> {
   const sessionKey = body.sessionKey ?? "dashboard";
+  if (isOpenAiInternalPath(sessionKey) || sessionKey === OPENAI_INTERNAL_SESSION_KEY) {
+    return errorResponse(404, "not_found", "Unknown API route");
+  }
   const sessionId = env.REFRESH_SESSION.idFromName(sessionKey);
   const sessionStub = env.REFRESH_SESSION.get(sessionId);
   const decisionResponse = await sessionStub.fetch(
@@ -816,7 +995,70 @@ async function handleDashboardRefresh(request: Request, env: WorkerEnv, userId: 
     },
   });
 
-  return successResponse(dashboard);
+  const { dashboard: withOpenAi, openAiNextAllowedAt } = await appendOpenAiCard(
+    dashboard,
+    env,
+    identity,
+    true,
+    body.persist !== false,
+    new Date(),
+  );
+  // Owner 的全量刷新响应合并两处冷却：取较晚者，保留其它供应商由 dashboard 汇总的语义。
+  if (openAiNextAllowedAt && withOpenAi.refresh) {
+    const current = withOpenAi.refresh.nextAllowedAt;
+    if (!current || openAiNextAllowedAt > current) {
+      withOpenAi.refresh.nextAllowedAt = openAiNextAllowedAt;
+    }
+  }
+  return successResponse(withOpenAi, privateCacheHeaders());
+}
+
+async function handleOpenAiRefresh(
+  request: Request,
+  env: WorkerEnv,
+  body: RefreshRequest,
+  resolved: ResolvedIdentity,
+): Promise<Response> {
+  if (!env.OPENAI_API_OWNER_USER_ID) {
+    return errorResponse(403, "forbidden", "OpenAI API is not available");
+  }
+  const hasBearer = Boolean(request.headers.get("authorization"));
+  if (!hasBearer) {
+    return errorResponse(401, "unauthorized", "Supabase login is required");
+  }
+  if (!isOpenAiOwner(resolved, env)) {
+    return errorResponse(403, "forbidden", "OpenAI API is restricted to the owner");
+  }
+
+  const now = new Date();
+  const loaded = await loadOpenAiData(env, resolved, true, body.persist !== false, now);
+  if (!loaded) {
+    return errorResponse(403, "forbidden", "OpenAI API is restricted to the owner");
+  }
+
+  const card = buildOpenAiApiCard(loaded.data, now);
+  const dashboard: UsageDashboard = {
+    kind: "usage_dashboard",
+    generatedAt: now.toISOString(),
+    status: card.status,
+    summary: card.summary,
+    cards: [card],
+    modelSpends: [],
+    totals: {
+      providers: 1,
+      ready: card.status === "ready" ? 1 : 0,
+      partial: card.status === "partial" ? 1 : 0,
+      loginRequired: 0,
+      error: card.status === "error" ? 1 : 0,
+    },
+    refresh: {
+      scope: "single",
+      providerId: "openai-api",
+      refreshed: loaded.refreshed,
+      ...(loaded.nextAllowedAt ? { nextAllowedAt: loaded.nextAllowedAt } : {}),
+    },
+  };
+  return successResponse(dashboard, privateCacheHeaders());
 }
 
 async function handleRefresh(request: Request, env: WorkerEnv): Promise<Response> {
@@ -826,7 +1068,12 @@ async function handleRefresh(request: Request, env: WorkerEnv): Promise<Response
   const { userId } = resolved;
 
   if (!body.providerId) {
-    return handleDashboardRefresh(request, env, userId, body);
+    return handleDashboardRefresh(request, env, userId, body, resolved);
+  }
+
+  // OpenAI API 专用入口：独立于通用 provider registry，鉴权与节流专用。
+  if (body.providerId === "openai-api") {
+    return handleOpenAiRefresh(request, env, body, resolved);
   }
 
   if (!isProviderId(body.providerId)) {
@@ -839,6 +1086,10 @@ async function handleRefresh(request: Request, env: WorkerEnv): Promise<Response
   }
 
   const sessionKey = body.sessionKey ?? createSessionKey(body.providerId, body.accountId);
+  // 通用刷新入口绝不能用客户端参数命中 OpenAI 专用内部实例。
+  if (isOpenAiInternalPath(sessionKey) || sessionKey === OPENAI_INTERNAL_SESSION_KEY) {
+    return errorResponse(404, "provider_not_found", "Unknown provider");
+  }
   const sessionId = env.REFRESH_SESSION.idFromName(sessionKey);
   const sessionStub = env.REFRESH_SESSION.get(sessionId);
   const decisionResponse = await sessionStub.fetch(
@@ -918,15 +1169,25 @@ async function handleRefresh(request: Request, env: WorkerEnv): Promise<Response
 }
 
 async function handleSession(request: Request, env: WorkerEnv, sessionKey: string): Promise<Response> {
-  const sessionId = env.REFRESH_SESSION.idFromName(sessionKey);
-  const sessionStub = env.REFRESH_SESSION.get(sessionId);
+  if (isOpenAiInternalPath(sessionKey) || sessionKey === OPENAI_INTERNAL_SESSION_KEY) {
+    return errorResponse(404, "not_found", "Unknown API route");
+  }
   const path = new URL(request.url).pathname.replace(`/api/session/${sessionKey}`, "");
   const targetPath = path === "" ? "/state" : path;
+  // 公开入口只允许固定方法与路径组合；内部 OpenAI 路径（含编码/别名）一律拒绝。
+  const publicAllowed =
+    (request.method === "GET" && (targetPath === "/state" || targetPath === "")) ||
+    (request.method === "POST" && (targetPath === "/touch" || targetPath === "/decide"));
+  if (!publicAllowed || isOpenAiInternalPath(targetPath)) {
+    return errorResponse(404, "not_found", "Unknown API route");
+  }
+  const sessionId = env.REFRESH_SESSION.idFromName(sessionKey);
+  const sessionStub = env.REFRESH_SESSION.get(sessionId);
   const response = await sessionStub.fetch(
     new Request(`https://refresh-session.local${targetPath}?sessionKey=${encodeURIComponent(sessionKey)}`, {
       method: request.method,
       headers: request.headers,
-      body: request.method === "GET" || request.method === "HEAD" ? undefined : await request.clone().text(),
+      body: request.method === "GET" ? undefined : await request.clone().text(),
     }),
   );
   return response;

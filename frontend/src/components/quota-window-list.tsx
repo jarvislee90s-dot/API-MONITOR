@@ -2,6 +2,9 @@ import type { QuotaWindow } from "../api/client";
 
 interface QuotaWindowListProps {
   windows: QuotaWindow[];
+  // 可选显示覆盖：OpenAI 组织卡用 USD 文案，旧卡沿用默认实现
+  valueFormatter?: (window: QuotaWindow) => string;
+  limitFormatter?: (window: QuotaWindow) => string;
 }
 
 function formatValue(value: number): string {
@@ -26,7 +29,11 @@ function getRatio(window: QuotaWindow): number {
   return 0;
 }
 
-export function QuotaWindowList({ windows }: QuotaWindowListProps) {
+export function QuotaWindowList({
+  windows,
+  valueFormatter,
+  limitFormatter,
+}: QuotaWindowListProps) {
   if (windows.length === 0) {
     return <div className="quota-empty">暂无额度窗口，等待云端同步后显示。</div>;
   }
@@ -56,9 +63,12 @@ export function QuotaWindowList({ windows }: QuotaWindowListProps) {
                 <p className="quota-row__scope">{window.scope}</p>
               </div>
               <p className="quota-row__value">
-                <strong>{formatValue(window.used)}</strong>
+                <strong>{valueFormatter ? valueFormatter(window) : formatValue(window.used)}</strong>
                 {hasLimit ? (
-                  <span> / {formatWan(window.limit)}</span>
+                  <span>
+                    {" "}
+                    / {limitFormatter ? limitFormatter(window) : formatWan(window.limit)}
+                  </span>
                 ) : hasPercent ? (
                   <span> / {Math.round(window.percentUsed! * 10) / 10}%</span>
                 ) : null}

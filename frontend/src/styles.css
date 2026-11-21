@@ -222,7 +222,7 @@ button { border: 0; }
 
 /* 进度条 */
 .progress { height: 6px; border-radius: 999px; background: var(--surface-soft); overflow: hidden; }
-.progress__bar { height: 100%; border-radius: 999px; transition: width 0.4s ease; }
+.progress__bar { display: block; height: 100%; border-radius: 999px; transition: width 0.4s ease; }
 .progress__bar--healthy { background: var(--success); }
 .progress__bar--warning { background: var(--warning); }
 .progress__bar--partial { background: var(--warning); }
@@ -377,6 +377,57 @@ input:focus, textarea:focus, select:focus { outline: none; border-color: var(--a
 /* Recharts 文本覆盖 */
 .recharts-cartesian-axis-tick text { fill: var(--muted); font-size: 11px; }
 .recharts-tooltip-wrapper { outline: none; }
+
+/* DEV 预览状态切换条 */
+.preview-switcher {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 16px;
+}
+
+/* OpenAI 组织卡两区：额度与文本用量共享卡片外壳，各自独立状态 */
+.openai-api-sections { display: grid; gap: 14px; }
+.openai-section {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: var(--surface-soft);
+  min-width: 0;
+}
+.openai-section__foot {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.openai-section__status--unavailable { color: var(--muted); }
+.openai-section__status--stale { color: var(--warning); }
+.openai-section__captured { font-family: "JetBrains Mono", monospace; }
+.openai-section__period {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.openai-section__overbudget {
+  margin: 0;
+  font-size: 12px;
+  color: var(--warning);
+}
+/* 仅 OpenAI sections 的窄屏规则：模型表标题与提示上下堆叠，保留全部文案 */
+@media (max-width: 520px) {
+  .openai-section .table-panel__head {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+}
 
 /* 响应式 */
 @media (max-width: 1320px) {

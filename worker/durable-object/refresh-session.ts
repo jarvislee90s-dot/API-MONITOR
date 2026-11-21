@@ -11,6 +11,18 @@ import { errorResponse, jsonResponse, readJsonBody, toIsoString } from "../http"
 
 type SessionRecord = RefreshSessionState;
 
+// OpenAI API 专用预约状态：专用内部实例持久化，客户端参数不参与寻址与决策。
+type OpenAiReservation = {
+  periodStart: string;
+  periodEnd: string;
+  lastAllowedAt: string;
+  reservationCount: number;
+};
+
+// 内部专用路由前缀：公开 /api/session/ 白名单永不转发到这些路径。
+export const OPENAI_INTERNAL_SESSION_KEY = "__internal_openai_api_usage__";
+export const OPENAI_INTERNAL_DECIDE_PATH = "/__internal_openai_api/decide";
+
 function parseDuration(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
   const parsed = Number(value);
@@ -51,6 +63,41 @@ export class RefreshSessionDurableObject {
 
   private async writeSession(session: SessionRecord): Promise<void> {
     await this.state.storage.put("session", session);
+  }
+
+  private getOpenAiCooldownMs(): number {
+    return parseDuration(this.env.REFRESH_COOLDOWN_MS, 2 * 60 * 1000);
+  }
+
+  // 原子读判写：同周期内共享冷却，跨周期（含新周期首秒）立即放行。
+  private async decideOpenAiReservation(
+    periodStart: string,
+    periodEnd: string,
+    now: Date,
+  ): Promise<{ allowed: boolean; nextAllowedAt: string | null }> {
+    const stored = await this.state.storage.get<OpenAiReservation>("openai-reservation");
+    const nowMs = now.getTime();
+
+    // 拒绝迟到旧周期请求覆写当前周期预约状态。
+    if (stored && stored.periodStart > periodStart) {
+      return { allowed: false, nextAllowedAt: null };
+    }
+    if (stored && stored.periodStart === periodStart) {
+      const lastMs = Date.parse(stored.lastAllowedAt);
+      if (Number.isFinite(lastMs) && nowMs - lastMs < this.getOpenAiCooldownMs()) {
+        return {
+          allowed: false,
+          nextAllowedAt: toIsoString(new Date(lastMs + this.getOpenAiCooldownMs())),
+        };
+      }
+    }
+    await this.state.storage.put("openai-reservation", {
+      periodStart,
+      periodEnd,
+      lastAllowedAt: toIsoString(now),
+      reservationCount: (stored?.reservationCount ?? 0) + 1,
+    } satisfies OpenAiReservation);
+    return { allowed: true, nextAllowedAt: null };
   }
 
   private getCooldownMs(): number {
@@ -122,6 +169,17 @@ export class RefreshSessionDurableObject {
       await this.writeSession(touched);
       const result: RefreshTouchResult = { session: touched };
       return jsonResponse({ ok: true, data: result });
+    }
+
+    if (request.method === "POST" && url.pathname === OPENAI_INTERNAL_DECIDE_PATH) {
+      const body = (await readJsonBody<{ periodStart?: string; periodEnd?: string }>(request).catch(
+        () => ({}),
+      )) as { periodStart?: string; periodEnd?: string };
+      if (!body.periodStart || !body.periodEnd) {
+        return errorResponse(400, "invalid_request", "periodStart and periodEnd are required");
+      }
+      const decision = await this.decideOpenAiReservation(body.periodStart, body.periodEnd, now);
+      return jsonResponse({ ok: true, data: decision });
     }
 
     if (request.method === "POST" && url.pathname === "/decide") {

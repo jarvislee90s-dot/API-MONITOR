@@ -8,7 +8,8 @@ export type ProviderId =
   | "deepseek"
   | "zhipu"
   | "ollama"
-  | "chatgpt";
+  | "chatgpt"
+  | "openai-api";
 
 export type ProviderStatus = "ready" | "partial" | "login_required" | "disabled" | "error";
 
@@ -236,6 +237,9 @@ export interface WorkerEnv extends RefreshSessionEnv {
   CHATGPT_REFRESH_TOKEN?: string;
   CHATGPT_ACCOUNT_ID?: string;
   CHATGPT_SESSION_TOKEN?: string;
+  // OpenAI API 组织用量：仅 Owner UID 与 Admin Key 可解锁该卡
+  OPENAI_API_OWNER_USER_ID?: string;
+  OPENAI_ADMIN_API_KEY?: string;
   REFRESH_SESSION: DurableObjectNamespaceLike;
 }
 
