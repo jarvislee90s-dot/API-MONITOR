@@ -11,7 +11,7 @@
 
 const CORS_HEADERS: Record<string, string> = {
   "access-control-allow-origin": "*",
-  "access-control-allow-headers": "content-type, x-proxy-key",
+  "access-control-allow-headers": "content-type, x-proxy-key, x-opencode-activity",
   "access-control-allow-methods": "GET, OPTIONS",
 };
 
@@ -52,27 +52,46 @@ Deno.serve(async (request: Request): Promise<Response> => {
     return jsonResponse({ error: "missing_config" }, 500);
   }
 
+  const origin = "https://opencode.ai";
+  const consoleUrl = `${origin}/console/${encodeURIComponent(workspaceId)}`;
+  const headers = {
+    ...BROWSER_HEADERS,
+    "x-org-id": workspaceId,
+    cookie: `__Host-console_session=${sessionCookie}`,
+    origin,
+  };
   try {
-    const upstream = await fetch("https://opencode.ai/console/api/go/status", {
-      headers: {
-        ...BROWSER_HEADERS,
-        "x-org-id": workspaceId,
-        cookie: `__Host-console_session=${sessionCookie}`,
-        origin: "https://opencode.ai",
-        referer: `https://opencode.ai/console/${workspaceId}/go`,
-      },
+    const upstream = await fetch(`${origin}/console/api/go/status`, {
+      headers: { ...headers, referer: `${consoleUrl}/go` },
+      redirect: "manual",
       signal: AbortSignal.timeout(20_000),
     });
-
     const body = await upstream.text();
-    return new Response(body, {
-      status: upstream.status,
-      headers: {
-        ...CORS_HEADERS,
-        "content-type": upstream.headers.get("content-type") ?? "application/json",
-      },
-    });
-  } catch (error) {
-    return jsonResponse({ error: "upstream_failed", message: String(error) }, 502);
+    // 旧 Worker 继续读取原始用量响应，两个服务可以分开发布。
+    if (upstream.status !== 200 || request.headers.get("x-opencode-activity") !== "1") {
+      return new Response(upstream.body === null ? null : body, {
+        status: upstream.status,
+        headers: {
+          ...CORS_HEADERS,
+          "content-type": upstream.headers.get("content-type") ?? "application/json",
+        },
+      });
+    }
+
+    const status: unknown = JSON.parse(body);
+    let activity: unknown = null;
+    try {
+      const response = await fetch(`${origin}/console/api/activity/go`, {
+        headers: { ...headers, referer: `${consoleUrl}/activity` },
+        redirect: "manual",
+        signal: AbortSignal.timeout(8_000),
+      });
+      if (response.status === 200) activity = await response.json();
+    } catch {
+      // Activity 失败时继续提供额度窗口。
+    }
+    return jsonResponse({ status, activity });
+  } catch {
+    return jsonResponse({ error: "upstream_failed" }, 502);
   }
 });

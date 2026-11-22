@@ -133,6 +133,9 @@ export interface PlatformAccountSnapshot {
   quotaWindows: QuotaWindow[];
   trend: TrendPoint[];
   links: RawLinkItem[];
+  // 账户级汇总与模型数据：必须来自该账户自己的 metrics，不能回填平台首账号
+  detailMetrics?: DetailMetric[];
+  modelSpends?: ModelSpendRow[];
 }
 
 export interface DashboardSnapshot {
@@ -566,12 +569,103 @@ function formatBillingPeriod(periodStart: string): string {
   return `${fmt(start)} - ${fmt(end)}`;
 }
 
+// OpenCode Go 本期 Activity 过期判断：优先用订阅精确结束时间 metrics.endsAt，
+// 旧快照缺 endsAt 时退回额度月窗 resetAt。找不到可靠时间时不做判断（仍展示）。
+function isOpenCodeActivityExpired(
+  metrics: Record<string, unknown>,
+  windows: ServerProviderWindow[],
+  now: number,
+): boolean {
+  const endsAt = parseTimestampOrNull(metrics.endsAt);
+  if (endsAt) return new Date(endsAt).getTime() <= now;
+
+  return windows.some((window) => {
+    if (window.key !== "monthly" || typeof window.resetAt !== "string" || !window.resetAt) return false;
+    const resetAt = new Date(window.resetAt).getTime();
+    return !Number.isNaN(resetAt) && resetAt <= now;
+  });
+}
+
+// metrics.topModels 是后端写入且已按请求数降序的 JSON 字符串 [{ model, requests, share }]。
+// 严格分母契约：totalRequests > 0 且数组整体合法才映射；share 一律按 requests/totalRequests
+// 计算，不采信行内 share；任一行非法或 requests 超过总量时整表为空。
+function parseOpenCodeTopModels(raw: unknown, totalRequests: number | null): ModelSpendRow[] {
+  if (totalRequests === null || totalRequests <= 0 || typeof raw !== "string") return [];
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+
+  const rows: ModelSpendRow[] = [];
+  for (const item of parsed) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const row = item as Record<string, unknown>;
+    const model = typeof row.model === "string" ? row.model.trim() : "";
+    const requests = parseNonNegativeInt(row.requests);
+    if (!model || requests === null || requests > totalRequests) return [];
+    rows.push({
+      model,
+      requests,
+      tokens: 0,
+      spendUsd: 0,
+      share: requests / totalRequests,
+    });
+  }
+
+  // Worker 已排序，这里只截断，不做二次排序
+  return rows.slice(0, 5);
+}
+
+// OpenCode Activity 视图：账户级调用时必须传该账户自己的 metrics/windows，
+// 不能借用平台首账号的数据。
+function buildOpenCodeActivity(
+  metrics: Record<string, unknown>,
+  windows: ServerProviderWindow[],
+  now: number,
+): { detailMetrics: DetailMetric[]; modelSpends: ModelSpendRow[] } {
+  if (isOpenCodeActivityExpired(metrics, windows, now)) {
+    return { detailMetrics: [], modelSpends: [] };
+  }
+
+  const items: DetailMetric[] = [];
+  const totalRequests = typeof metrics.totalRequests === "number" && Number.isFinite(metrics.totalRequests)
+    ? metrics.totalRequests
+    : null;
+  const totalTokens = typeof metrics.totalTokens === "number" && Number.isFinite(metrics.totalTokens)
+    ? metrics.totalTokens
+    : null;
+  if (totalRequests !== null) {
+    items.push({ label: "总请求数", value: new Intl.NumberFormat("zh-CN").format(totalRequests) });
+  }
+  if (totalTokens !== null) {
+    items.push({ label: "总 Token", value: formatTokenCount(totalTokens) });
+  }
+  // 活动起点可选：只用于补充说明汇总所属周期，不参与配额
+  const activityStartsAt = parseTimestampOrNull(metrics.activityStartsAt);
+  if (activityStartsAt && (totalRequests !== null || totalTokens !== null)) {
+    items.push({ label: "本期起点", value: formatResetAt(activityStartsAt) });
+  }
+
+  return {
+    detailMetrics: items,
+    modelSpends: parseOpenCodeTopModels(metrics.topModels, totalRequests),
+  };
+}
+
 // 智谱卡 3×3 九宫格指标：
 // 第1行 [5小时窗口(已用/额度), 登录状态, 最近同步]
 // 第2行 [7天 Cache 命中率, 7天积分消耗, 7天 Tokens]
 // 第3行 [30天 Cache 命中率, 30天积分总数, 30天 Tokens]
 // Ollama 模型请求数列表（由 metrics.weeklyModels JSON 推导，按请求数降序）
-function resolveModelSpends(providerId: string, metrics: Record<string, unknown>): ModelSpendRow[] {
+function resolveModelSpends(providerId: string, metrics: Record<string, unknown>, windows: ServerProviderWindow[]): ModelSpendRow[] {
+  if (providerId === "opencode-go") {
+    // 请求数占比口径：分母为同账号同周期总请求数，模型行在 Worker 端已排序
+    return buildOpenCodeActivity(metrics, windows, Date.now()).modelSpends;
+  }
   if (providerId === "commandcode") {
     const raw = typeof metrics.topModels === "string" ? metrics.topModels : "[]";
     let rows: Array<{ model: string; requests: number; tokens: number; share: number }> = [];
@@ -635,6 +729,11 @@ function buildDetailMetrics(
     push("5小时请求数", requests5h, (n) => new Intl.NumberFormat("zh-CN").format(n));
     push("本周请求数", metrics.weeklyRequestCount, (n) => new Intl.NumberFormat("zh-CN").format(n));
     push("5小时预计总请求", estimated5h, (n) => new Intl.NumberFormat("zh-CN").format(n));
+    return items;
+  }
+  if (providerId === "opencode-go") {
+    // OpenCode 模型接口只提供请求数：汇总展示总请求数/总 Token，模型表由 Activity 映射
+    items.push(...buildOpenCodeActivity(metrics, card.windows, Date.now()).detailMetrics);
     return items;
   }
   if (providerId === "commandcode") {
@@ -905,6 +1004,10 @@ function mapServerDashboard(server: ServerUsageDashboard): DashboardSnapshot {
       const accountWindows = account.windows.map((window) => toQuotaWindow(card.providerId, accountStatus, window));
       const isFallback = account.meta?.isFallback === true;
       const liveStatus = typeof account.meta?.liveStatus === "string" ? account.meta.liveStatus : null;
+      // OpenCode 的汇总与模型必须来自该账户自己的 metrics，不能回填平台首账号
+      const activity = card.providerId === "opencode-go"
+        ? buildOpenCodeActivity(account.metrics, account.windows, Date.now())
+        : null;
       return {
         id: account.accountId,
         label: account.accountLabel,
@@ -924,6 +1027,9 @@ function mapServerDashboard(server: ServerUsageDashboard): DashboardSnapshot {
             ? account.trend.map(toTrendPoint)
             : accountWindows.map(toTrendPointFromQuotaWindow),
         links: toLinks(card.providerId, account.sourceUrl),
+        ...(activity
+          ? { detailMetrics: activity.detailMetrics, modelSpends: activity.modelSpends }
+          : {}),
       };
     });
 
@@ -962,7 +1068,7 @@ function mapServerDashboard(server: ServerUsageDashboard): DashboardSnapshot {
         card.capturedAt,
       ),
       trend,
-      modelSpends: isOpenAi ? [] : resolveModelSpends(card.providerId, card.metrics),
+      modelSpends: isOpenAi ? [] : resolveModelSpends(card.providerId, card.metrics, card.windows),
       links: toLinks(card.providerId, sourceUrl),
       selectedAccountId: card.selectedAccountId ?? accounts[0]?.id ?? null,
       accounts,

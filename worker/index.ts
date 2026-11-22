@@ -151,22 +151,61 @@ function buildProviderConfig(env: WorkerEnv, providerId: string): Record<string,
   };
 }
 
+// OpenCode cookie 归一化：只比较会话值本身，避免裸值/完整 header 写法差异造成误判
+function normalizeOpenCodeCookieValue(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim().replace(/^cookie:\s*/i, "");
+  if (!trimmed) return null;
+  const parts = trimmed.split(";").map((part) => part.trim()).filter((part) => part.length > 0);
+  const sessionPart = parts.find((part) => part.startsWith("__Host-console_session="));
+  if (sessionPart) return sessionPart.slice("__Host-console_session=".length);
+  return trimmed;
+}
+
+function openCodeAccountConfig(
+  fallback: Record<string, unknown>,
+  account: Record<string, unknown> | null,
+): Record<string, unknown> {
+  const sourceWorkspace = typeof account?.sourceUrl === "string"
+    ? /^https:\/\/opencode\.ai\/console\/((?:wrk|org)_[a-z0-9_-]+)\/go\/?$/i.exec(account.sourceUrl)?.[1]
+    : undefined;
+  const workspaceId = (typeof account?.workspaceId === "string" ? account.workspaceId.trim() : "") || sourceWorkspace;
+  const sessionCookie = [account?.sessionCookie, account?.authCookie]
+    .find((value): value is string => typeof value === "string" && Boolean(value.trim()));
+  const apiKey = typeof account?.apiKey === "string" ? account.apiKey.trim() : undefined;
+  const accountCookie = normalizeOpenCodeCookieValue(sessionCookie);
+  // 全局代理固定为一个登录会话。只有工作区和会话均匹配的账号可以使用它。
+  const usesGlobalEdge = Boolean(
+    workspaceId && workspaceId === fallback.workspaceId &&
+    accountCookie && accountCookie === normalizeOpenCodeCookieValue(fallback.sessionCookie) &&
+    (!apiKey || apiKey === fallback.apiKey),
+  );
+  return {
+    workspaceId,
+    sessionCookie,
+    apiKey,
+    baseUrl: fallback.baseUrl,
+    ...(usesGlobalEdge ? { edgeProxyUrl: fallback.edgeProxyUrl, edgeProxyKey: fallback.edgeProxyKey } : {}),
+  };
+}
+
 function mergeProviderConfig(
   env: WorkerEnv,
   providerId: string,
   providerConfig: Record<string, unknown> | null,
+  hasAccount = providerConfig !== null,
 ): Record<string, unknown> {
   const fallbackConfig = buildProviderConfig(env, providerId);
+  if (providerId === "opencode-go" && hasAccount) {
+    return openCodeAccountConfig(fallbackConfig, providerConfig);
+  }
   if (!providerConfig) return fallbackConfig;
 
   const nonEmptyProviderConfig = Object.fromEntries(
     Object.entries(providerConfig).filter(([, value]) => value !== undefined && value !== null && value !== ""),
   );
 
-  return {
-    ...fallbackConfig,
-    ...nonEmptyProviderConfig,
-  };
+  return { ...fallbackConfig, ...nonEmptyProviderConfig };
 }
 
 type ProviderRuntimeConfig = {
@@ -174,6 +213,7 @@ type ProviderRuntimeConfig = {
   config: Record<string, unknown>;
   accountId?: string;
   accountLabel?: string;
+  ingestAccountLabel?: string;
 };
 
 function createPreferencesFromAccounts(settings: {
@@ -229,9 +269,14 @@ async function buildProviderConfigs(
           const accountConfig = await getProviderAccountConfigById(env, userId, account.id, fetchImpl);
           configs.push({
             providerId: preference.providerKey,
-            config: mergeProviderConfig(env, preference.providerKey, accountConfig?.config ?? null),
+            config: mergeProviderConfig(env, preference.providerKey, accountConfig?.config ?? null, true),
             accountId: account.id,
             accountLabel: account.accountLabel,
+            ...(preference.providerKey === "opencode-go" &&
+              accountConfig?.config.fetchMethod === "local_ingest" &&
+              typeof accountConfig.config.accountLabel === "string"
+              ? { ingestAccountLabel: accountConfig.config.accountLabel }
+              : {}),
           });
         }
         continue;
@@ -302,7 +347,7 @@ async function fetchProviderSnapshot(
   env: WorkerEnv,
   providerId: string,
   configOverride?: Record<string, unknown>,
-  account?: { accountId?: string; accountLabel?: string },
+  account?: Pick<ProviderRuntimeConfig, "accountId" | "accountLabel" | "ingestAccountLabel">,
   userId?: string | null,
 ): Promise<ProviderSnapshot> {
   const provider = getProvider(providerId);
@@ -375,6 +420,7 @@ async function fetchProviderSnapshot(
         ...result.snapshot.meta,
         accountId: account.accountId,
         accountLabel: account.accountLabel ?? "默认账号",
+        ...(account.ingestAccountLabel ? { ingestAccountLabel: account.ingestAccountLabel } : {}),
       },
     };
   } catch (error) {
@@ -389,6 +435,7 @@ async function fetchProviderSnapshot(
         ...snapshot.meta,
         accountId: account.accountId,
         accountLabel: account.accountLabel ?? "默认账号",
+        ...(account.ingestAccountLabel ? { ingestAccountLabel: account.ingestAccountLabel } : {}),
       },
     };
   }
@@ -517,7 +564,8 @@ async function applyLatestReadyFallback(
   return snapshots.map((snapshot) => {
     // 与 fetchLatestReadySnapshots 的 key 口径一致,有 accountId 按账号,否则按 source_url
     const accountId = typeof snapshot.meta?.accountId === "string" ? snapshot.meta.accountId : null;
-    const fallback = fallbacks.get(accountId ?? "") ?? fallbacks.get(snapshot.sourceUrl);
+    const accountFallback = accountId ? fallbacks.get(accountId) : undefined;
+    const fallback = accountFallback ?? fallbacks.get(snapshot.sourceUrl);
     if (!fallback) return snapshot;
     if (snapshot.status === "ready" && snapshot.windows.length > 0) return snapshot;
     // 桶级补齐后的 chatgpt partial 快照（带 staleWindowKeys 标记）豁免整卡回退：
@@ -525,8 +573,19 @@ async function applyLatestReadyFallback(
     if (Array.isArray(snapshot.meta?.staleWindowKeys) && snapshot.meta.staleWindowKeys.length > 0) {
       return snapshot;
     }
+    const metrics = { ...fallback.metrics };
+    if (snapshot.providerId === "opencode-go" && !accountFallback) {
+      // 旧的本机快照只有来源地址。保留额度回退，并以同来源下唯一匹配的账号名绑定 Activity。
+      const label = snapshot.meta.ingestAccountLabel ?? snapshot.meta.accountLabel;
+      const sameAccount = typeof label === "string" && label === fallback.meta.accountLabel &&
+        snapshots.filter((item) => item.providerId === "opencode-go" && item.sourceUrl === snapshot.sourceUrl).length === 1;
+      if (!sameAccount) {
+        for (const key of ["totalRequests", "totalTokens", "topModels", "activityStartsAt"]) delete metrics[key];
+      }
+    }
     return {
       ...fallback,
+      metrics,
       summary: withFallbackSummary(fallback.summary),
       meta: {
         ...fallback.meta,

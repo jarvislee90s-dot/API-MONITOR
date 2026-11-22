@@ -1,7 +1,14 @@
 import { parseHeadersCookie, toIsoString } from "../http";
 import type { ProviderDefinition, ProviderFetchInput, ProviderFetchResult, ProviderSnapshot } from "../types";
 import { createResult } from "./types";
-import { parseOpenCodeGoStatus, type OpenCodeGoStatusPayload } from "./opencode-go-parser";
+import {
+  parseOpenCodeGoActivity,
+  parseOpenCodeGoStatus,
+  resolveOpenCodeGoActivity,
+  toOpenCodeGoActivityMetrics,
+  type OpenCodeGoActivityPayload,
+  type OpenCodeGoStatusPayload,
+} from "./opencode-go-parser";
 
 type OpenCodeGoConfig = {
   workspaceId?: string;
@@ -30,6 +37,13 @@ function getDashboardUrl(config: OpenCodeGoConfig): string {
   return `${origin}/console/${encodeURIComponent(config.workspaceId)}/go`;
 }
 
+// Activity 页面与 Go 页面同层：/console/<workspaceId>/activity（不是 /go/activity）
+function getActivityPageUrl(config: OpenCodeGoConfig): string {
+  const origin = getOrigin(config);
+  if (!config.workspaceId) return `${origin}/console/activity`;
+  return `${origin}/console/${encodeURIComponent(config.workspaceId)}/activity`;
+}
+
 // 归一化 cookie：兼容三种输入——完整 cookie 串、单条 `name=value`、裸值
 function normalizeSessionCookie(rawCookie: string | undefined): string | undefined {
   const trimmed = parseHeadersCookie(rawCookie);
@@ -55,48 +69,79 @@ async function requestText(
   url: string,
   headers: Record<string, string>,
   fetchImpl: typeof fetch,
+  timeoutMs?: number,
 ): Promise<{ status: number; text: string }> {
-  const response = await fetchImpl(url, { headers, redirect: "manual" });
+  // 始终禁止跟随重定向：带 cookie/Bearer 的请求不能被带到其它域名
+  const init: RequestInit = { headers, redirect: "manual" };
+  if (timeoutMs && timeoutMs > 0) init.signal = AbortSignal.timeout(timeoutMs);
+  const response = await fetchImpl(url, init);
   return { status: response.status, text: await response.text() };
 }
 
+function parseJson<T>(text: string): T | null {
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return null;
+  }
+}
+
+// 组装最终快照：额度窗口来自 status，Activity 先做周期对账再并入 metrics。
+// Activity 的任何失败都只降级为 warning，绝不影响额度展示与 ready 状态。
 function resultFromPayload(
   base: SnapshotBase,
   payload: OpenCodeGoStatusPayload,
   httpStatus: number,
   fetchMethod: FetchMethod,
+  activityPayload: OpenCodeGoActivityPayload | null = null,
 ): ProviderFetchResult {
   const windows = parseOpenCodeGoStatus(payload);
+  const parsedActivity = parseOpenCodeGoActivity(activityPayload);
+  const resolution = resolveOpenCodeGoActivity(payload, parsedActivity);
+  const activityMetrics = toOpenCodeGoActivityMetrics(resolution.activity);
+  const warnings: string[] = [];
+  if (resolution.warning) warnings.push(resolution.warning);
+
+  const baseMetrics: ProviderSnapshot["metrics"] = {
+    httpStatus,
+    product: payload.product ?? null,
+    endsAt: payload.access?.endsAt ?? null,
+    ...activityMetrics,
+  };
+
   if (windows.length === 0) {
-    return createResult({
-      ...base,
-      status: "partial",
-      summary: "登录成功，但未找到 Go 订阅用量窗口（可能未订阅或额度接口变更）",
-      windows: [],
-      metrics: {
-        httpStatus,
-        product: payload.product ?? null,
-        endsAt: payload.access?.endsAt ?? null,
+    return createResult(
+      {
+        ...base,
+        status: "partial",
+        summary: "登录成功，但未找到 Go 订阅用量窗口（可能未订阅或额度接口变更）",
+        windows: [],
+        metrics: baseMetrics,
+        meta: { fetchMethod },
       },
-      meta: { fetchMethod },
-    });
+      warnings,
+    );
   }
 
-  return createResult({
-    ...base,
-    status: "ready",
-    summary: "OpenCode Go 用量窗口已解析",
-    windows,
-    metrics: {
-      httpStatus,
-      product: payload.product ?? null,
-      endsAt: payload.access?.endsAt ?? null,
-      hasRolling: windows.some((window) => window.key === "rolling"),
-      hasWeekly: windows.some((window) => window.key === "weekly"),
-      hasMonthly: windows.some((window) => window.key === "monthly"),
+  return createResult(
+    {
+      ...base,
+      status: "ready",
+      summary:
+        resolution.activity === null
+          ? "OpenCode Go 用量窗口已解析"
+          : "OpenCode Go 用量窗口与本期 Activity 已解析",
+      windows,
+      metrics: {
+        ...baseMetrics,
+        hasRolling: windows.some((window) => window.key === "rolling"),
+        hasWeekly: windows.some((window) => window.key === "weekly"),
+        hasMonthly: windows.some((window) => window.key === "monthly"),
+      },
+      meta: { fetchMethod },
     },
-    meta: { fetchMethod },
-  });
+    warnings,
+  );
 }
 
 function loginRequired(base: SnapshotBase, summary: string, metrics: Record<string, number | string | boolean | null>): ProviderFetchResult {
@@ -108,6 +153,26 @@ function loginRequired(base: SnapshotBase, summary: string, metrics: Record<stri
     metrics,
     meta: { fetchMethod: "api" },
   });
+}
+
+// Edge 响应可能是新版 wrapper（{ status, activity }）或旧版裸 status JSON。
+// 只把「status 字段本身是含 access/product 的对象」视为 wrapper，避免上游 status
+// 载荷里恰好带 status 字段时被误判；其余带 access/product 的顶层对象按旧版裸 status 处理。
+function unwrapEdgePayload(payload: unknown): { status: OpenCodeGoStatusPayload; activity: OpenCodeGoActivityPayload | null } | null {
+  if (!isRecord(payload)) return null;
+  const wrapperStatus = payload.status;
+  if (isRecord(wrapperStatus) && ("access" in wrapperStatus || "product" in wrapperStatus)) {
+    const activity = isRecord(payload.activity) ? (payload.activity as OpenCodeGoActivityPayload) : null;
+    return { status: wrapperStatus as OpenCodeGoStatusPayload, activity };
+  }
+  if ("access" in payload || "product" in payload) {
+    return { status: payload as OpenCodeGoStatusPayload, activity: null };
+  }
+  return null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export async function fetchOpenCodeGoSnapshot(input: ProviderFetchInput): Promise<ProviderFetchResult> {
@@ -137,21 +202,32 @@ export async function fetchOpenCodeGoSnapshot(input: ProviderFetchInput): Promis
     });
   }
 
-  // 1) 优先走 Supabase Edge Function（Cloudflare 出口被 opencode 拒绝时的唯一可用通道）
+  // 1) 优先走 Supabase Edge Function（Cloudflare 出口被 opencode 拒绝时的唯一可用通道）。
+  // x-opencode-activity: 1 让新版 Edge 一并返回 { status, activity }；旧 Edge 忽略该头，仍返回裸 status。
   let edgeFailure: { status: number; text: string } | null = null;
   let edgeError: string | null = null;
   if (hasEdgeProxy) {
     try {
       const edge = await requestText(
         edgeProxyUrl!,
-        { Accept: "application/json", "x-proxy-key": edgeProxyKey! },
+        { Accept: "application/json", "x-proxy-key": edgeProxyKey!, "x-opencode-activity": "1" },
         fetchImpl,
       );
       if (edge.status === 200) {
-        try {
-          const payload = JSON.parse(edge.text) as OpenCodeGoStatusPayload;
-          return resultFromPayload(base, payload, edge.status, "edge_function");
-        } catch {
+        const edgePayload = parseJson<unknown>(edge.text);
+        if (edgePayload !== null) {
+          const bundle = unwrapEdgePayload(edgePayload);
+          if (bundle) {
+            return resultFromPayload(
+              base,
+              bundle.status,
+              edge.status,
+              "edge_function",
+              bundle.activity,
+            );
+          }
+          edgeError = "Edge Function 返回结构无法识别";
+        } else {
           edgeError = "Edge Function 返回非 JSON";
         }
       } else {
@@ -184,11 +260,26 @@ export async function fetchOpenCodeGoSnapshot(input: ProviderFetchInput): Promis
     try {
       const direct = await requestText(`${getOrigin(config)}/console/api/go/status`, requestHeaders, fetchImpl);
       if (direct.status === 200) {
-        try {
-          const payload = JSON.parse(direct.text) as OpenCodeGoStatusPayload;
-          return resultFromPayload(base, payload, direct.status, "api");
-        } catch {
-          // 落到下方统一错误
+        const payload = parseJson<OpenCodeGoStatusPayload>(direct.text);
+        if (payload !== null) {
+          // Activity 是可选增强：同 headers、同 origin，失败只降级为警告，不影响额度。
+          // 独立 8s 预算，避免拖长 status 之外的总耗时；Referer 指向实际 Activity 页面。
+          let activity: OpenCodeGoActivityPayload | null = null;
+          try {
+            const activityHeaders = { ...requestHeaders, Referer: getActivityPageUrl(config) };
+            const activityResponse = await requestText(
+              `${getOrigin(config)}/console/api/activity/go`,
+              activityHeaders,
+              fetchImpl,
+              8_000,
+            );
+            if (activityResponse.status === 200) {
+              activity = parseJson<OpenCodeGoActivityPayload>(activityResponse.text);
+            }
+          } catch {
+            activity = null;
+          }
+          return resultFromPayload(base, payload, direct.status, "api", activity);
         }
       }
 

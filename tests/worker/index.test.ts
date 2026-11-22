@@ -1518,8 +1518,19 @@ describe("worker api", () => {
     }
   });
 
-  it("keeps account metadata when a homepage-enabled account fetch fails", async () => {
-    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+  it.each([
+    { scenario: "账号无凭据", hasAccountCookie: false },
+    { scenario: "账号自填代理 URL", hasAccountCookie: true },
+  ])("OpenCode Go $scenario 时仅使用账号自身凭据", async ({ hasAccountCookie }) => {
+    const encryptionKey = "0123456789abcdef0123456789abcdef";
+    const globalEdgeUrl = "https://global-proxy.test/opencode";
+    const accountEdgeUrl = "https://account-proxy.test/opencode";
+    const accountCookie = "mock-account-session";
+    const encrypted = hasAccountCookie
+      ? await encryptCredentialPayload({ sessionCookie: accountCookie }, encryptionKey)
+      : null;
+    const upstreamCalls: Array<{ url: string; headers: Headers }> = [];
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
 
       if (url.startsWith("https://supabase.test/rest/v1/provider_preferences")) {
@@ -1539,24 +1550,27 @@ describe("worker api", () => {
           source_url: "https://opencode.ai/console/wrk_broken/go",
           status: "ready",
           credential_hint: { workspaceId: "wrk_broken" },
+          config: hasAccountCookie ? { edgeProxyUrl: accountEdgeUrl } : {},
           homepage_enabled: true,
           homepage_order: 1,
         }]);
       }
 
       if (url.startsWith("https://supabase.test/rest/v1/provider_account_credentials")) {
-        return Response.json([]);
+        return Response.json(encrypted ? [{
+          provider_account_id: "account-broken",
+          encrypted_payload: encrypted.encryptedPayload,
+          nonce: encrypted.nonce,
+          key_version: encrypted.keyVersion,
+        }] : []);
       }
 
       if (url.startsWith("https://supabase.test/rest/v1/usage_snapshots")) {
         return Response.json([]);
       }
 
-      if (url.includes("opencode.ai/workspace")) {
-        throw new Error("account fetch failed");
-      }
-
-      throw new Error(`unexpected fetch ${url}`);
+      upstreamCalls.push({ url, headers: new Headers(init?.headers) });
+      return new Response(null, { status: 401 });
     });
 
     vi.stubGlobal("fetch", fetchImpl as unknown as typeof fetch);
@@ -1566,7 +1580,10 @@ describe("worker api", () => {
         SUPABASE_URL: "https://supabase.test",
         SUPABASE_SERVICE_ROLE_KEY: "service-role-test",
         SUPABASE_USER_ID: "00000000-0000-0000-0000-000000000001",
-        CREDENTIAL_ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef",
+        CREDENTIAL_ENCRYPTION_KEY: encryptionKey,
+        OPENCODE_GO_API_KEY: "mock-global-api-key",
+        OPENCODE_GO_EDGE_PROXY_URL: globalEdgeUrl,
+        OPENCODE_PROXY_KEY: "mock-global-proxy-key",
       };
 
       const response = await handleApiRequest(new Request("https://api.monitor.local/api/usage"), env);
@@ -1579,8 +1596,17 @@ describe("worker api", () => {
       expect(openCodeCard.accounts[0]).toMatchObject({
         accountId: "account-broken",
         accountLabel: "失效账号",
-        status: "error",
+        status: "login_required",
       });
+      expect(upstreamCalls.map(({ url }) => url)).toEqual(
+        hasAccountCookie ? ["https://opencode.ai/console/api/go/status"] : [],
+      );
+      for (const { headers } of upstreamCalls) {
+        expect(headers.get("x-org-id")).toBe("wrk_broken");
+        expect(headers.get("cookie")).toBe(`__Host-console_session=${accountCookie}`);
+        expect(headers.has("authorization")).toBe(false);
+        expect(headers.has("x-proxy-key")).toBe(false);
+      }
     } finally {
       vi.unstubAllGlobals();
     }

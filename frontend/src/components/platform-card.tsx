@@ -60,10 +60,14 @@ export function PlatformCard({ platform }: PlatformCardProps) {
         quotaWindows: selectedAccount.quotaWindows,
         trend: selectedAccount.trend,
         links: selectedAccount.links,
+        // 账户级 Activity 只取该账户自己的映射，缺失时沿用平台字段（其他供应商不携带这两个字段）
+        detailMetrics: selectedAccount.detailMetrics ?? platform.detailMetrics,
+        modelSpends: selectedAccount.modelSpends ?? platform.modelSpends,
       }
     : platform;
 
   const StatusIcon = statusIcon[display.status];
+  const isOpenCodeGo = platform.id === "opencode-go";
   const cardStyle = {
     "--accent": platform.accent,
   } as CSSProperties;
@@ -146,7 +150,15 @@ export function PlatformCard({ platform }: PlatformCardProps) {
           </div>
 
           <div className="platform-card__grid platform-card__grid--footer">
-            <ModelSpendTable rows={platform.modelSpends} />
+            <ModelSpendTable
+              rows={display.modelSpends}
+              title={isOpenCodeGo ? "OpenCode 模型请求 Top 5" : undefined}
+              hint={isOpenCodeGo ? "按请求数降序，最多显示 5 个" : undefined}
+              maxRows={isOpenCodeGo ? 5 : undefined}
+              hideTokensColumn={isOpenCodeGo}
+              showLessThanOnePercent={isOpenCodeGo}
+              shareLabel={isOpenCodeGo ? "请求占比" : undefined}
+            />
           </div>
         </>
       )}

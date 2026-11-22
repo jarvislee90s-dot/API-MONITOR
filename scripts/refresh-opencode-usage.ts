@@ -24,7 +24,13 @@
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { resolve } from "node:path";
-import { parseOpenCodeGoStatus, type OpenCodeGoStatusPayload } from "../worker/providers/opencode-go-parser.ts";
+import {
+  parseOpenCodeGoActivity,
+  parseOpenCodeGoStatus,
+  resolveOpenCodeGoActivity,
+  toOpenCodeGoActivityMetrics,
+  type OpenCodeGoStatusPayload,
+} from "../worker/providers/opencode-go-parser.ts";
 
 function loadEnv(): Record<string, string> {
   const envPath = resolve(process.cwd(), ".env");
@@ -139,6 +145,7 @@ const SESSION_COOKIE_NAME = "__Host-console_session";
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const API_URL = "https://opencode.ai/console/api/go/status";
+const ACTIVITY_URL = "https://opencode.ai/console/api/activity/go";
 const LOGIN_WAIT_MS = 300_000;
 
 function dashboardUrl(workspaceId: string): string {
@@ -163,18 +170,27 @@ type StatusResult =
   | { ok: true; payload: OpenCodeGoStatusPayload }
   | { ok: false; kind: "unauthorized" | "forbidden" | "http" | "network" | "parse"; status?: number; message: string };
 
-// 调新版控制台用量接口：必须同时带 __Host-console_session cookie 与 x-org-id 头
+// 新版控制台用量接口按工作区和登录账号取数。
+function fetchGoUsage(url: string, workspaceId: string, cookieValue: string): Promise<Response> {
+  const isActivity = url === ACTIVITY_URL;
+  const goUrl = dashboardUrl(workspaceId);
+  return fetch(url, {
+    headers: {
+      accept: "application/json",
+      "x-org-id": workspaceId,
+      cookie: `${SESSION_COOKIE_NAME}=${cookieValue}`,
+      "user-agent": USER_AGENT,
+      origin: "https://opencode.ai",
+      referer: isActivity ? goUrl.replace(/\/go$/, "/activity") : goUrl,
+    },
+    redirect: "manual",
+    signal: AbortSignal.timeout(isActivity ? 8_000 : 20_000),
+  });
+}
+
 async function fetchGoStatus(workspaceId: string, cookieValue: string): Promise<StatusResult> {
   try {
-    const response = await fetch(API_URL, {
-      headers: {
-        accept: "application/json",
-        "x-org-id": workspaceId,
-        cookie: `${SESSION_COOKIE_NAME}=${cookieValue}`,
-        "user-agent": USER_AGENT,
-      },
-      signal: AbortSignal.timeout(20_000),
-    });
+    const response = await fetchGoUsage(API_URL, workspaceId, cookieValue);
     const text = await response.text();
 
     if (response.status === 401) {
@@ -212,6 +228,7 @@ async function pushSnapshot(
   account: AccountConfig,
   workspaceId: string,
   payload: OpenCodeGoStatusPayload,
+  cookie: string,
 ): Promise<boolean> {
   const now = new Date();
   const windows = parseOpenCodeGoStatus(payload);
@@ -225,6 +242,11 @@ async function pushSnapshot(
     `✅ ${account.label} 解析到 ${windows.length} 个用量窗口: ${windows.map((w) => `${w.key}=${w.used}%`).join(", ")}`,
   );
 
+  const activity = await fetchGoUsage(ACTIVITY_URL, workspaceId, cookie)
+    .then((response) => response.ok ? response.json() : null)
+    .catch(() => null);
+  const resolvedActivity = resolveOpenCodeGoActivity(payload, parseOpenCodeGoActivity(activity));
+  const activityMetrics = toOpenCodeGoActivityMetrics(resolvedActivity.activity);
   const sourceUrl = dashboardUrl(workspaceId);
   const capturedAt = now.toISOString();
   const snapshot = {
@@ -241,6 +263,7 @@ async function pushSnapshot(
       hasRolling: windows.some((w) => w.key === "rolling"),
       hasWeekly: windows.some((w) => w.key === "weekly"),
       hasMonthly: windows.some((w) => w.key === "monthly"),
+      ...activityMetrics,
     },
     // accountLabel 让 Supabase 按 source_url 区分账号，前端账号切换卡各显示一行
     meta: { fetchMethod: "local_ingest", accountLabel: account.label },
@@ -393,7 +416,7 @@ async function refreshAccount(
     const cachedResult = await fetchGoStatus(workspaceId, cachedCookie);
     if (cachedResult.ok) {
       console.log("♻️ 使用 .env 缓存的 session cookie（未启动浏览器）");
-      return (await pushSnapshot(env, account, workspaceId, cachedResult.payload)) ? "ok" : "failed";
+      return (await pushSnapshot(env, account, workspaceId, cachedResult.payload, cachedCookie)) ? "ok" : "failed";
     }
     if (cachedResult.kind === "forbidden") {
       console.warn(`⚠️ 缓存 cookie 无权访问该 workspace：${cachedResult.message}`);
@@ -417,7 +440,7 @@ async function refreshAccount(
   updateEnvKey(envPath, account.sessionCookieEnv, loggedIn.cookie);
   console.log(`💾 已把 ${account.sessionCookieEnv} 写入 .env`);
 
-  return (await pushSnapshot(env, account, workspaceId, loggedIn.result.payload)) ? "ok" : "failed";
+  return (await pushSnapshot(env, account, workspaceId, loggedIn.result.payload, loggedIn.cookie)) ? "ok" : "failed";
 }
 
 async function main(): Promise<void> {

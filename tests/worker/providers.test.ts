@@ -1,3 +1,5 @@
+// @vitest-environment node
+
 import { describe, expect, it, vi } from "vitest";
 
 import { getProvider, isProviderId, listProviders } from "../../worker/providers/registry";
@@ -164,18 +166,19 @@ describe("opencode-go adapter", () => {
   });
 
   it("sends x-org-id and Bearer auth when an API key is configured", async () => {
-    const seenHeaders: Record<string, string>[] = [];
+    const seenHeaders: Headers[] = [];
     const fetchedUrls: string[] = [];
     const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       fetchedUrls.push(String(url));
-      const headers: Record<string, string> = {};
-      new Headers(init?.headers).forEach((value, key) => { headers[key] = value; });
-      seenHeaders.push(headers);
+      seenHeaders.push(new Headers(init?.headers));
+      if (new URL(String(url)).pathname === "/console/api/activity/go") {
+        return new Response(null, { status: 503 });
+      }
       return Response.json(goStatusPayload);
     });
 
     const result = await fetchOpenCodeGoSnapshot({
-      now: new Date("2026-06-16T07:00:00.000Z"),
+      now: new Date("2026-10-25T02:00:00.000Z"),
       fetchImpl: fetchImpl as typeof fetch,
       config: {
         workspaceId: "wrk_abc",
@@ -184,13 +187,13 @@ describe("opencode-go adapter", () => {
     });
 
     expect(result.snapshot.status).toBe("ready");
-    expect(fetchedUrls).toEqual(["https://opencode.ai/console/api/go/status"]);
-    expect(seenHeaders[0]).toMatchObject({
-      "x-org-id": "wrk_abc",
-      Authorization: "Bearer sk-test-key",
-      Accept: "application/json",
-    });
-    expect(seenHeaders[0]).not.toHaveProperty("cookie");
+    expect(fetchedUrls).toContain("https://opencode.ai/console/api/go/status");
+    for (const headers of seenHeaders) {
+      expect(headers.get("x-org-id")).toBe("wrk_abc");
+      expect(headers.get("authorization")).toBe("Bearer sk-test-key");
+      expect(headers.get("accept")).toBe("application/json");
+      expect(headers.has("cookie")).toBe(false);
+    }
   });
 
   it("parses meters into rolling, weekly and monthly windows", async () => {
@@ -231,7 +234,10 @@ describe("opencode-go adapter", () => {
 
   it("normalizes session cookies (bare value / full header / explicit name)", async () => {
     const seenCookies: string[] = [];
-    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+    const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      if (new URL(String(url)).pathname === "/console/api/activity/go") {
+        return new Response(null, { status: 503 });
+      }
       seenCookies.push(new Headers(init?.headers).get("cookie") ?? "");
       return Response.json(goStatusPayload);
     });
@@ -273,17 +279,21 @@ describe("opencode-go adapter", () => {
 
     expect(result.snapshot.status).toBe("login_required");
     expect(result.snapshot.summary).toContain("session 无效或已过期");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it("uses baseUrl as the origin while keeping the console API route", async () => {
     const fetchedUrls: string[] = [];
     const fetchImpl = vi.fn(async (url: string | URL | Request) => {
       fetchedUrls.push(String(url));
+      if (new URL(String(url)).pathname === "/console/api/activity/go") {
+        return new Response(null, { status: 503 });
+      }
       return Response.json(goStatusPayload);
     });
 
     await fetchOpenCodeGoSnapshot({
-      now: new Date("2026-06-11T00:00:00.000Z"),
+      now: new Date("2026-10-25T02:00:00.000Z"),
       fetchImpl: fetchImpl as typeof fetch,
       config: {
         workspaceId: "wrk_123",
@@ -292,7 +302,10 @@ describe("opencode-go adapter", () => {
       },
     });
 
-    expect(fetchedUrls).toEqual(["https://opencode.example.com/console/api/go/status"]);
+    expect(fetchedUrls.sort()).toEqual([
+      "https://opencode.example.com/console/api/activity/go",
+      "https://opencode.example.com/console/api/go/status",
+    ]);
   });
 
   it("parses the Go status payload through the shared parser", () => {

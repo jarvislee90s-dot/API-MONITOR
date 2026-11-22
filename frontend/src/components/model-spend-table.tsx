@@ -9,6 +9,10 @@ interface ModelSpendTableProps {
   emptyText?: string;
   maxRows?: number;
   forceTokensColumn?: boolean;
+  // OpenCode 的模型接口只有请求数：显式隐藏 Token 列，避免空列占位
+  hideTokensColumn?: boolean;
+  // 非零但不足 1% 的占比显示为 <1%，而不是四舍五入成 0%
+  showLessThanOnePercent?: boolean;
   shareLabel?: string;
 }
 
@@ -32,11 +36,19 @@ export function ModelSpendTable({
   emptyText = "暂无模型请求数据。",
   maxRows = MAX_ROWS,
   forceTokensColumn = false,
+  hideTokensColumn = false,
+  showLessThanOnePercent = false,
   shareLabel = "占比",
 }: ModelSpendTableProps) {
   const visibleRows = rows.slice(0, maxRows);
-  // 有 token 数（或显式要求）时显示 Token 列；Ollama 只有请求数时保持三列
-  const hasTokens = forceTokensColumn || visibleRows.some((row) => row.tokens > 0);
+  // 有 token 数（或显式要求）时显示 Token 列；Ollama/OpenCode 只有请求数时保持三列
+  const hasTokens = !hideTokensColumn && (forceTokensColumn || visibleRows.some((row) => row.tokens > 0));
+
+  // 占比文案：OpenCode 的非零小份额显示 <1%，避免四舍五入成 0% 误导
+  const formatShare = (share: number) => {
+    if (showLessThanOnePercent && share > 0 && share < 0.01) return "<1%";
+    return `${Math.round(share * 100)}%`;
+  };
 
   if (visibleRows.length === 0) {
     return (
@@ -74,7 +86,7 @@ export function ModelSpendTable({
                 <td>{row.model}</td>
                 <td>{formatNumber(row.requests)}</td>
                 {hasTokens ? <td>{formatTokens(row.tokens)}</td> : null}
-                <td>{Math.round(row.share * 100)}%</td>
+                <td>{formatShare(row.share)}</td>
               </tr>
             ))}
           </tbody>
